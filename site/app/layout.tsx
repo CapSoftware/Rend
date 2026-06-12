@@ -23,6 +23,15 @@ export const metadata: Metadata = {
   },
   description:
     "Rend is the video platform for developers. One API call to upload, one URL that plays instantly anywhere in the world. Open source, on hardware we own.",
+  openGraph: {
+    type: "website",
+    url: "https://rend.so",
+    siteName: "Rend",
+    locale: "en_US",
+    title: "Rend, video infrastructure built for speed",
+    description:
+      "Rend is the video platform for developers. One API call to upload, one URL that plays instantly anywhere in the world. Open source, on hardware we own.",
+  },
   icons: { icon: "/rend-mark.svg" },
 };
 
