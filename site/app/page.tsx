@@ -7,18 +7,18 @@ export default function Home() {
       <Effects />
 
       <header className="mx-auto flex max-w-[1080px] items-center justify-between px-6 py-[26px]">
-        <div className="flex flex-col items-start gap-2">
+        <div className="flex flex-col items-start gap-0.5">
           <a href="#" aria-label="Rend home">
-            <img src="/rend-logo.svg" alt="Rend" className="block h-[34px] w-auto" />
+            <img src="/rend-logo.svg" alt="Rend" className="block h-[38px] w-auto" />
           </a>
           <a
             href="https://cap.so"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1 text-[11px] font-medium text-muted transition hover:text-ink"
+            className="ml-2 flex items-center gap-[5px] text-[9px] font-medium leading-none text-muted transition hover:text-ink"
           >
             A
-            <img src="/cap-logo.svg" alt="Cap" className="block h-[14px] w-auto" />
+            <img src="/cap-logo.svg" alt="Cap" className="block h-[11px] w-auto" />
             company
           </a>
         </div>
