@@ -16,7 +16,11 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Rend, video infrastructure built for speed",
+  metadataBase: new URL("https://rend.so"),
+  title: {
+    default: "Rend, video infrastructure built for speed",
+    template: "%s · Rend",
+  },
   description:
     "Rend is the video platform for developers. One API call to upload, one URL that plays instantly anywhere in the world. Open source, on hardware we own.",
   icons: { icon: "/rend-mark.svg" },
