@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_VERSION=1.93.0
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_VERSION} AS builder
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services ./services
+COPY migrations ./migrations
+
+RUN cargo build --locked --release -p rend-api -p rend-edge
+
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ffmpeg \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --system --gid 10001 rend \
+  && useradd --system --uid 10001 --gid rend --home-dir /nonexistent --shell /usr/sbin/nologin rend \
+  && mkdir -p /var/lib/rend/edge-cache /var/spool/rend/edge-telemetry \
+  && chown -R rend:rend /var/lib/rend /var/spool/rend
+
+ENV RUST_LOG=info
+ENV REND_FFMPEG_PATH=/usr/bin/ffmpeg
+ENV REND_FFPROBE_PATH=/usr/bin/ffprobe
+
+WORKDIR /app
+USER rend
+
+FROM runtime AS rend-api
+COPY --from=builder /app/target/release/rend-api /usr/local/bin/rend-api
+ENTRYPOINT ["rend-api"]
+
+FROM runtime AS rend-media-worker
+COPY --from=builder /app/target/release/rend-api /usr/local/bin/rend-api
+ENTRYPOINT ["rend-api", "worker", "media"]
+
+FROM runtime AS rend-edge
+COPY --from=builder /app/target/release/rend-edge /usr/local/bin/rend-edge
+ENTRYPOINT ["rend-edge"]
