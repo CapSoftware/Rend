@@ -352,8 +352,251 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="reveal mx-auto max-w-[560px] px-6 pb-[110px] text-center">
-          <h2 className="mb-3.5 text-[clamp(28px,4.5vw,38px)]">Be first in line</h2>
+        <section className="reveal mx-auto max-w-[880px] px-6 pb-20 text-center md:pb-[110px]" aria-label="Open source">
+          <svg className="sketch mx-auto mb-7 block h-[118px] w-auto overflow-visible" viewBox="0 0 160 150" aria-hidden="true">
+            <g className="anim-unlock">
+              <path d="M60 70 L60 50 C60 30 100 30 100 50 L100 70" />
+            </g>
+            <path d="M44 70 C44 67 46 65 49 65 L111 65 C114 65 116 67 116 70 L116 124 C116 127 114 129 111 129 L49 129 C46 129 44 127 44 124 Z" />
+            <path d="M80 84 C84 84 87 87 87 91 C87 94 85 96 82 97 L85 112 L75 112 L78 97 C73 96 73 88 80 84" />
+            <path className="anim-twinkle" d="M128 44 L128 56 M122 50 L134 50" />
+            <path className="anim-twinkle t2" d="M30 92 L30 102 M25 97 L35 97" />
+          </svg>
+          <h2 className="mb-[18px] text-[clamp(27px,6vw,42px)]">Open source, all the way down</h2>
+          <p className="mx-auto mb-11 max-w-[640px] text-[17px] text-muted">
+            Every line of Rend is out in the open. The server is AGPL, the player and SDKs are
+            MIT. Read it, change it, and run the whole thing on your own machines, free forever.
+            The only thing we sell is the network we run it on.
+          </p>
+
+          <div className="mx-auto mb-9 max-w-[620px] overflow-hidden rounded-[16px] border border-line bg-card text-left">
+            <div className="flex items-center gap-2 border-b border-line px-[18px] py-3">
+              <span className="block h-[11px] w-[11px] rounded-full border border-line" />
+              <span className="block h-[11px] w-[11px] rounded-full border border-line" />
+              <span className="block h-[11px] w-[11px] rounded-full border border-line" />
+              <span className="ml-2 text-[12px] text-muted">your-server</span>
+            </div>
+            <pre className="overflow-x-auto px-4 py-[18px] font-mono text-[12px] leading-[2] sm:px-[22px] sm:py-[20px] sm:text-[13.5px]">
+              <code>
+                <span className="text-muted">{"$ "}</span>docker run rend --domain video.yoursite.com{"\n"}
+                <span className="text-muted">{"# upload · encode · mux · store · sign · deliver"}</span>{"\n"}
+                <span className="text-muted">{"# dashboard, API and player included. nothing else."}</span>
+              </code>
+            </pre>
+          </div>
+
+          <div className="mb-12 flex flex-wrap justify-center gap-3">
+            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-card px-[14px] py-[7px] text-[13px] font-medium">
+              Server <span className="text-muted">AGPL</span>
+            </span>
+            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-card px-[14px] py-[7px] text-[13px] font-medium">
+              Player &amp; SDKs <span className="text-muted">MIT</span>
+            </span>
+            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-card px-[14px] py-[7px] text-[13px] font-medium">
+              Self-host <span className="text-muted">Free forever</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-7 text-left md:grid-cols-3 md:gap-10">
+            <div className="border-t border-line pt-[22px]">
+              <h3 className="mb-2.5 text-[19px]">One binary, no dependencies</h3>
+              <p className="text-[15px] text-muted">
+                No managed database, no queue account, no analytics service, no phone-home. The
+                whole video API, dashboard and player ship as a single thing you run.
+              </p>
+            </div>
+            <div className="border-t border-line pt-[22px]">
+              <h3 className="mb-2.5 text-[19px]">The cloud, minus the network</h3>
+              <p className="text-[15px] text-muted">
+                The self-hosted binary is not a demo. It is the exact code that runs Rend Cloud,
+                with the one thing we sell, the anycast network, left out.
+              </p>
+            </div>
+            <div className="border-t border-line pt-[22px]">
+              <h3 className="mb-2.5 text-[19px]">It outlives us</h3>
+              <p className="text-[15px] text-muted">
+                The strongest guarantee in infrastructure is a licence, not a support tier. If the
+                company behind Rend vanished tomorrow, your video keeps serving.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="reveal mx-auto max-w-[1080px] px-6 pb-20 md:pb-[110px]" aria-label="How Rend compares">
+          <div className="mb-12 text-center">
+            <svg className="sketch mx-auto mb-7 block h-[112px] w-auto overflow-visible" viewBox="0 0 180 130" aria-hidden="true">
+              <path d="M18 114 L162 114" />
+              <path className="anim-grow" d="M30 114 L30 82 L50 82 L50 114" />
+              <path className="anim-grow g2" d="M62 114 L62 66 L82 66 L82 114" />
+              <path className="anim-grow g3" d="M94 114 L94 46 L114 46 L114 114" />
+              <path className="anim-grow g4" d="M126 114 L126 22 L146 22 L146 114" />
+              <path className="anim-twinkle" d="M136 10 C138 10 139 12 138 14 C137 16 134 15 134 13 C134 11 135 10 136 10" />
+              <path className="anim-twinkle t2" d="M152 8 L152 16 M148 12 L156 12" />
+            </svg>
+            <h2 className="mb-[18px] text-[clamp(27px,6vw,42px)]">How Rend compares</h2>
+            <p className="mx-auto max-w-[640px] text-[17px] text-muted">
+              Two honest meters, hardware we own, and a licence that outlives us, lined up against
+              how the rest of the category tends to work.
+            </p>
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
+            <table className="cmp-table w-full min-w-[720px] border-separate border-spacing-0">
+              <thead>
+                <tr>
+                  <th className="cmp-corner" aria-hidden="true" />
+                  {cmpColumns.map((col, i) => (
+                    <th key={col} scope="col" className={i === 0 ? "cmp-head cmp-head-rend" : "cmp-head"}>
+                      <span className="relative inline-block px-1">
+                        {col}
+                        {i === 0 && (
+                          <svg className="cmp-ring" viewBox="0 0 150 64" aria-hidden="true">
+                            <path
+                              pathLength={1}
+                              d="M34 16 C70 5 120 8 134 26 C141 40 116 54 75 56 C34 58 9 47 13 30 C16 17 44 11 78 13"
+                            />
+                          </svg>
+                        )}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cmpRows.map((row) => (
+                  <tr key={row.feature}>
+                    <th scope="row" className="cmp-feature">
+                      {row.feature}
+                    </th>
+                    {row.cells.map((cell, i) => (
+                      <td key={i} className={i === 0 ? "cmp-cell cmp-cell-rend" : "cmp-cell"}>
+                        {renderCmpCell(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-col gap-4 md:hidden">
+            {cmpRows.map((row) => (
+              <div key={row.feature} className="rounded-[16px] border border-line bg-card p-5">
+                <p className="mb-3 font-head text-[18px] leading-snug text-ink">{row.feature}</p>
+                <ul className="flex flex-col gap-1">
+                  {row.cells.map((cell, i) => (
+                    <li
+                      key={i}
+                      className={
+                        i === 0
+                          ? "flex items-center justify-between gap-4 rounded-[10px] bg-[rgba(22,21,19,0.05)] px-3 py-2"
+                          : "flex items-center justify-between gap-4 px-3 py-2"
+                      }
+                    >
+                      <span className={i === 0 ? "text-[13.5px] font-medium text-ink" : "text-[13.5px] text-muted"}>
+                        {cmpColumns[i]}
+                      </span>
+                      <span className={i === 0 ? "shrink-0 text-right text-[14px] font-medium text-ink" : "shrink-0 text-right text-[14px] text-ink"}>
+                        {renderCmpCell(cell)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          <p className="mx-auto mt-6 max-w-[680px] text-center text-[13px] text-muted">
+            Rend figures are beta launch targets for supported regions. The other columns describe
+            how each kind of platform tends to bill and operate, not a quote from any one vendor.
+          </p>
+        </section>
+
+        <section className="reveal mx-auto max-w-[940px] px-6 pb-20 md:pb-[110px]" aria-label="Case study, Cap">
+          <div className="mb-12 text-center">
+            <h2 className="mb-[18px] flex flex-wrap items-center justify-center gap-[0.45em] text-[clamp(27px,6vw,42px)]">
+              <img src="/cap-logo.svg" alt="Cap" className="w-auto" style={{ height: "1.15em" }} />
+              <span>runs on Rend</span>
+            </h2>
+            <p className="mx-auto max-w-[660px] text-[17px] text-muted">
+              Cap is the open source screen recorder behind Rend, used by hundreds of thousands of
+              people. Every recording they share is uploaded, encoded, muxed, stored and delivered
+              through Rend, built to reach millions of viewers worldwide.
+            </p>
+          </div>
+
+          <div className="rounded-[20px] border border-line bg-card px-5 py-9 sm:px-10">
+            <svg className="sketch mx-auto block h-auto w-full max-w-[560px] overflow-visible" viewBox="0 0 560 150" aria-hidden="true">
+              <path id="pipe-flow" className="flow-path" d="M70 69 L470 69" />
+
+              <path d="M40 50 C38 50 36 52 36 54 L36 84 C36 86 38 88 40 88 L100 88 C102 88 104 86 104 84 L104 54 C104 52 102 50 100 50 Z" />
+              <path d="M60 88 L56 98 L84 98 L80 88" />
+              <path d="M48 98 L92 98" />
+              <circle className="dot anim-beat" cx={70} cy={69} r={4} />
+
+              <path d="M110 69 C140 64 182 74 210 69" />
+              <path d="M202 63 L212 69 L202 75" />
+
+              <path d="M250 48 L286 64 L250 80 L214 64 Z" />
+              <path d="M214 72 L250 88 L286 72" />
+              <path d="M214 80 L250 96 L286 80" />
+
+              <path d="M294 69 C330 64 386 74 422 69" />
+              <path d="M414 63 L424 69 L414 75" />
+
+              <path d="M470 33 C491 33 508 50 508 71 C508 92 491 109 470 109 C449 109 432 92 432 71 C432 50 449 33 470 33" />
+              <path d="M470 33 C456 50 456 92 470 109" />
+              <path d="M470 33 C484 50 484 92 470 109" />
+              <path d="M470 33 L470 109" />
+              <path d="M441 56 C453 62 487 62 499 56" />
+              <path d="M434 71 L506 71" />
+              <path d="M441 86 C453 80 487 80 499 86" />
+              <path className="anim-twinkle" d="M520 46 C523 46 525 48 525 51 C525 56 520 62 520 62 C520 62 515 56 515 51 C515 48 517 46 520 46" />
+              <path className="anim-twinkle t2" d="M424 88 C427 88 429 90 429 93 C429 98 424 104 424 104 C424 104 419 98 419 93 C419 90 421 88 424 88" />
+
+              <circle className="dot" r={4.5}>
+                <animateMotion dur="3.6s" repeatCount="indefinite" calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.7;1">
+                  <mpath href="#pipe-flow" />
+                </animateMotion>
+                <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.06;0.62;0.72;1" dur="3.6s" repeatCount="indefinite" />
+              </circle>
+              <circle className="dot" r={4.5}>
+                <animateMotion dur="3.6s" begin="1.8s" repeatCount="indefinite" calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.7;1">
+                  <mpath href="#pipe-flow" />
+                </animateMotion>
+                <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.06;0.62;0.72;1" dur="3.6s" begin="1.8s" repeatCount="indefinite" />
+              </circle>
+            </svg>
+
+            <div className="mx-auto mt-7 grid max-w-[560px] grid-cols-3 gap-3 text-center">
+              <div>
+                <p className="text-[14px] font-medium leading-snug">Recorded in Cap</p>
+                <p className="mt-1 text-[12.5px] text-muted">one API call</p>
+              </div>
+              <div>
+                <p className="text-[14px] font-medium leading-snug">Encoded, muxed, stored</p>
+                <p className="mt-1 text-[12.5px] text-muted">just in time, on Rend</p>
+              </div>
+              <div>
+                <p className="text-[14px] font-medium leading-snug">Delivered worldwide</p>
+                <p className="mt-1 text-[12.5px] text-muted">instant start, even cold</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mx-auto mt-14 max-w-[720px] text-center">
+            <p className="font-head text-[clamp(22px,3.4vw,30px)] leading-[1.3]">
+              Cap already runs all of its video on Rend.
+            </p>
+            <p className="mx-auto mt-4 max-w-[540px] text-[14px] text-muted">
+              Cap and Rend come from the same team. The infrastructure we&apos;re opening up to you is
+              the same one carrying Cap&apos;s video today, end to end and around the world.
+            </p>
+          </div>
+        </section>
+
+        <section className="reveal mx-auto max-w-[560px] px-6 pb-20 text-center md:pb-[110px]">
+          <h2 className="mb-3.5 text-[clamp(25px,5.6vw,38px)]">Be first in line</h2>
           <p className="mb-[30px] text-muted">
             Rend is being built in the open. Leave your email and we will tell you the day it is ready.
           </p>
