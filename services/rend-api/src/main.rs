@@ -1201,7 +1201,7 @@ async fn get_asset_events_inner(
     asset_id: String,
     query: AssetEventsQuery,
 ) -> Result<AssetEventsResponse, AppError> {
-    let asset_exists = asset_exists(&state.db, &asset_id).await?;
+    let asset_exists = asset_row_exists(&state.db, &asset_id).await?;
     let query = normalize_asset_events_query(query);
     let events = if asset_exists {
         fetch_asset_events(&state.db, &asset_id, query.after_sequence, query.limit).await?
@@ -2457,26 +2457,36 @@ async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> 
     object_key.ok_or_else(|| anyhow::anyhow!("source artifact is missing"))
 }
 
-async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Result<()> {
+async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Result<bool> {
     let mut tx = db.begin().await?;
-    let playable_state: String = sqlx::query_scalar(
+    let row: Option<(String, bool)> = sqlx::query_as(
         "
-        SELECT playable_state
+        SELECT playable_state, deleted_at IS NOT NULL
         FROM rend.assets
         WHERE id = $1::uuid
-          AND deleted_at IS NULL
         FOR UPDATE
         ",
     )
     .bind(asset_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+
+    let Some((playable_state, deleted)) = row else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+
+    if deleted {
+        tx.commit().await?;
+        return Ok(false);
+    }
 
     sqlx::query(
         "
         UPDATE rend.assets
         SET source_state = 'processing'
         WHERE id = $1::uuid
+          AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -2492,7 +2502,7 @@ async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Res
     .await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn mark_asset_media_processing_retryable(db: &PgPool, asset_id: &str) -> Result<()> {
@@ -2503,6 +2513,7 @@ async fn mark_asset_media_processing_retryable(db: &PgPool, asset_id: &str) -> R
             playable_state = 'not_playable'
         WHERE id = $1::uuid
           AND playable_state = 'not_playable'
+          AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -2771,6 +2782,115 @@ async fn send_edge_warm_request(
         status.as_u16(),
         format!(
             "edge warm endpoint returned {status}: {}",
+            limit_log_body(&body)
+        ),
+    ))
+}
+
+async fn maybe_purge_edge(
+    db: &PgPool,
+    http: &reqwest::Client,
+    config: &EdgePurgeConfig,
+    asset_id: &str,
+    artifact_paths: Option<Vec<String>>,
+) -> bool {
+    let Some(_url) = config.url.as_deref() else {
+        return false;
+    };
+
+    let request = EdgePurgeRequest {
+        asset_id: asset_id.to_owned(),
+        artifact_paths,
+    };
+    let artifact_paths = request.artifact_paths.as_deref();
+
+    record_edge_purge_event(
+        db,
+        asset_id,
+        events::EVENT_EDGE_PURGE_ATTEMPTED,
+        events::edge_purge_attempted_metadata(artifact_paths),
+    )
+    .await;
+
+    match send_edge_purge_request(http, config, &request).await {
+        Ok(response) => {
+            record_edge_purge_event(
+                db,
+                asset_id,
+                events::EVENT_EDGE_PURGE_SUCCEEDED,
+                events::edge_purge_succeeded_metadata(
+                    artifact_paths,
+                    response.purged.len(),
+                    response.missing.len(),
+                    response.rejected.len(),
+                    response.errors.len(),
+                ),
+            )
+            .await;
+        }
+        Err(error) => {
+            record_edge_purge_event(
+                db,
+                asset_id,
+                events::EVENT_EDGE_PURGE_FAILED,
+                events::edge_purge_failed_metadata(artifact_paths, error.reason, error.status),
+            )
+            .await;
+            tracing::warn!(
+                asset_id,
+                error = %error,
+                "edge purge request failed; asset deletion remains committed",
+            );
+        }
+    }
+
+    true
+}
+
+async fn record_edge_purge_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
+    if let Err(error) = events::insert_asset_event_pool(db, asset_id, event_type, metadata).await {
+        tracing::warn!(
+            asset_id,
+            event_type,
+            error = %error,
+            "failed to record edge purge lifecycle event",
+        );
+    }
+}
+
+async fn send_edge_purge_request(
+    http: &reqwest::Client,
+    config: &EdgePurgeConfig,
+    request: &EdgePurgeRequest,
+) -> std::result::Result<EdgePurgeResponse, EdgePurgeFailure> {
+    let Some(url) = config.url.as_deref() else {
+        return Ok(EdgePurgeResponse::default());
+    };
+
+    let response = http
+        .post(url)
+        .header("x-rend-internal-token", &config.internal_token)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| EdgePurgeFailure::request(error.to_string()))?;
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json::<EdgePurgeResponse>()
+            .await
+            .map_err(|error| EdgePurgeFailure::request(error.to_string()));
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("failed to read purge response body: {error}"));
+
+    Err(EdgePurgeFailure::status(
+        status.as_u16(),
+        format!(
+            "edge purge endpoint returned {status}: {}",
             limit_log_body(&body)
         ),
     ))
