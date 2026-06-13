@@ -12,6 +12,11 @@
     "dev:site": "turbo dev --filter=@rend/site",
     "build": "turbo build",
     "build:site": "turbo build --filter=@rend/site",
+    "backend:up": "docker compose up -d",
+    "backend:down": "docker compose down",
+    "backend:api": "cargo run -p rend-api",
+    "backend:edge": "cargo run -p rend-edge",
+    "backend:check": "cargo check --workspace",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
     "clean": "turbo clean"
