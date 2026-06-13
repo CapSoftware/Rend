@@ -145,60 +145,23 @@ pub fn playable_state_changed_metadata(previous: &str, current: &str) -> Value {
     })
 }
 
-pub fn edge_warming_metadata(artifact_paths: &[String]) -> Value {
+pub fn edge_warming_metadata(artifact_paths: &[String], edges: Value) -> Value {
+    let edge_count = edges.as_array().map_or(0, Vec::len);
     json!({
         "artifact_count": artifact_paths.len(),
         "artifact_paths": artifact_paths,
+        "edge_count": edge_count,
+        "edges": edges,
     })
 }
 
-pub fn edge_warming_failed_metadata(
-    artifact_paths: &[String],
-    reason: &str,
-    status: Option<u16>,
-) -> Value {
-    json!({
-        "artifact_count": artifact_paths.len(),
-        "artifact_paths": artifact_paths,
-        "reason": reason,
-        "status": status,
-    })
-}
-
-pub fn edge_purge_attempted_metadata(artifact_paths: Option<&[String]>) -> Value {
+pub fn edge_purge_metadata(artifact_paths: Option<&[String]>, edges: Value) -> Value {
+    let edge_count = edges.as_array().map_or(0, Vec::len);
     json!({
         "artifact_count": artifact_paths.map(|paths| paths.len()),
         "artifact_paths": artifact_paths,
-    })
-}
-
-pub fn edge_purge_succeeded_metadata(
-    artifact_paths: Option<&[String]>,
-    purged: usize,
-    missing: usize,
-    rejected: usize,
-    errors: usize,
-) -> Value {
-    json!({
-        "artifact_count": artifact_paths.map(|paths| paths.len()),
-        "artifact_paths": artifact_paths,
-        "purged": purged,
-        "missing": missing,
-        "rejected": rejected,
-        "errors": errors,
-    })
-}
-
-pub fn edge_purge_failed_metadata(
-    artifact_paths: Option<&[String]>,
-    reason: &str,
-    status: Option<u16>,
-) -> Value {
-    json!({
-        "artifact_count": artifact_paths.map(|paths| paths.len()),
-        "artifact_paths": artifact_paths,
-        "reason": reason,
-        "status": status,
+        "edge_count": edge_count,
+        "edges": edges,
     })
 }
 
@@ -342,8 +305,32 @@ mod tests {
             media_processing_started_metadata("uploaded", "not_playable"),
             media_processing_failed_metadata(1, 3, false, "ffmpeg failed"),
             playable_state_changed_metadata("not_playable", "hls_ready"),
-            edge_warming_metadata(&["opener.mp4".to_owned()]),
-            edge_warming_failed_metadata(&["opener.mp4".to_owned()], "status_error", Some(502)),
+            edge_warming_metadata(
+                &["opener.mp4".to_owned()],
+                json!([{
+                    "edge_id": "edge-1",
+                    "region": "local",
+                    "source": "registry",
+                    "status": "failed",
+                    "http_status": 502,
+                    "reason": "status_error"
+                }]),
+            ),
+            edge_purge_metadata(
+                None,
+                json!([{
+                    "edge_id": "edge-1",
+                    "region": "local",
+                    "source": "registry",
+                    "status": "succeeded",
+                    "purge_summary": {
+                        "purged": 1,
+                        "missing": 0,
+                        "rejected": 0,
+                        "errors": 0
+                    }
+                }]),
+            ),
             upload_response_ready_metadata("uploaded", "hls_ready", 123),
         ];
         metadata.extend(
