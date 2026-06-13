@@ -1,5 +1,7 @@
 name: rend-edge-host
 
+# Set REND_EDGE_IMAGE to the immutable digest ref from the release manifest, for
+# example registry.example.com/rend/rend-edge@sha256:...
 services:
   rend-edge:
     image: ${REND_EDGE_IMAGE:?set REND_EDGE_IMAGE}

@@ -1,5 +1,7 @@
 name: rend-control-plane
 
+# Set REND_API_IMAGE and REND_MEDIA_WORKER_IMAGE to immutable digest refs from
+# the release manifest, for example registry.example.com/rend/rend-api@sha256:...
 services:
   rend-api:
     image: ${REND_API_IMAGE:?set REND_API_IMAGE}
