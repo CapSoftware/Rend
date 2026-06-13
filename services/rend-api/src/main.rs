@@ -3335,6 +3335,150 @@ mod tests {
     }
 
     #[test]
+    fn event_stream_query_uses_after_sequence() {
+        let query = normalize_event_stream_query(
+            &HeaderMap::new(),
+            EventStreamQuery {
+                asset_id: None,
+                after_sequence: Some("12".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(query.after_sequence, 12);
+        assert_eq!(query.asset_id, None);
+    }
+
+    #[test]
+    fn event_stream_last_event_id_takes_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("20"));
+
+        let query = normalize_event_stream_query(
+            &headers,
+            EventStreamQuery {
+                asset_id: None,
+                after_sequence: Some("12".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(query.after_sequence, 20);
+    }
+
+    #[test]
+    fn event_stream_rejects_invalid_cursor_and_asset_id() {
+        let Err(error) = normalize_event_stream_query(
+            &HeaderMap::new(),
+            EventStreamQuery {
+                asset_id: None,
+                after_sequence: Some("not-a-sequence".to_owned()),
+            },
+        ) else {
+            panic!("invalid cursor unexpectedly parsed");
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        let Err(error) = normalize_event_stream_query(
+            &HeaderMap::new(),
+            EventStreamQuery {
+                asset_id: Some("not-a-uuid".to_owned()),
+                after_sequence: None,
+            },
+        ) else {
+            panic!("invalid asset_id unexpectedly parsed");
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn event_stream_sse_frame_uses_sequence_id_and_event_type_name() {
+        let record = event_record(42, events::EVENT_SOURCE_UPLOADED);
+        let frame = sse_frame(&record).unwrap();
+        let frame = std::str::from_utf8(&frame).unwrap();
+
+        assert!(frame.starts_with("id: 42\nevent: source.uploaded\ndata: "));
+        assert!(frame.ends_with("\n\n"));
+
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let payload: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(payload["id"], "event-42");
+        assert_eq!(payload["asset_id"], "asset-123");
+        assert_eq!(payload["sequence"], 42);
+        assert_eq!(payload["event_type"], events::EVENT_SOURCE_UPLOADED);
+        assert_eq!(payload["created_at"], "2026-06-13T12:00:00.000Z");
+        assert_eq!(payload["metadata"], serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn event_stream_after_sequence_and_asset_id_filter_exclude_records() {
+        let query = NormalizedEventStreamQuery {
+            asset_id: Some("asset-123".to_owned()),
+            after_sequence: 10,
+        };
+
+        assert!(event_stream_record_matches(
+            &event_record_for_asset("asset-123", 11, events::EVENT_SOURCE_UPLOADED),
+            &query
+        ));
+        assert!(!event_stream_record_matches(
+            &event_record_for_asset("asset-123", 10, events::EVENT_SOURCE_UPLOADED),
+            &query
+        ));
+        assert!(!event_stream_record_matches(
+            &event_record_for_asset(
+                "00000000-0000-0000-0000-000000000000",
+                11,
+                events::EVENT_SOURCE_UPLOADED,
+            ),
+            &query
+        ));
+    }
+
+    #[test]
+    fn event_stream_metadata_is_external_safe() {
+        let mut record = event_record(7, events::EVENT_ARTIFACT_GENERATED);
+        record.metadata_json = serde_json::json!({
+            "kind": "opener",
+            "artifact_path": "opener.mp4",
+            "playback_url": "http://edge.local/v/asset/opener.mp4?token=abc",
+            "nested": {
+                "authorization": "Bearer abc",
+                "reason": "safe failure reason",
+                "credential_hint": "do not leak",
+            },
+            "messages": [
+                "plain",
+                "signed url had ?token=abc"
+            ]
+        })
+        .to_string();
+
+        let frame = sse_frame(&record).unwrap();
+        let frame = std::str::from_utf8(&frame).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let encoded = data.to_ascii_lowercase();
+
+        for forbidden in [
+            "playback_url",
+            "?token=",
+            "bearer ",
+            "authorization",
+            "credential",
+        ] {
+            assert!(!encoded.contains(forbidden), "{forbidden}");
+        }
+        assert!(encoded.contains("opener.mp4"));
+        assert!(encoded.contains("[redacted]"));
+    }
+
+    #[test]
     fn upload_media_flow_records_required_lifecycle_event_types() {
         let artifacts = vec![
             events::ArtifactEventInput {
