@@ -109,7 +109,9 @@ bounded by `REND_MEDIA_PROCESS_TIMEOUT_SECS`; keep `REND_HTTP_TIMEOUT_SECS`
 larger than the media timeout when using synchronous local uploads.
 Playback URLs are signed with `REND_PLAYBACK_SIGNING_KEY_ID`,
 `REND_PLAYBACK_SIGNING_SECRET`, and `REND_PLAYBACK_TOKEN_TTL_SECS`; API and edge
-processes must use the same key id and secret.
+processes must use the same key id and secret. The local player bootstrap
+returns up to `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS` first HLS segment
+hints, defaulting to `2`.
 
 ```bash
 cp .env.example .env.local
@@ -139,6 +141,7 @@ Smoke-test local media artifact generation:
 ```bash
 bun run backend:smoke:media
 bun run backend:smoke:signed-playback
+bun run backend:smoke:playback-bootstrap
 ```
 
 The smoke flow starts local dependencies, checks `ffmpeg -version` and
@@ -151,7 +154,13 @@ verifies:
 - Postgres has source, opener, thumbnail, manifest, and segment artifact rows
 - generated MinIO objects exist with nonzero byte sizes
 
-Manual upload and inspection:
+The playback bootstrap smoke also starts `rend-edge` if needed, calls
+`GET /v1/assets/<asset_id>/playback` with the dev API key, checks unauthenticated
+and unknown asset responses, verifies the signed primary, opener, manifest, and
+first segment hint URLs through `rend-edge`, and confirms the local player
+harness is served.
+
+Manual upload, bootstrap, and local playback:
 
 ```bash
 fixture=$(scripts/generate-fixture-video.sh)
@@ -171,6 +180,11 @@ echo "$response"
 
 asset_id=$(printf '%s' "$response" | jq -r .asset_id)
 object_key=$(printf '%s' "$response" | jq -r .source_object_key)
+
+curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+open "http://127.0.0.1:4000/player?asset_id=$asset_id"
 
 docker compose exec postgres psql -U rend -d rend -c "
 select a.id, a.source_state, a.playable_state, ar.kind, ar.id as artifact_id,
