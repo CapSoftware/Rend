@@ -364,6 +364,25 @@ operator_check_bool() {
   esac
 }
 
+operator_check_rend_env() {
+  local file="$1"
+  local allow_dev_defaults="$2"
+  local value
+  value="$(operator_env_value "$file" REND_ENV 2>/dev/null || true)"
+  case "$value" in
+    local | trial | production)
+      operator_ok "REND_ENV is $value"
+      ;;
+    *)
+      operator_fail "REND_ENV must be one of: local, trial, production"
+      return 0
+      ;;
+  esac
+  if [[ "$value" == "local" && "$allow_dev_defaults" != "true" ]]; then
+    operator_fail "REND_ENV=local is only permitted with --allow-dev-defaults"
+  fi
+}
+
 operator_check_positive_int() {
   local file="$1"
   local key="$2"
@@ -387,6 +406,108 @@ operator_check_nonnegative_optional_int() {
     operator_ok "$key is a non-negative integer"
   else
     operator_fail "$key must be empty or a non-negative integer"
+  fi
+}
+
+operator_check_expected_edges() {
+  local file="$1"
+  local allow_dev_defaults="$2"
+  local value rend_env allow_insecure
+  value="$(operator_env_value "$file" REND_EXPECTED_EDGES 2>/dev/null || true)"
+  rend_env="$(operator_env_value "$file" REND_ENV 2>/dev/null || true)"
+  allow_insecure="$(operator_env_value "$file" REND_ALLOW_INSECURE_EDGE_URLS 2>/dev/null || true)"
+  if python3 - "$value" "$rend_env" "$allow_insecure" "$allow_dev_defaults" <<'PY'
+import re
+import sys
+from urllib.parse import urlparse
+
+value, rend_env, allow_insecure, allow_dev_defaults = sys.argv[1:5]
+allow_insecure = allow_insecure.lower() == "true"
+allow_dev_defaults = allow_dev_defaults == "true"
+strict = rend_env in {"trial", "production"}
+
+if allow_insecure and not allow_dev_defaults:
+    print("REND_ALLOW_INSECURE_EDGE_URLS=true is only permitted with --allow-dev-defaults", file=sys.stderr)
+    raise SystemExit(1)
+
+if not value.strip():
+    if strict:
+        print("REND_EXPECTED_EDGES must not be empty when REND_ENV is trial or production", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+seen = set()
+local_hosts = {
+    "localhost", "0.0.0.0", "::", "::1", "postgres", "redis", "minio",
+    "clickhouse", "rend-api", "rend-edge", "rend-edge-us-east", "rend-edge-london",
+}
+for raw in value.split(","):
+    raw = raw.strip()
+    if not raw:
+        continue
+    parts = raw.split("=", 2)
+    if len(parts) != 3:
+        print("REND_EXPECTED_EDGES entries must use edge_id=region=base_url", file=sys.stderr)
+        raise SystemExit(1)
+    edge_id, region, base_url = [part.strip() for part in parts]
+    if not re.match(r"^[A-Za-z0-9_.-]{1,128}$", edge_id):
+        print(f"invalid edge id in REND_EXPECTED_EDGES: {edge_id}", file=sys.stderr)
+        raise SystemExit(1)
+    if not re.match(r"^[A-Za-z0-9_.-]{1,128}$", region):
+        print(f"invalid edge region in REND_EXPECTED_EDGES: {region}", file=sys.stderr)
+        raise SystemExit(1)
+    if edge_id in seen:
+        print(f"duplicate edge id in REND_EXPECTED_EDGES: {edge_id}", file=sys.stderr)
+        raise SystemExit(1)
+    seen.add(edge_id)
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        print(f"edge {edge_id} base_url must be an absolute http(s) URL", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        print(f"edge {edge_id} base_url must not include credentials, query, or fragment", file=sys.stderr)
+        raise SystemExit(1)
+    host = parsed.hostname.strip("[]").lower()
+    is_local = host in local_hosts or host.startswith("127.") or host.endswith(".local")
+    if strict and not allow_insecure:
+        if parsed.scheme != "https":
+            print(f"edge {edge_id} base_url must use https when REND_ENV is {rend_env}", file=sys.stderr)
+            raise SystemExit(1)
+        if is_local:
+            print(f"edge {edge_id} base_url must not use a local host when REND_ENV is {rend_env}", file=sys.stderr)
+            raise SystemExit(1)
+PY
+  then
+    operator_ok "REND_EXPECTED_EDGES is valid"
+  else
+    operator_fail "REND_EXPECTED_EDGES is invalid"
+  fi
+}
+
+operator_check_edge_matches_expected() {
+  local file="$1"
+  local edge_id region base_url expected
+  edge_id="$(operator_env_value "$file" REND_EDGE_ID 2>/dev/null || true)"
+  region="$(operator_env_value "$file" REND_EDGE_REGION 2>/dev/null || true)"
+  base_url="$(operator_env_value "$file" REND_EDGE_BASE_URL 2>/dev/null || true)"
+  expected="$(operator_env_value "$file" REND_EXPECTED_EDGES 2>/dev/null || true)"
+  if python3 - "$edge_id" "$region" "${base_url%/}" "$expected" <<'PY'
+import sys
+edge_id, region, base_url, expected = sys.argv[1:5]
+for raw in expected.split(","):
+    parts = raw.strip().split("=", 2)
+    if len(parts) == 3 and parts[0].strip() == edge_id:
+        if parts[1].strip() == region and parts[2].strip().rstrip("/") == base_url:
+            raise SystemExit(0)
+        print(f"REND_EDGE_ID {edge_id} does not match its configured region/base_url in REND_EXPECTED_EDGES", file=sys.stderr)
+        raise SystemExit(1)
+print(f"REND_EDGE_ID {edge_id} is not present in REND_EXPECTED_EDGES", file=sys.stderr)
+raise SystemExit(1)
+PY
+  then
+    operator_ok "edge identity matches REND_EXPECTED_EDGES"
+  else
+    operator_fail "edge identity does not match REND_EXPECTED_EDGES"
   fi
 }
 
@@ -417,10 +538,12 @@ operator_validate_api_env() {
   local required optional policy_keys numeric_keys
 
   required=(
+    REND_ENV
     DATABASE_URL REND_REDIS_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
     CLICKHOUSE_PASSWORD OBJECT_STORE_HEALTH_URL S3_ENDPOINT S3_REGION S3_BUCKET
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY REND_API_BIND_ADDR REND_API_AUTO_MIGRATE
     REND_API_INLINE_MEDIA_PROCESSING REND_DEV_API_KEY REND_PLAYBACK_BASE_URL
+    REND_MAX_UPLOAD_BYTES REND_EXPECTED_EDGES REND_ALLOW_INSECURE_EDGE_URLS
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_EDGE_INTERNAL_TOKEN
     REND_INTERNAL_TELEMETRY_TOKEN REND_PLAYBACK_SIGNING_KEY_ID
     REND_PLAYBACK_SIGNING_SECRET REND_PLAYBACK_TOKEN_TTL_SECS
@@ -435,7 +558,8 @@ operator_validate_api_env() {
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_PLAYBACK_TOKEN_TTL_SECS
-    REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES
+    REND_MAX_UPLOAD_BYTES REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS
+    REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES
     REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH
     REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
@@ -452,6 +576,8 @@ operator_validate_api_env() {
     operator_require_env_present "$file" "$key"
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
+  operator_check_rend_env "$file" "$allow_dev_defaults"
+  operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
   operator_check_redis_url "$file" REND_REDIS_URL
   operator_check_http_url "$file" CLICKHOUSE_URL
@@ -463,6 +589,7 @@ operator_validate_api_env() {
   operator_check_bind_addr "$file" REND_API_BIND_ADDR 4000
   operator_check_bool "$file" REND_API_AUTO_MIGRATE
   operator_check_bool "$file" REND_API_INLINE_MEDIA_PROCESSING
+  operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
   operator_check_absolute_path "$file" REND_FFMPEG_PATH
   operator_check_absolute_path "$file" REND_FFPROBE_PATH
   for key in "${numeric_keys[@]}"; do
@@ -477,10 +604,12 @@ operator_validate_worker_env() {
   local required optional policy_keys numeric_keys
 
   required=(
+    REND_ENV
     DATABASE_URL REND_REDIS_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
     CLICKHOUSE_PASSWORD OBJECT_STORE_HEALTH_URL S3_ENDPOINT S3_REGION S3_BUCKET
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY REND_API_AUTO_MIGRATE
     REND_API_INLINE_MEDIA_PROCESSING REND_DEV_API_KEY REND_PLAYBACK_BASE_URL
+    REND_MAX_UPLOAD_BYTES REND_EXPECTED_EDGES REND_ALLOW_INSECURE_EDGE_URLS
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_EDGE_INTERNAL_TOKEN
     REND_INTERNAL_TELEMETRY_TOKEN REND_PLAYBACK_SIGNING_KEY_ID
     REND_PLAYBACK_SIGNING_SECRET REND_PLAYBACK_TOKEN_TTL_SECS
@@ -496,7 +625,8 @@ operator_validate_worker_env() {
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_PLAYBACK_TOKEN_TTL_SECS
-    REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES
+    REND_MAX_UPLOAD_BYTES REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS
+    REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES
     REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH
     REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
@@ -513,6 +643,8 @@ operator_validate_worker_env() {
     operator_require_env_present "$file" "$key"
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
+  operator_check_rend_env "$file" "$allow_dev_defaults"
+  operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
   operator_check_redis_url "$file" REND_REDIS_URL
   operator_check_http_url "$file" CLICKHOUSE_URL
@@ -523,6 +655,7 @@ operator_validate_worker_env() {
   operator_check_http_url "$file" REND_EDGE_PURGE_URL "/internal/purge"
   operator_check_bool "$file" REND_API_AUTO_MIGRATE
   operator_check_bool "$file" REND_API_INLINE_MEDIA_PROCESSING
+  operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
   if [[ "$(operator_env_value "$file" REND_API_AUTO_MIGRATE 2>/dev/null || true)" != "false" ]]; then
     if [[ "$allow_dev_defaults" == "true" ]]; then
       operator_warn "worker env REND_API_AUTO_MIGRATE is not false; allowed only because --allow-dev-defaults was set"
@@ -547,11 +680,14 @@ operator_validate_edge_env() {
   local required optional policy_keys numeric_keys
 
   required=(
+    REND_ENV
     S3_ENDPOINT S3_REGION S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
     REND_EDGE_BIND_ADDR REND_EDGE_ID REND_EDGE_REGION REND_EDGE_BASE_URL
-    REND_CONTROL_PLANE_URL REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_CACHE_DIR
+    REND_EXPECTED_EDGES REND_ALLOW_INSECURE_EDGE_URLS REND_CONTROL_PLANE_URL
+    REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_CACHE_DIR
     REND_EDGE_ORIGIN_HEALTH_URL REND_EDGE_INTERNAL_TOKEN REND_EDGE_WARM_MAX_ARTIFACTS
-    REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_TELEMETRY_ENABLED
+    REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
+    REND_EDGE_CACHE_MIN_FREE_BYTES REND_EDGE_TELEMETRY_ENABLED
     REND_EDGE_TELEMETRY_INGEST_URL REND_INTERNAL_TELEMETRY_TOKEN
     REND_EDGE_TELEMETRY_QUEUE_CAPACITY REND_EDGE_TELEMETRY_BATCH_SIZE
     REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS
@@ -563,7 +699,8 @@ operator_validate_edge_env() {
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_WARM_MAX_ARTIFACTS
-    REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_TELEMETRY_QUEUE_CAPACITY
+    REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
+    REND_EDGE_TELEMETRY_QUEUE_CAPACITY
     REND_EDGE_TELEMETRY_BATCH_SIZE REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS
     REND_EDGE_TELEMETRY_REQUEST_TIMEOUT_SECS REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES
     REND_HTTP_TIMEOUT_SECS
@@ -578,6 +715,9 @@ operator_validate_edge_env() {
     operator_require_env_present "$file" "$key"
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
+  operator_check_rend_env "$file" "$allow_dev_defaults"
+  operator_check_expected_edges "$file" "$allow_dev_defaults"
+  operator_check_edge_matches_expected "$file"
   operator_check_http_url "$file" S3_ENDPOINT
   operator_check_http_url "$file" REND_EDGE_BASE_URL
   operator_check_http_url "$file" REND_CONTROL_PLANE_URL
@@ -585,9 +725,11 @@ operator_validate_edge_env() {
   operator_check_http_url "$file" REND_EDGE_TELEMETRY_INGEST_URL "/internal/telemetry/playback"
   operator_check_bind_addr "$file" REND_EDGE_BIND_ADDR 4100
   operator_check_bool "$file" REND_EDGE_TELEMETRY_ENABLED
+  operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
   operator_check_absolute_path "$file" REND_EDGE_CACHE_DIR
   operator_check_absolute_path "$file" REND_EDGE_TELEMETRY_SPOOL_DIR
   operator_check_nonnegative_optional_int "$file" REND_EDGE_CACHE_MAX_BYTES
+  operator_check_nonnegative_optional_int "$file" REND_EDGE_CACHE_MIN_FREE_BYTES
   for key in "${numeric_keys[@]}"; do
     operator_check_positive_int "$file" "$key"
   done
