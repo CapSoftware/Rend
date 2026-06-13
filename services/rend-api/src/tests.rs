@@ -93,6 +93,9 @@ fn test_config() -> ApiConfig {
         edge_registry: EdgeRegistryConfig {
             internal_token: "internal".to_owned(),
             active_heartbeat_window: Duration::from_secs(DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS),
+            expected_edges: ExpectedEdges::default(),
+            rend_env: RendEnv::Local,
+            allow_insecure_edge_urls: false,
         },
         edge_warm: EdgeWarmConfig {
             url: None,
@@ -128,6 +131,7 @@ fn test_config() -> ApiConfig {
         },
         auto_migrate: false,
         request_timeout: Duration::from_secs(10),
+        max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
     }
 }
 
@@ -267,6 +271,28 @@ async fn post_internal_edge_register(
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(token) = token {
         builder = builder.header("x-rend-internal-token", token);
+    }
+
+    app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn post_video_with_headers(
+    app: Router,
+    body: impl Into<Body>,
+    auth: Option<&str>,
+    content_length: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/videos")
+        .header(header::CONTENT_TYPE, "video/mp4");
+    if let Some(auth) = auth {
+        builder = builder.header(header::AUTHORIZATION, auth);
+    }
+    if let Some(content_length) = content_length {
+        builder = builder.header(header::CONTENT_LENGTH, content_length);
     }
 
     app.oneshot(builder.body(body.into()).unwrap())
@@ -1009,7 +1035,17 @@ fn edge_registry_validation_normalizes_safe_values() {
         "rend-edge.us-east-1"
     );
     assert_eq!(
-        normalize_edge_base_url("https://edge.example.com/").unwrap(),
+        normalize_edge_base_url(
+            &EdgeRegistryConfig {
+                internal_token: "internal".to_owned(),
+                active_heartbeat_window: Duration::from_secs(120),
+                expected_edges: ExpectedEdges::default(),
+                rend_env: RendEnv::Local,
+                allow_insecure_edge_urls: false,
+            },
+            "https://edge.example.com/"
+        )
+        .unwrap(),
         "https://edge.example.com"
     );
     assert_eq!(
@@ -1021,11 +1057,118 @@ fn edge_registry_validation_normalizes_safe_values() {
 
 #[test]
 fn edge_registry_validation_rejects_secret_bearing_base_urls() {
-    let error = normalize_edge_base_url("https://user:secret@edge.example.com").unwrap_err();
+    let registry = EdgeRegistryConfig {
+        internal_token: "internal".to_owned(),
+        active_heartbeat_window: Duration::from_secs(120),
+        expected_edges: ExpectedEdges::default(),
+        rend_env: RendEnv::Local,
+        allow_insecure_edge_urls: false,
+    };
+    let error =
+        normalize_edge_base_url(&registry, "https://user:secret@edge.example.com").unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
-    let error = normalize_edge_base_url("https://edge.example.com?token=secret").unwrap_err();
+    let error =
+        normalize_edge_base_url(&registry, "https://edge.example.com?token=secret").unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn strict_edge_registry_requires_https_base_urls() {
+    let registry = EdgeRegistryConfig {
+        internal_token: "internal".to_owned(),
+        active_heartbeat_window: Duration::from_secs(120),
+        expected_edges: ExpectedEdges::default(),
+        rend_env: RendEnv::Trial,
+        allow_insecure_edge_urls: false,
+    };
+
+    let error = normalize_edge_base_url(&registry, "http://edge.example.com").unwrap_err();
+
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error.message.contains("https"));
+}
+
+#[test]
+fn expected_edge_registration_rejects_unknown_or_changed_edges() {
+    let expected_edges = ExpectedEdges::parse(
+        "edge-a=us-east=https://edge-a.example.com",
+        RendEnv::Trial,
+        false,
+    )
+    .unwrap();
+    let registry = EdgeRegistryConfig {
+        internal_token: "internal".to_owned(),
+        active_heartbeat_window: Duration::from_secs(120),
+        expected_edges,
+        rend_env: RendEnv::Trial,
+        allow_insecure_edge_urls: false,
+    };
+
+    validate_expected_edge_registration(
+        &registry,
+        "edge-a",
+        "us-east",
+        "https://edge-a.example.com",
+    )
+    .unwrap();
+
+    assert_eq!(
+        validate_expected_edge_registration(
+            &registry,
+            "edge-b",
+            "us-east",
+            "https://edge-b.example.com"
+        )
+        .unwrap_err()
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        validate_expected_edge_registration(
+            &registry,
+            "edge-a",
+            "us-east",
+            "https://changed.example.com"
+        )
+        .unwrap_err()
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn fanout_skips_untrusted_registry_rows() {
+    let expected_edges = ExpectedEdges::parse(
+        "edge-a=us-east=https://edge-a.example.com",
+        RendEnv::Trial,
+        false,
+    )
+    .unwrap();
+    let registry = EdgeRegistryConfig {
+        internal_token: "internal".to_owned(),
+        active_heartbeat_window: Duration::from_secs(120),
+        expected_edges,
+        rend_env: RendEnv::Trial,
+        allow_insecure_edge_urls: false,
+    };
+
+    assert!(registered_edge_is_trusted(
+        &registry,
+        &RegisteredEdgeNode {
+            edge_id: "edge-a".to_owned(),
+            region: "us-east".to_owned(),
+            base_url: "https://edge-a.example.com".to_owned(),
+        }
+    ));
+    assert!(!registered_edge_is_trusted(
+        &registry,
+        &RegisteredEdgeNode {
+            edge_id: "edge-a".to_owned(),
+            region: "us-east".to_owned(),
+            base_url: "https://changed.example.com".to_owned(),
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1047,6 +1190,9 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
         &EdgeRegistryConfig {
             internal_token: "warm-secret".to_owned(),
             active_heartbeat_window: Duration::from_secs(120),
+            expected_edges: ExpectedEdges::default(),
+            rend_env: RendEnv::Local,
+            allow_insecure_edge_urls: false,
         },
         &config,
         "asset-123",
@@ -1087,6 +1233,9 @@ async fn maybe_warm_edge_swallows_warm_endpoint_failure() {
         &EdgeRegistryConfig {
             internal_token: "warm-secret".to_owned(),
             active_heartbeat_window: Duration::from_secs(120),
+            expected_edges: ExpectedEdges::default(),
+            rend_env: RendEnv::Local,
+            allow_insecure_edge_urls: false,
         },
         &config,
         "asset-123",
@@ -1141,6 +1290,50 @@ fn content_type_defaults_to_octet_stream() {
         request_content_type(&HeaderMap::new()),
         "application/octet-stream".to_owned()
     );
+}
+
+#[test]
+fn request_content_length_rejects_uploads_over_limit() {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("11"));
+
+    let error = request_content_length(&headers, 10).unwrap_err();
+
+    assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn counted_upload_body_rejects_streamed_body_over_limit() {
+    let byte_count = Arc::new(AtomicU64::new(0));
+    let stream = counted_body_stream(Body::from("too large"), byte_count.clone(), 3);
+
+    let result = stream.collect().await;
+
+    assert!(result.is_err());
+    assert!(byte_count.load(Ordering::Relaxed) > 3);
+}
+
+#[tokio::test]
+async fn upload_endpoint_rejects_content_length_over_limit_before_db() {
+    let mut config = test_config();
+    config.max_upload_bytes = 3;
+    let db = PgPoolOptions::new()
+        .connect_lazy(&config.database_url)
+        .unwrap();
+    let s3 = build_s3_client(&config);
+    let state = Arc::new(AppState {
+        config,
+        db,
+        http: reqwest::Client::new(),
+        s3,
+        started_at: Instant::now(),
+    });
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response =
+        post_video_with_headers(app, Body::empty(), Some("Bearer dev-secret"), Some("4")).await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
