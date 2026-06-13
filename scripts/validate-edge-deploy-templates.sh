@@ -19,7 +19,7 @@ require_file() {
 require_contains() {
   local file="$1"
   local needle="$2"
-  if ! grep -Fq "$needle" "$file"; then
+  if ! grep -Fq -- "$needle" "$file"; then
     fail "$file is missing required text: $needle"
   fi
 }
@@ -160,8 +160,16 @@ require_file compose.yml
 require_file .env.docker.example
 require_file docs/deployment-v1.md
 require_file docs/edge-host-runbook-v1.md
+require_file docs/release-images-v1.md
 require_file docs/templates/control-plane.compose.yml
 require_file docs/templates/edge-host.compose.yml
+require_file scripts/operator-common.sh
+require_file scripts/validate-production-env.sh
+require_file scripts/preflight-control-plane-host.sh
+require_file scripts/preflight-edge-host.sh
+require_file scripts/deploy-control-plane-host.sh
+require_file scripts/deploy-edge-host.sh
+require_file scripts/verify-first-host-deploy.sh
 
 require_compose_service compose.yml rend-api
 require_compose_service compose.yml rend-media-worker
@@ -191,12 +199,14 @@ require_compose_service docs/templates/control-plane.compose.yml rend-api
 require_compose_service docs/templates/control-plane.compose.yml rend-media-worker
 require_contains docs/templates/control-plane.compose.yml '${REND_API_IMAGE:?set REND_API_IMAGE}'
 require_contains docs/templates/control-plane.compose.yml '${REND_MEDIA_WORKER_IMAGE:?set REND_MEDIA_WORKER_IMAGE}'
+require_contains docs/templates/control-plane.compose.yml "immutable digest refs"
 require_contains docs/templates/control-plane.compose.yml "/etc/rend/rend-api.env"
 require_contains docs/templates/control-plane.compose.yml "/etc/rend/rend-media-worker.env"
 require_contains docs/templates/control-plane.compose.yml "http://127.0.0.1:4000/readyz"
 
 require_compose_service docs/templates/edge-host.compose.yml rend-edge
 require_contains docs/templates/edge-host.compose.yml '${REND_EDGE_IMAGE:?set REND_EDGE_IMAGE}'
+require_contains docs/templates/edge-host.compose.yml "immutable digest ref"
 require_contains docs/templates/edge-host.compose.yml "/etc/rend/rend-edge.env"
 require_contains docs/templates/edge-host.compose.yml "/var/lib/rend/edge-cache"
 require_contains docs/templates/edge-host.compose.yml "/var/spool/rend/edge-telemetry"
@@ -209,7 +219,24 @@ require_contains docs/edge-host-runbook-v1.md "/var/lib/rend/edge-cache"
 require_contains docs/edge-host-runbook-v1.md "/var/spool/rend/edge-telemetry"
 require_contains docs/edge-host-runbook-v1.md "x-rend-internal-token"
 require_contains docs/edge-host-runbook-v1.md "rollback"
+require_contains docs/edge-host-runbook-v1.md "--strict"
+require_contains docs/edge-host-runbook-v1.md "scripts/preflight-control-plane-host.sh"
+require_contains docs/edge-host-runbook-v1.md "scripts/preflight-edge-host.sh"
+require_contains docs/edge-host-runbook-v1.md "scripts/deploy-control-plane-host.sh"
+require_contains docs/edge-host-runbook-v1.md "scripts/deploy-edge-host.sh"
+require_contains docs/edge-host-runbook-v1.md "scripts/verify-first-host-deploy.sh"
 require_contains docs/deployment-v1.md "docs/edge-host-runbook-v1.md"
+require_contains docs/deployment-v1.md "docs/release-images-v1.md"
+require_contains docs/deployment-v1.md "scripts/validate-production-env.sh"
+require_contains docs/deployment-v1.md "scripts/preflight-control-plane-host.sh"
+require_contains docs/deployment-v1.md "scripts/preflight-edge-host.sh"
+require_contains docs/deployment-v1.md "scripts/verify-first-host-deploy.sh"
+require_contains docs/release-images-v1.md "Canonical Images"
+require_contains docs/release-images-v1.md "Production Gates"
+require_contains docs/release-images-v1.md "image_digest"
+require_contains docs/release-images-v1.md "--allow-dirty"
+require_contains docs/release-images-v1.md '`--push` requires'
+require_contains docs/release-images-v1.md "scripts/check-docker-image-versions.sh --running"
 
 if [[ "$failures" != "0" ]]; then
   exit 1
