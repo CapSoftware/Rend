@@ -13,13 +13,15 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use rend_config::{env_duration_secs, env_path, env_socket_addr, env_string, load_dotenv};
+use rend_config::{
+    env_duration_secs, env_path, env_socket_addr, env_string, env_usize, load_dotenv,
+};
 use rend_playback_auth::{
     SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
 };
@@ -27,6 +29,11 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, net::TcpListener};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
+
+const DEFAULT_WARM_MAX_ARTIFACTS: usize = 4;
+const HARD_WARM_MAX_ARTIFACTS: usize = 16;
+const WARM_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+const MAX_ASSET_ID_LEN: usize = 128;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -42,6 +49,7 @@ struct EdgeConfig {
     aws_secret_access_key: String,
     internal_token: String,
     playback_keyring: SingleKeyring,
+    warm_max_artifacts: usize,
     request_timeout: Duration,
 }
 
@@ -57,6 +65,12 @@ impl EdgeConfig {
             playback_signing_key_id,
             playback_signing_secret.into_bytes(),
         )?;
+        let warm_max_artifacts =
+            env_usize("REND_EDGE_WARM_MAX_ARTIFACTS", DEFAULT_WARM_MAX_ARTIFACTS)?;
+        anyhow::ensure!(
+            (1..=HARD_WARM_MAX_ARTIFACTS).contains(&warm_max_artifacts),
+            "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_WARM_MAX_ARTIFACTS}"
+        );
 
         Ok(Self {
             bind_addr: env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?,
@@ -74,6 +88,7 @@ impl EdgeConfig {
             aws_secret_access_key: env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password"),
             internal_token: env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token"),
             playback_keyring,
+            warm_max_artifacts,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
         })
     }
@@ -120,6 +135,50 @@ struct PlaceholderResponse<'a> {
     message: &'a str,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WarmRequest {
+    asset_id: String,
+    artifact_paths: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WarmResponse {
+    asset_id: String,
+    results: Vec<WarmEntryResponse>,
+    summary: WarmSummary,
+}
+
+#[derive(Serialize)]
+struct WarmEntryResponse {
+    artifact_path: String,
+    object_key: String,
+    cache_key: String,
+    status: WarmEntryStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WarmEntryStatus {
+    Warmed,
+    AlreadyWarm,
+    NotFound,
+    Failed,
+}
+
+#[derive(Default, Serialize)]
+struct WarmSummary {
+    total: usize,
+    warmed: usize,
+    already_warm: usize,
+    not_found: usize,
+    failed: usize,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -152,6 +211,11 @@ enum PlaybackError {
     Io(String),
 }
 
+#[derive(Debug)]
+enum WarmRequestError {
+    BadRequest(String),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     load_dotenv();
@@ -170,42 +234,7 @@ async fn main() -> Result<()> {
         s3,
         started_at: Instant::now(),
     });
-
-    let internal_routes = Router::new()
-        .route("/warm", post(internal_placeholder))
-        .route("/purge", post(internal_placeholder))
-        .route("/reload-config", post(internal_placeholder))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_internal_token,
-        ));
-
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route(
-            "/metrics",
-            get(metrics).route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_internal_token,
-            )),
-        )
-        .nest("/internal", internal_routes)
-        .route("/v/{asset_id}/{*artifact_path}", get(playback))
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
-                tracing::info_span!(
-                    "request",
-                    method = %request.method(),
-                    path = %request.uri().path()
-                )
-            }),
-        )
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            request_timeout,
-        ))
-        .with_state(state.clone());
+    let app = build_app(state.clone(), request_timeout);
 
     let listener = TcpListener::bind(state.config.bind_addr)
         .await
@@ -242,6 +271,45 @@ fn build_s3_client(config: &EdgeConfig) -> S3Client {
         .build();
 
     S3Client::from_conf(s3_config)
+}
+
+fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
+    let internal_routes = Router::new()
+        .route("/warm", post(warm))
+        .route_layer(DefaultBodyLimit::max(WARM_REQUEST_BODY_LIMIT_BYTES))
+        .route("/purge", post(internal_placeholder))
+        .route("/reload-config", post(internal_placeholder))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_internal_token,
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route(
+            "/metrics",
+            get(metrics).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_internal_token,
+            )),
+        )
+        .nest("/internal", internal_routes)
+        .route("/v/{asset_id}/{*artifact_path}", get(playback))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                tracing::info_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            request_timeout,
+        ))
+        .with_state(state)
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthResponse<'static>> {
@@ -351,6 +419,199 @@ async fn playback_inner(
         Body::from(bytes),
         content_length,
     ))
+}
+
+async fn warm(State(state): State<Arc<AppState>>, Json(request): Json<WarmRequest>) -> Response {
+    match warm_inner(state, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn warm_inner(
+    state: Arc<AppState>,
+    request: WarmRequest,
+) -> std::result::Result<WarmResponse, WarmRequestError> {
+    let entries = validate_warm_request(&request, state.config.warm_max_artifacts)?;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for (artifact_path, artifact) in entries {
+        results.push(warm_artifact(&state, artifact_path, artifact).await);
+    }
+
+    let mut summary = WarmSummary {
+        total: results.len(),
+        ..WarmSummary::default()
+    };
+    for result in &results {
+        match result.status {
+            WarmEntryStatus::Warmed => summary.warmed += 1,
+            WarmEntryStatus::AlreadyWarm => summary.already_warm += 1,
+            WarmEntryStatus::NotFound => summary.not_found += 1,
+            WarmEntryStatus::Failed => summary.failed += 1,
+        }
+    }
+
+    Ok(WarmResponse {
+        asset_id: request.asset_id,
+        results,
+        summary,
+    })
+}
+
+fn validate_warm_request(
+    request: &WarmRequest,
+    max_artifacts: usize,
+) -> std::result::Result<Vec<(String, PlaybackArtifact)>, WarmRequestError> {
+    if !is_safe_asset_id(&request.asset_id) {
+        return Err(WarmRequestError::BadRequest(
+            "asset_id must use the playback asset id character set".to_owned(),
+        ));
+    }
+
+    if request.artifact_paths.is_empty() {
+        return Err(WarmRequestError::BadRequest(
+            "artifact_paths must include at least one playback artifact".to_owned(),
+        ));
+    }
+
+    if request.artifact_paths.len() > max_artifacts {
+        return Err(WarmRequestError::BadRequest(format!(
+            "artifact_paths must include at most {max_artifacts} entries"
+        )));
+    }
+
+    let mut entries = Vec::with_capacity(request.artifact_paths.len());
+    for artifact_path in &request.artifact_paths {
+        let artifact = map_playback_artifact(&request.asset_id, artifact_path).map_err(|_| {
+            WarmRequestError::BadRequest(format!(
+                "unsupported playback artifact path: {artifact_path}"
+            ))
+        })?;
+        entries.push((artifact_path.clone(), artifact));
+    }
+
+    Ok(entries)
+}
+
+async fn warm_artifact(
+    state: &AppState,
+    artifact_path: String,
+    artifact: PlaybackArtifact,
+) -> WarmEntryResponse {
+    let cache_path = state.config.cache_dir.join(&artifact.cache_key);
+
+    match valid_cache_file_size(&cache_path).await {
+        Ok(Some(byte_size)) => {
+            return warm_entry(
+                artifact_path,
+                artifact,
+                WarmEntryStatus::AlreadyWarm,
+                Some(byte_size),
+                None,
+            );
+        }
+        Ok(None) => {}
+        Err(message) => {
+            tracing::warn!(
+                artifact_path,
+                object_key = %artifact.object_key,
+                error = %message,
+                "failed to inspect edge cache before warming",
+            );
+            return warm_entry(
+                artifact_path,
+                artifact,
+                WarmEntryStatus::Failed,
+                None,
+                Some(message),
+            );
+        }
+    }
+
+    let bytes = match fetch_origin_artifact(state, &artifact).await {
+        Ok(bytes) => bytes,
+        Err(PlaybackError::OriginNotFound(message)) => {
+            return warm_entry(
+                artifact_path,
+                artifact,
+                WarmEntryStatus::NotFound,
+                None,
+                Some(message),
+            );
+        }
+        Err(error) => {
+            let message = error.log_message();
+            tracing::warn!(
+                artifact_path,
+                object_key = %artifact.object_key,
+                error = %message,
+                "failed to fetch origin artifact for warming",
+            );
+            return warm_entry(
+                artifact_path,
+                artifact,
+                WarmEntryStatus::Failed,
+                None,
+                Some(message),
+            );
+        }
+    };
+
+    let byte_size = u64::try_from(bytes.len()).ok();
+    if let Err(error) = write_cache_file(&cache_path, &bytes).await {
+        let message = error.log_message();
+        tracing::warn!(
+            artifact_path,
+            object_key = %artifact.object_key,
+            error = %message,
+            "failed to write warmed artifact into edge cache",
+        );
+        return warm_entry(
+            artifact_path,
+            artifact,
+            WarmEntryStatus::Failed,
+            byte_size,
+            Some(message),
+        );
+    }
+
+    warm_entry(
+        artifact_path,
+        artifact,
+        WarmEntryStatus::Warmed,
+        byte_size,
+        None,
+    )
+}
+
+async fn valid_cache_file_size(path: &FsPath) -> std::result::Result<Option<u64>, String> {
+    match fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => Ok(Some(metadata.len())),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "failed to inspect cache file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn warm_entry(
+    artifact_path: String,
+    artifact: PlaybackArtifact,
+    status: WarmEntryStatus,
+    byte_size: Option<u64>,
+    message: Option<String>,
+) -> WarmEntryResponse {
+    WarmEntryResponse {
+        artifact_path,
+        object_key: artifact.object_key,
+        cache_key: artifact.cache_key,
+        status,
+        byte_size,
+        message,
+    }
 }
 
 fn validate_playback_request(
@@ -516,6 +777,7 @@ fn playback_artifact(
 
 fn is_safe_asset_id(asset_id: &str) -> bool {
     !asset_id.is_empty()
+        && asset_id.len() <= MAX_ASSET_ID_LEN
         && asset_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
@@ -669,12 +931,61 @@ impl IntoResponse for PlaybackError {
     }
 }
 
+impl PlaybackError {
+    fn log_message(self) -> String {
+        match self {
+            PlaybackError::Unauthorized => "unauthorized playback token".to_owned(),
+            PlaybackError::NotFound(message)
+            | PlaybackError::OriginNotFound(message)
+            | PlaybackError::Origin(message)
+            | PlaybackError::Io(message) => message,
+        }
+    }
+}
+
+impl IntoResponse for WarmRequestError {
+    fn into_response(self) -> Response {
+        match self {
+            WarmRequestError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: message }),
+            )
+                .into_response(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use rend_playback_auth::{PlaybackTokenIssuer, SigningKey};
+    use serde_json::Value;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+    use tower::ServiceExt;
 
     const NOW: u64 = 1_800_000_000;
+
+    #[derive(Clone)]
+    struct FakeOriginState {
+        objects: Arc<Mutex<HashMap<String, FakeOriginObject>>>,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    enum FakeOriginObject {
+        Body(Vec<u8>),
+        Error(StatusCode),
+    }
+
+    #[derive(Deserialize)]
+    struct FakeS3Path {
+        bucket: String,
+        key: String,
+    }
 
     fn test_auth() -> (SingleKeyring, PlaybackTokenIssuer) {
         let key = SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap();
@@ -682,6 +993,110 @@ mod tests {
             SingleKeyring::from_key(key.clone()),
             PlaybackTokenIssuer::new(key, Duration::from_secs(300)).unwrap(),
         )
+    }
+
+    async fn fake_s3_get(
+        State(state): State<FakeOriginState>,
+        AxumPath(path): AxumPath<FakeS3Path>,
+    ) -> Response {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(format!("{}/{}", path.bucket, path.key));
+
+        let object = state.objects.lock().unwrap().get(&path.key).cloned();
+        match object {
+            Some(FakeOriginObject::Body(bytes)) => (StatusCode::OK, bytes).into_response(),
+            Some(FakeOriginObject::Error(status)) => status.into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/xml")],
+                format!(
+                    "<Error><Code>NoSuchKey</Code><Key>{}</Key></Error>",
+                    path.key
+                ),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn spawn_fake_origin(
+        objects: HashMap<String, FakeOriginObject>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeOriginState {
+            objects: Arc::new(Mutex::new(objects)),
+            requests: requests.clone(),
+        };
+        let app = Router::new()
+            .route("/{bucket}/{*key}", get(fake_s3_get))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("http://{addr}"), requests)
+    }
+
+    fn test_cache_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("rend-edge-{name}-{}", temp_file_suffix()))
+    }
+
+    fn test_state(cache_dir: PathBuf, origin_endpoint: String) -> Arc<AppState> {
+        let config = EdgeConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            edge_id: "test-edge".to_owned(),
+            region: "test".to_owned(),
+            cache_dir,
+            origin_health_url: format!("{origin_endpoint}/minio/health/ready"),
+            s3_endpoint: origin_endpoint,
+            s3_region: "us-east-1".to_owned(),
+            s3_bucket: "rend-local".to_owned(),
+            aws_access_key_id: "test".to_owned(),
+            aws_secret_access_key: "test".to_owned(),
+            internal_token: "test-internal-token".to_owned(),
+            playback_keyring: test_auth().0,
+            warm_max_artifacts: 4,
+            request_timeout: Duration::from_secs(10),
+        };
+        let s3 = build_s3_client(&config);
+
+        Arc::new(AppState {
+            config,
+            http: reqwest::Client::new(),
+            s3,
+            started_at: Instant::now(),
+        })
+    }
+
+    async fn post_warm(app: Router, body: impl Into<Body>, token: Option<&str>) -> Response {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/warm")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header("x-rend-internal-token", token);
+        }
+
+        app.oneshot(builder.body(body.into()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn warm_body(asset_id: &str, artifact_paths: &[&str]) -> String {
+        serde_json::json!({
+            "asset_id": asset_id,
+            "artifact_paths": artifact_paths,
+        })
+        .to_string()
     }
 
     fn tamper_last_char(value: &str) -> String {
@@ -765,6 +1180,187 @@ mod tests {
                 "{asset_id} should be rejected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn warm_rejects_missing_or_wrong_internal_token() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("warm-auth"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+        let body = warm_body("asset-123", &["opener.mp4"]);
+
+        let response = post_warm(app.clone(), body.clone(), None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = post_warm(app, body, Some("wrong-token")).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn warm_rejects_malformed_json_request() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("warm-malformed"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(app, "{", Some("test-internal-token")).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn warm_rejects_unsupported_artifact_path() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("warm-unsupported"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("asset-123", &["thumbnail.jpg"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn warm_rejects_unsafe_asset_id() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("warm-unsafe-asset"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("../asset", &["opener.mp4"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn warm_skips_existing_nonempty_cache_file() {
+        let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+        let cache_dir = test_cache_dir("warm-already");
+        let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+        fs::create_dir_all(cache_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&cache_path, b"cached").await.unwrap();
+        let state = test_state(cache_dir, origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("asset-123", &["opener.mp4"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["results"][0]["status"], "already_warm");
+        assert_eq!(json["results"][0]["byte_size"], 6);
+        assert_eq!(json["summary"]["already_warm"], 1);
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn warm_reports_origin_not_found_per_artifact() {
+        let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("warm-not-found"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("asset-123", &["opener.mp4"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["results"][0]["artifact_path"], "opener.mp4");
+        assert_eq!(
+            json["results"][0]["object_key"],
+            "videos/asset-123/opener.mp4"
+        );
+        assert_eq!(
+            json["results"][0]["cache_key"],
+            "videos/asset-123/opener.mp4"
+        );
+        assert_eq!(json["results"][0]["status"], "not_found");
+        assert_eq!(json["summary"]["not_found"], 1);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["rend-local/videos/asset-123/opener.mp4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_reports_origin_failure_per_artifact() {
+        let mut objects = HashMap::new();
+        objects.insert(
+            "videos/asset-123/opener.mp4".to_owned(),
+            FakeOriginObject::Error(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+        let state = test_state(test_cache_dir("warm-failed"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("asset-123", &["opener.mp4"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["results"][0]["status"], "failed");
+        assert_eq!(json["summary"]["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn warm_fetches_origin_and_writes_same_cache_key_as_playback() {
+        let mut objects = HashMap::new();
+        objects.insert(
+            "videos/asset-123/hls/master.m3u8".to_owned(),
+            FakeOriginObject::Body(b"#EXTM3U\n".to_vec()),
+        );
+        let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
+        let cache_dir = test_cache_dir("warm-success");
+        let cache_path = cache_dir.join("videos/asset-123/hls/master.m3u8");
+        let state = test_state(cache_dir, origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_warm(
+            app,
+            warm_body("asset-123", &["hls/master.m3u8"]),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["results"][0]["artifact_path"], "hls/master.m3u8");
+        assert_eq!(
+            json["results"][0]["object_key"],
+            "videos/asset-123/hls/master.m3u8"
+        );
+        assert_eq!(
+            json["results"][0]["cache_key"],
+            "videos/asset-123/hls/master.m3u8"
+        );
+        assert_eq!(json["results"][0]["status"], "warmed");
+        assert_eq!(json["results"][0]["byte_size"], 8);
+        assert_eq!(json["summary"]["warmed"], 1);
+        assert_eq!(fs::read(cache_path).await.unwrap(), b"#EXTM3U\n");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["rend-local/videos/asset-123/hls/master.m3u8"]
+        );
     }
 
     #[test]
