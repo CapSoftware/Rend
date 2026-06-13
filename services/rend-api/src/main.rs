@@ -793,6 +793,14 @@ struct AssetCurrentResponse {
     artifacts: Vec<AssetArtifactSummary>,
 }
 
+#[derive(Serialize)]
+struct DeleteAssetResponse {
+    asset_id: String,
+    deleted: bool,
+    already_deleted: bool,
+    purge_attempted: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct AssetArtifactSummary {
     kind: String,
@@ -927,8 +935,30 @@ struct EdgeWarmRequest {
     artifact_paths: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct EdgePurgeRequest {
+    asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_paths: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct EdgePurgeResponse {
+    purged: Vec<Value>,
+    missing: Vec<Value>,
+    rejected: Vec<Value>,
+    errors: Vec<Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EdgeWarmFailure {
+    reason: &'static str,
+    status: Option<u16>,
+    detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EdgePurgeFailure {
     reason: &'static str,
     status: Option<u16>,
     detail: String,
@@ -1049,7 +1079,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
         .route("/v1/events", get(get_event_stream))
-        .route("/v1/assets/{asset_id}", get(get_asset_current))
+        .route(
+            "/v1/assets/{asset_id}",
+            get(get_asset_current).delete(delete_asset),
+        )
         .route("/v1/assets/{asset_id}/events", get(get_asset_events))
         .route("/v1/assets/{asset_id}/playback", get(get_asset_playback))
         .route_layer(middleware::from_fn_with_state(
@@ -1183,6 +1216,43 @@ async fn get_asset_current_inner(
     };
 
     asset_current_response(asset, artifacts)
+}
+
+async fn delete_asset(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+) -> Response {
+    match delete_asset_inner(state, asset_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn delete_asset_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+) -> Result<DeleteAssetResponse, AppError> {
+    let asset_id = normalize_asset_id(&asset_id)?;
+    let already_deleted = mark_asset_deleted(&state.db, &asset_id).await?;
+    let purge_attempted = if already_deleted {
+        false
+    } else {
+        maybe_purge_edge(
+            &state.db,
+            &state.http,
+            &state.config.edge_purge,
+            &asset_id,
+            None,
+        )
+        .await
+    };
+
+    Ok(DeleteAssetResponse {
+        asset_id,
+        deleted: true,
+        already_deleted,
+        purge_attempted,
+    })
 }
 
 async fn get_asset_events(
@@ -3108,7 +3178,31 @@ impl EdgeWarmFailure {
     }
 }
 
+impl EdgePurgeFailure {
+    fn request(detail: String) -> Self {
+        Self {
+            reason: "request_failed",
+            status: None,
+            detail,
+        }
+    }
+
+    fn status(status: u16, detail: String) -> Self {
+        Self {
+            reason: "status_error",
+            status: Some(status),
+            detail,
+        }
+    }
+}
+
 impl std::fmt::Display for EdgeWarmFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.detail.fmt(formatter)
+    }
+}
+
+impl std::fmt::Display for EdgePurgeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.detail.fmt(formatter)
     }
