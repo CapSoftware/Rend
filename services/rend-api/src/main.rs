@@ -3518,6 +3518,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_asset_endpoint_requires_dev_api_key() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+
+        let response =
+            route_response_with_method(app.clone(), "DELETE", "/v1/assets/asset-123", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response_with_method(
+            app,
+            "DELETE",
+            "/v1/assets/asset-123",
+            Some("Bearer wrong-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn asset_events_endpoint_requires_dev_api_key() {
         let app = build_app(test_state(), Duration::from_secs(10));
 
