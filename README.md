@@ -214,6 +214,32 @@ fetches the signed manifest twice; waits for the edge queue/flusher; and verifie
 `HIT`, `MISS`, and `200` status aggregates. It does not assert watch time,
 startup success, viewer identity, or billing-grade accuracy.
 
+Run the local playback benchmark separately from smoke tests:
+
+```bash
+bun run backend:benchmark:local
+```
+
+The benchmark starts or reuses the same local compose dependencies, API, edge,
+and media worker, generates small and medium fixture videos, uploads each
+fixture, waits for HLS playback, and records baseline timings for the Playback
+Edge V1 path. It prints a human-readable table and writes machine-readable JSON
+to `.rend/benchmarks/playback-edge-local-<timestamp>.json` by default.
+
+The JSON includes git SHA when available, dirty state, host, timestamp, fixture
+size and duration, cache-state handling, service reuse/startup state, selected
+non-secret environment settings, and secret presence booleans. It records the
+current baseline only; there are no performance thresholds and it is not part of
+the smoke suite.
+
+Useful benchmark overrides:
+
+```bash
+REND_BENCHMARK_FIXTURES=small bun run backend:benchmark:local
+REND_BENCHMARK_OUTPUT=.rend/benchmarks/my-run.json bun run backend:benchmark:local
+REND_BENCHMARK_COALESCING_CONCURRENCY=32 bun run backend:benchmark:local
+```
+
 Edge cache behavior:
 
 - `rend-edge` validates signed playback tokens locally before cache lookup,
