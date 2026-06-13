@@ -109,6 +109,10 @@
     stroke: none;
   }
 
+  .sketch .flow-path {
+    stroke: none;
+  }
+
   .squiggle path {
     fill: none;
     stroke: var(--color-ink);
