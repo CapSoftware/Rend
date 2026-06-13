@@ -1,0 +1,24 @@
+name: rend-edge-host
+
+services:
+  rend-edge:
+    image: ${REND_EDGE_IMAGE:?set REND_EDGE_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/rend/rend-edge.env
+    ports:
+      - "${REND_EDGE_PUBLISH_ADDR:-0.0.0.0}:${REND_EDGE_PUBLISH_PORT:-4100}:4100"
+    volumes:
+      - ${REND_EDGE_CACHE_VOLUME:-/var/lib/rend/edge-cache}:/var/lib/rend/edge-cache
+      - ${REND_EDGE_TELEMETRY_SPOOL_VOLUME:-/var/spool/rend/edge-telemetry}:/var/spool/rend/edge-telemetry
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4100/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
