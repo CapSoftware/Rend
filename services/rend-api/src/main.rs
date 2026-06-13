@@ -18,10 +18,10 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Path as AxumPath, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use bytes::Bytes;
@@ -61,6 +61,7 @@ struct ApiConfig {
     aws_secret_access_key: String,
     playback_base_url: String,
     playback_token_issuer: PlaybackTokenIssuer,
+    playback_bootstrap_prefetch_segments: usize,
     edge_warm: EdgeWarmConfig,
     media_processing: media::MediaProcessingConfig,
     auto_migrate: bool,
@@ -89,6 +90,14 @@ impl ApiConfig {
             "local-dev-playback-signing-secret",
         );
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
+        let playback_bootstrap_prefetch_segments = env_usize(
+            "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS",
+            DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
+        )?;
+        anyhow::ensure!(
+            playback_bootstrap_prefetch_segments <= HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
+            "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS must be at most {HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS}"
+        );
         let edge_warm_url = optional_env_url("REND_EDGE_WARM_URL");
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
         let edge_warm_max_artifacts = env_usize(
@@ -141,6 +150,7 @@ impl ApiConfig {
             aws_secret_access_key,
             playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
             playback_token_issuer,
+            playback_bootstrap_prefetch_segments,
             edge_warm: EdgeWarmConfig {
                 url: edge_warm_url,
                 internal_token: edge_internal_token,
@@ -198,6 +208,80 @@ struct CreateVideoResponse {
     source_object_key: String,
     byte_size: i64,
     playback_url: String,
+}
+
+#[derive(Serialize)]
+struct PlaybackBootstrapResponse {
+    asset_id: String,
+    source_state: String,
+    playable_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playback_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playback_content_type: Option<String>,
+    playback_token_expires_at: u64,
+    ttl_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opener_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opener_content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_content_type: Option<String>,
+    prefetch_hints: Vec<PlaybackPrefetchHint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct PlaybackPrefetchHint {
+    artifact_path: String,
+    url: String,
+    content_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssetPlaybackRecord {
+    asset_id: String,
+    source_state: String,
+    playable_state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssetStateRecord {
+    asset_id: String,
+    source_state: String,
+    playable_state: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaybackArtifactRecord {
+    kind: String,
+    object_key: String,
+    content_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssetEventRecord {
+    id: String,
+    asset_id: String,
+    sequence: i64,
+    event_type: String,
+    created_at: String,
+    metadata_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaybackArtifact {
+    artifact_path: String,
+    content_type: String,
+}
+
+struct IssuedPlaybackToken {
+    token: String,
+    expires_at: u64,
+    ttl_seconds: u64,
 }
 
 #[derive(Serialize)]
@@ -355,6 +439,275 @@ async fn create_video(
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+async fn get_asset_playback(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+) -> Response {
+    match get_asset_playback_inner(state, asset_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_asset_playback_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+) -> Result<PlaybackBootstrapResponse, AppError> {
+    let asset = fetch_asset_playback_record(&state.db, &asset_id).await?;
+    let artifacts = if asset.is_some() {
+        fetch_playback_artifacts(&state.db, &asset_id).await?
+    } else {
+        Vec::new()
+    };
+    let now = current_unix_timestamp().map_err(AppError::internal)?;
+
+    playback_bootstrap_response(
+        asset,
+        &artifacts,
+        &state.config.playback_base_url,
+        &state.config.playback_token_issuer,
+        state.config.playback_bootstrap_prefetch_segments,
+        now,
+    )
+}
+
+async fn fetch_asset_playback_record(
+    db: &PgPool,
+    asset_id: &str,
+) -> Result<Option<AssetPlaybackRecord>, AppError> {
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "
+        SELECT id::text, source_state, playable_state
+        FROM rend.assets
+        WHERE id::text = $1
+          AND deleted_at IS NULL
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(row.map(
+        |(asset_id, source_state, playable_state)| AssetPlaybackRecord {
+            asset_id,
+            source_state,
+            playable_state,
+        },
+    ))
+}
+
+async fn fetch_playback_artifacts(
+    db: &PgPool,
+    asset_id: &str,
+) -> Result<Vec<PlaybackArtifactRecord>, AppError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "
+        SELECT kind, object_key, content_type
+        FROM rend.artifacts
+        WHERE asset_id::text = $1
+          AND kind IN ('opener', 'manifest', 'segment')
+        ORDER BY kind, object_key
+        ",
+    )
+    .bind(asset_id)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(kind, object_key, content_type)| PlaybackArtifactRecord {
+            kind,
+            object_key,
+            content_type,
+        })
+        .collect())
+}
+
+fn playback_bootstrap_response(
+    asset: Option<AssetPlaybackRecord>,
+    artifacts: &[PlaybackArtifactRecord],
+    playback_base_url: &str,
+    issuer: &PlaybackTokenIssuer,
+    prefetch_segment_limit: usize,
+    now: u64,
+) -> Result<PlaybackBootstrapResponse, AppError> {
+    let asset = asset.ok_or_else(|| AppError::not_found("asset not found"))?;
+    let token = issue_playback_token(issuer, &asset.asset_id, now).map_err(AppError::internal)?;
+    let playback_artifacts = playback_artifacts(&asset.asset_id, artifacts);
+    let opener_artifact = find_playback_artifact(&playback_artifacts, "opener.mp4").cloned();
+    let manifest_artifact = (asset.playable_state == "hls_ready")
+        .then(|| find_playback_artifact(&playback_artifacts, "hls/master.m3u8").cloned())
+        .flatten();
+    let primary_artifact = primary_playback_artifact(
+        &asset.playable_state,
+        opener_artifact.as_ref(),
+        manifest_artifact.as_ref(),
+    );
+    let (playback_url, playback_content_type) = signed_artifact_fields(
+        playback_base_url,
+        &asset.asset_id,
+        primary_artifact,
+        &token.token,
+    );
+    let (opener_url, opener_content_type) = signed_artifact_fields(
+        playback_base_url,
+        &asset.asset_id,
+        opener_artifact.as_ref(),
+        &token.token,
+    );
+    let (manifest_url, manifest_content_type) = signed_artifact_fields(
+        playback_base_url,
+        &asset.asset_id,
+        manifest_artifact.as_ref(),
+        &token.token,
+    );
+    let prefetch_hints = if asset.playable_state == "hls_ready" {
+        first_segment_prefetch_hints(
+            playback_base_url,
+            &asset.asset_id,
+            &playback_artifacts,
+            &token.token,
+            prefetch_segment_limit,
+        )
+    } else {
+        Vec::new()
+    };
+
+    Ok(PlaybackBootstrapResponse {
+        asset_id: asset.asset_id,
+        source_state: asset.source_state,
+        playable_state: asset.playable_state,
+        playback_url,
+        playback_content_type,
+        playback_token_expires_at: token.expires_at,
+        ttl_seconds: token.ttl_seconds,
+        opener_url,
+        opener_content_type,
+        manifest_url,
+        manifest_content_type,
+        prefetch_hints,
+    })
+}
+
+fn playback_artifacts(asset_id: &str, records: &[PlaybackArtifactRecord]) -> Vec<PlaybackArtifact> {
+    let mut artifacts = records
+        .iter()
+        .filter_map(|record| playback_artifact_from_record(asset_id, record))
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| left.artifact_path.cmp(&right.artifact_path));
+    artifacts
+}
+
+fn playback_artifact_from_record(
+    asset_id: &str,
+    record: &PlaybackArtifactRecord,
+) -> Option<PlaybackArtifact> {
+    let object_prefix = format!("videos/{asset_id}/");
+    let artifact_path = record.object_key.strip_prefix(&object_prefix)?;
+
+    let is_supported = match record.kind.as_str() {
+        "opener" => artifact_path == "opener.mp4",
+        "manifest" => artifact_path == "hls/master.m3u8",
+        "segment" => artifact_path
+            .strip_prefix("hls/")
+            .is_some_and(is_valid_hls_segment_name),
+        _ => false,
+    };
+
+    is_supported.then(|| PlaybackArtifact {
+        artifact_path: artifact_path.to_owned(),
+        content_type: record.content_type.clone(),
+    })
+}
+
+fn find_playback_artifact<'a>(
+    artifacts: &'a [PlaybackArtifact],
+    artifact_path: &str,
+) -> Option<&'a PlaybackArtifact> {
+    artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_path == artifact_path)
+}
+
+fn primary_playback_artifact<'a>(
+    playable_state: &str,
+    opener_artifact: Option<&'a PlaybackArtifact>,
+    manifest_artifact: Option<&'a PlaybackArtifact>,
+) -> Option<&'a PlaybackArtifact> {
+    match playable_state {
+        "hls_ready" => manifest_artifact.or(opener_artifact),
+        "opener_ready" => opener_artifact,
+        _ => None,
+    }
+}
+
+fn signed_artifact_fields(
+    playback_base_url: &str,
+    asset_id: &str,
+    artifact: Option<&PlaybackArtifact>,
+    token: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(artifact) = artifact else {
+        return (None, None);
+    };
+
+    (
+        Some(signed_artifact_url(
+            playback_base_url,
+            asset_id,
+            &artifact.artifact_path,
+            token,
+        )),
+        Some(artifact.content_type.clone()),
+    )
+}
+
+fn first_segment_prefetch_hints(
+    playback_base_url: &str,
+    asset_id: &str,
+    artifacts: &[PlaybackArtifact],
+    token: &str,
+    limit: usize,
+) -> Vec<PlaybackPrefetchHint> {
+    artifacts
+        .iter()
+        .filter(|artifact| is_hls_segment_artifact_path(&artifact.artifact_path))
+        .take(limit)
+        .map(|artifact| PlaybackPrefetchHint {
+            artifact_path: artifact.artifact_path.clone(),
+            url: signed_artifact_url(playback_base_url, asset_id, &artifact.artifact_path, token),
+            content_type: artifact.content_type.clone(),
+        })
+        .collect()
+}
+
+fn issue_playback_token(
+    issuer: &PlaybackTokenIssuer,
+    asset_id: &str,
+    now: u64,
+) -> Result<IssuedPlaybackToken, PlaybackAuthError> {
+    let ttl_seconds = issuer.ttl().as_secs();
+    let expires_at = now
+        .checked_add(ttl_seconds)
+        .ok_or(PlaybackAuthError::InvalidTtl)?;
+    let token = issuer.issue_asset_playback_token(asset_id, now)?;
+
+    Ok(IssuedPlaybackToken {
+        token,
+        expires_at,
+        ttl_seconds,
+    })
+}
+
+fn signed_artifact_url(base_url: &str, asset_id: &str, artifact_path: &str, token: &str) -> String {
+    format!(
+        "{}/v/{asset_id}/{artifact_path}?token={token}",
+        base_url.trim_end_matches('/')
+    )
 }
 
 async fn create_video_inner(
@@ -540,11 +893,13 @@ fn playback_url(
     now: u64,
 ) -> Result<String, PlaybackAuthError> {
     let artifact_path = playback_artifact_path(playable_state);
-    let token = issuer.issue_asset_playback_token(asset_id, now)?;
+    let token = issue_playback_token(issuer, asset_id, now)?;
 
-    Ok(format!(
-        "{}/v/{asset_id}/{artifact_path}?token={token}",
-        base_url.trim_end_matches('/')
+    Ok(signed_artifact_url(
+        base_url,
+        asset_id,
+        artifact_path,
+        &token.token,
     ))
 }
 
@@ -827,6 +1182,13 @@ fn init_tracing() {
 }
 
 impl AppError {
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
     fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(error = %error, "rend-api request failed");
         Self {
