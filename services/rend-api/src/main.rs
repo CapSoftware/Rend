@@ -3375,6 +3375,10 @@ mod tests {
                 internal_token: "internal".to_owned(),
                 max_artifacts: DEFAULT_EDGE_WARM_MAX_ARTIFACTS,
             },
+            edge_purge: EdgePurgeConfig {
+                url: None,
+                internal_token: "internal".to_owned(),
+            },
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: "ffmpeg".to_owned(),
                 ffprobe_path: "ffprobe".to_owned(),
@@ -3480,7 +3484,16 @@ mod tests {
     }
 
     async fn route_response(app: Router, path: &str, auth: Option<&str>) -> Response {
-        let mut builder = Request::builder().method("GET").uri(path);
+        route_response_with_method(app, "GET", path, auth).await
+    }
+
+    async fn route_response_with_method(
+        app: Router,
+        method: &str,
+        path: &str,
+        auth: Option<&str>,
+    ) -> Response {
+        let mut builder = Request::builder().method(method).uri(path);
         if let Some(auth) = auth {
             builder = builder.header(header::AUTHORIZATION, auth);
         }
