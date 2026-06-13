@@ -13,13 +13,16 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use rend_config::{env_duration_secs, env_path, env_socket_addr, env_string, load_dotenv};
+use rend_playback_auth::{
+    SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
+};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, net::TcpListener};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
@@ -38,11 +41,23 @@ struct EdgeConfig {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     internal_token: String,
+    playback_keyring: SingleKeyring,
     request_timeout: Duration,
 }
 
 impl EdgeConfig {
     fn from_env() -> Result<Self> {
+        let playback_signing_key_id =
+            env_string("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key");
+        let playback_signing_secret = env_string(
+            "REND_PLAYBACK_SIGNING_SECRET",
+            "local-dev-playback-signing-secret",
+        );
+        let playback_keyring = SingleKeyring::new(
+            playback_signing_key_id,
+            playback_signing_secret.into_bytes(),
+        )?;
+
         Ok(Self {
             bind_addr: env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?,
             edge_id: env_string("REND_EDGE_ID", "local-edge-001"),
@@ -58,6 +73,7 @@ impl EdgeConfig {
             aws_access_key_id: env_string("AWS_ACCESS_KEY_ID", "rend_minio"),
             aws_secret_access_key: env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password"),
             internal_token: env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token"),
+            playback_keyring,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
         })
     }
@@ -115,6 +131,11 @@ struct PlaybackPath {
     artifact_path: String,
 }
 
+#[derive(Deserialize)]
+struct PlaybackQuery {
+    token: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct PlaybackArtifact {
     object_key: String,
@@ -124,6 +145,7 @@ struct PlaybackArtifact {
 
 #[derive(Debug)]
 enum PlaybackError {
+    Unauthorized,
     NotFound(String),
     OriginNotFound(String),
     Origin(String),
@@ -267,8 +289,9 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 async fn playback(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<PlaybackPath>,
+    Query(query): Query<PlaybackQuery>,
 ) -> Response {
-    match playback_inner(state, path).await {
+    match playback_inner(state, path, query.token.as_deref()).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
     }
@@ -277,7 +300,17 @@ async fn playback(
 async fn playback_inner(
     state: Arc<AppState>,
     path: PlaybackPath,
+    token: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
+    let now = current_unix_timestamp().map_err(|error| PlaybackError::Io(error.to_string()))?;
+    validate_playback_request(
+        &state.config.playback_keyring,
+        &path.asset_id,
+        &path.artifact_path,
+        token,
+        now,
+    )?;
+
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
@@ -310,6 +343,19 @@ async fn playback_inner(
         Body::from(bytes),
         content_length,
     ))
+}
+
+fn validate_playback_request(
+    keyring: &SingleKeyring,
+    asset_id: &str,
+    artifact_path: &str,
+    token: Option<&str>,
+    now: u64,
+) -> std::result::Result<(), PlaybackError> {
+    let token = token.ok_or(PlaybackError::Unauthorized)?;
+    validate_playback_token(token, asset_id, artifact_path, now, keyring)
+        .map(|_| ())
+        .map_err(|_| PlaybackError::Unauthorized)
 }
 
 fn artifact_response(
@@ -467,17 +513,6 @@ fn is_safe_asset_id(asset_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn is_valid_hls_segment_name(segment_name: &str) -> bool {
-    let Some(number) = segment_name
-        .strip_prefix("segment_")
-        .and_then(|name| name.strip_suffix(".ts"))
-    else {
-        return false;
-    };
-
-    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 async fn internal_placeholder() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -599,6 +634,10 @@ fn init_tracing() {
 impl IntoResponse for PlaybackError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            PlaybackError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized playback token".to_owned(),
+            ),
             PlaybackError::NotFound(message) | PlaybackError::OriginNotFound(message) => {
                 (StatusCode::NOT_FOUND, message)
             }
@@ -625,6 +664,24 @@ impl IntoResponse for PlaybackError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rend_playback_auth::{PlaybackTokenIssuer, SigningKey};
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn test_auth() -> (SingleKeyring, PlaybackTokenIssuer) {
+        let key = SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap();
+        (
+            SingleKeyring::from_key(key.clone()),
+            PlaybackTokenIssuer::new(key, Duration::from_secs(300)).unwrap(),
+        )
+    }
+
+    fn tamper_last_char(value: &str) -> String {
+        let mut output = value.to_owned();
+        let last = output.pop().unwrap();
+        output.push(if last == 'A' { 'B' } else { 'A' });
+        output
+    }
 
     #[test]
     fn maps_opener_to_goal_three_object_and_cache_key() {
@@ -699,6 +756,83 @@ mod tests {
                 map_playback_artifact(asset_id, "opener.mp4").is_err(),
                 "{asset_id} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn playback_auth_rejects_missing_token() {
+        let (keyring, _issuer) = test_auth();
+
+        assert!(matches!(
+            validate_playback_request(&keyring, "asset-123", "opener.mp4", None, NOW),
+            Err(PlaybackError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn playback_auth_rejects_malformed_token() {
+        let (keyring, _issuer) = test_auth();
+
+        assert!(matches!(
+            validate_playback_request(
+                &keyring,
+                "asset-123",
+                "opener.mp4",
+                Some("not-a-valid-token"),
+                NOW
+            ),
+            Err(PlaybackError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn playback_auth_rejects_expired_token() {
+        let (keyring, issuer) = test_auth();
+        let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
+
+        assert!(matches!(
+            validate_playback_request(&keyring, "asset-123", "opener.mp4", Some(&token), NOW + 300),
+            Err(PlaybackError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn playback_auth_rejects_wrong_asset_token() {
+        let (keyring, issuer) = test_auth();
+        let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
+
+        assert!(matches!(
+            validate_playback_request(&keyring, "asset-456", "opener.mp4", Some(&token), NOW + 1),
+            Err(PlaybackError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn playback_auth_rejects_tampered_token() {
+        let (keyring, issuer) = test_auth();
+        let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
+        let tampered = tamper_last_char(&token);
+
+        assert!(matches!(
+            validate_playback_request(
+                &keyring,
+                "asset-123",
+                "opener.mp4",
+                Some(&tampered),
+                NOW + 1
+            ),
+            Err(PlaybackError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn playback_auth_accepts_valid_token_for_playback_artifacts() {
+        let (keyring, issuer) = test_auth();
+        let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
+
+        for artifact_path in ["opener.mp4", "hls/master.m3u8", "hls/segment_00000.ts"] {
+            validate_playback_request(&keyring, "asset-123", artifact_path, Some(&token), NOW + 1)
+                .unwrap();
         }
     }
 }
