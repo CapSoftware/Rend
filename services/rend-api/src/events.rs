@@ -2,6 +2,8 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 
 pub const EVENT_ASSET_CREATED: &str = "asset.created";
+pub const EVENT_ASSET_DELETION_REQUESTED: &str = "asset.deletion_requested";
+pub const EVENT_ASSET_DELETED: &str = "asset.deleted";
 pub const EVENT_SOURCE_UPLOAD_STARTED: &str = "source.upload_started";
 pub const EVENT_SOURCE_UPLOADED: &str = "source.uploaded";
 pub const EVENT_MEDIA_PROCESSING_QUEUED: &str = "media.processing_queued";
@@ -12,6 +14,9 @@ pub const EVENT_PLAYABLE_STATE_CHANGED: &str = "playable_state.changed";
 pub const EVENT_EDGE_WARMING_ATTEMPTED: &str = "edge.warming_attempted";
 pub const EVENT_EDGE_WARMING_SUCCEEDED: &str = "edge.warming_succeeded";
 pub const EVENT_EDGE_WARMING_FAILED: &str = "edge.warming_failed";
+pub const EVENT_EDGE_PURGE_ATTEMPTED: &str = "edge.purge_attempted";
+pub const EVENT_EDGE_PURGE_SUCCEEDED: &str = "edge.purge_succeeded";
+pub const EVENT_EDGE_PURGE_FAILED: &str = "edge.purge_failed";
 pub const EVENT_UPLOAD_RESPONSE_READY: &str = "upload.response_ready";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +77,22 @@ pub fn asset_created_metadata(source_state: &str, playable_state: &str) -> Value
     json!({
         "source_state": source_state,
         "playable_state": playable_state,
+    })
+}
+
+pub fn asset_deletion_requested_metadata(source_state: &str, playable_state: &str) -> Value {
+    json!({
+        "source_state": source_state,
+        "playable_state": playable_state,
+    })
+}
+
+pub fn asset_deleted_metadata(previous_source_state: &str, previous_playable_state: &str) -> Value {
+    json!({
+        "previous_source_state": previous_source_state,
+        "previous_playable_state": previous_playable_state,
+        "source_state": "deleted",
+        "playable_state": "deleted",
     })
 }
 
@@ -138,6 +159,43 @@ pub fn edge_warming_failed_metadata(
 ) -> Value {
     json!({
         "artifact_count": artifact_paths.len(),
+        "artifact_paths": artifact_paths,
+        "reason": reason,
+        "status": status,
+    })
+}
+
+pub fn edge_purge_attempted_metadata(artifact_paths: Option<&[String]>) -> Value {
+    json!({
+        "artifact_count": artifact_paths.map(|paths| paths.len()),
+        "artifact_paths": artifact_paths,
+    })
+}
+
+pub fn edge_purge_succeeded_metadata(
+    artifact_paths: Option<&[String]>,
+    purged: usize,
+    missing: usize,
+    rejected: usize,
+    errors: usize,
+) -> Value {
+    json!({
+        "artifact_count": artifact_paths.map(|paths| paths.len()),
+        "artifact_paths": artifact_paths,
+        "purged": purged,
+        "missing": missing,
+        "rejected": rejected,
+        "errors": errors,
+    })
+}
+
+pub fn edge_purge_failed_metadata(
+    artifact_paths: Option<&[String]>,
+    reason: &str,
+    status: Option<u16>,
+) -> Value {
+    json!({
+        "artifact_count": artifact_paths.map(|paths| paths.len()),
         "artifact_paths": artifact_paths,
         "reason": reason,
         "status": status,
