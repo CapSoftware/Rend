@@ -16,8 +16,12 @@ rend-config.workspace = true
 rend-playback-auth.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
