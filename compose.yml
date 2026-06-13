@@ -1,0 +1,68 @@
+name: rend-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rend
+      POSTGRES_USER: rend
+      POSTGRES_PASSWORD: rend
+    ports:
+      - "5432:5432"
+    volumes:
+      - rend-postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - rend-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: rend_minio
+      MINIO_ROOT_PASSWORD: rend_minio_password
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - rend-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 rend_minio rend_minio_password &&
+        mc mb --ignore-existing local/rend-local &&
+        mc anonymous set none local/rend-local
+    restart: "no"
+
+volumes:
+  rend-postgres-data:
+  rend-redis-data:
+  rend-minio-data:
