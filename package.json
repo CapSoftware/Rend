@@ -19,6 +19,7 @@
     "backend:check": "cargo check --workspace",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
     "backend:smoke:edge-cache": "scripts/smoke-edge-cache.sh",
+    "backend:smoke:asset-events": "scripts/smoke-asset-events.sh",
     "backend:smoke:playback-bootstrap": "scripts/smoke-playback-bootstrap.sh",
     "backend:smoke:edge-warming": "scripts/smoke-edge-warming.sh",
     "backend:smoke:signed-playback": "scripts/smoke-edge-cache.sh",
