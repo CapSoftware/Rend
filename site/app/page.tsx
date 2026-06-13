@@ -334,7 +334,7 @@ export default function Home() {
             <div className="border-t border-line pt-[22px]">
               <h3 className="mb-2.5 text-[19px]">Bare metal, not rented cloud</h3>
               <p className="text-[15px] text-muted">
-                Rend runs on machines we own, in the cities where viewers actually are. There is no cloud provider sitting between our disks and your viewers, so nothing gets metered, throttled, or marked up along the way.
+                Rend is being built on machines we own, in the cities where viewers actually are. No cloud provider sits between our disks and your viewers, so nothing gets metered, throttled, or marked up along the way.
               </p>
             </div>
             <div className="border-t border-line pt-[22px]">
