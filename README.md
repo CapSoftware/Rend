@@ -100,8 +100,13 @@ configuration.
 ### Local backend foundation
 
 This starts the V1 foundation: Postgres, MinIO, Redis, migrations,
-health-checking API/edge skeletons, and the raw source upload storage path.
-Playback and media processing are intentionally not implemented yet.
+health-checking API/edge skeletons, the raw source upload storage path, and
+local media artifact generation for uploaded sources.
+
+Local media processing requires `ffmpeg` and `ffprobe` on `PATH`, or explicit
+binary paths in `REND_FFMPEG_PATH` and `REND_FFPROBE_PATH`. Inline processing is
+bounded by `REND_MEDIA_PROCESS_TIMEOUT_SECS`; keep `REND_HTTP_TIMEOUT_SECS`
+larger than the media timeout when using synchronous local uploads.
 
 ```bash
 cp .env.example .env.local
@@ -126,14 +131,29 @@ curl http://127.0.0.1:4100/readyz
 curl -H 'x-rend-internal-token: dev-internal-token' http://127.0.0.1:4100/metrics
 ```
 
-Smoke-test a raw source upload:
+Smoke-test local media artifact generation:
 
 ```bash
-# Use a local video file if you have one; the API stores raw bytes and does not
-# inspect or process media in this slice.
-fixture=/path/to/local/video.mp4
+bun run backend:smoke:media
+```
+
+The smoke flow starts local dependencies, checks `ffmpeg -version` and
+`ffprobe -version`, generates a fixture video with ffmpeg, starts `rend-api` if
+needed, uploads the fixture with `Authorization: Bearer <REND_DEV_API_KEY>`, and
+verifies:
+
+- the API response includes the existing upload fields with `source_state =
+  uploaded` and `playable_state = hls_ready`
+- Postgres has source, opener, thumbnail, manifest, and segment artifact rows
+- generated MinIO objects exist with nonzero byte sizes
+
+Manual upload and inspection:
+
+```bash
+fixture=$(scripts/generate-fixture-video.sh)
 
 curl -i -X POST http://127.0.0.1:4000/v1/videos \
+  -H 'authorization: Bearer dev-api-key' \
   -H 'content-type: video/mp4' \
   --data-binary @"$fixture"
 
@@ -149,16 +169,20 @@ asset_id=$(printf '%s' "$response" | jq -r .asset_id)
 object_key=$(printf '%s' "$response" | jq -r .source_object_key)
 
 docker compose exec postgres psql -U rend -d rend -c "
-select a.id, a.source_state, a.playable_state, ar.id as source_artifact_id,
+select a.id, a.source_state, a.playable_state, ar.kind, ar.id as artifact_id,
        ar.object_key, ar.content_type, ar.byte_size
 from rend.assets a
 join rend.artifacts ar on ar.asset_id = a.id
-where a.id = '$asset_id'::uuid and ar.kind = 'source';
+where a.id = '$asset_id'::uuid
+order by ar.kind, ar.object_key;
 "
 
 docker compose run --rm --entrypoint /bin/sh minio-init -c "
   mc alias set local http://minio:9000 rend_minio rend_minio_password >/dev/null &&
-  mc stat local/rend-local/$object_key
+  mc stat local/rend-local/$object_key &&
+  mc stat local/rend-local/videos/$asset_id/opener.mp4 &&
+  mc stat local/rend-local/videos/$asset_id/thumbnail.jpg &&
+  mc stat local/rend-local/videos/$asset_id/hls/master.m3u8
 "
 ```
 
