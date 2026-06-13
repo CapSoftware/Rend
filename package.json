@@ -18,6 +18,7 @@
     "backend:edge": "cargo run -p rend-edge",
     "backend:media-worker": "cargo run -p rend-api -- worker media",
     "backend:check": "cargo check --workspace",
+    "backend:benchmark:local": "scripts/benchmark-local-playback.sh",
     "backend:smoke:async-media": "scripts/smoke-async-media.sh",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
     "backend:smoke:edge-cache": "scripts/smoke-edge-cache.sh",
