@@ -81,6 +81,17 @@ fn test_config() -> ApiConfig {
             url: None,
             internal_token: "internal".to_owned(),
         },
+        playback_telemetry: telemetry::TelemetryConfig {
+            clickhouse_url: "http://127.0.0.1:8123".to_owned(),
+            clickhouse_database: "rend".to_owned(),
+            clickhouse_user: "rend".to_owned(),
+            clickhouse_password: "rend".to_owned(),
+            internal_token: "internal".to_owned(),
+            max_body_bytes: 256 * 1024,
+            max_events_per_batch: 100,
+            default_analytics_window_secs: 24 * 60 * 60,
+            max_analytics_window_secs: 7 * 24 * 60 * 60,
+        },
         media_processing: media::MediaProcessingConfig {
             ffmpeg_path: "ffmpeg".to_owned(),
             ffprobe_path: "ffprobe".to_owned(),
@@ -205,6 +216,24 @@ async fn route_response_with_method(
         .unwrap()
 }
 
+async fn post_internal_telemetry(
+    app: Router,
+    body: impl Into<Body>,
+    token: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/internal/telemetry/playback")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-rend-internal-token", token);
+    }
+
+    app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
 #[test]
 fn bearer_authorization_accepts_matching_dev_key() {
     let mut headers = HeaderMap::new();
@@ -299,6 +328,65 @@ async fn event_stream_endpoint_requires_dev_api_key() {
 
     let response = route_response(app, "/v1/events", Some("Bearer wrong-secret")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn playback_analytics_endpoint_requires_dev_api_key() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+
+    let response = route_response(
+        app.clone(),
+        "/v1/assets/00000000-0000-0000-0000-000000000001/analytics/playback",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = route_response(
+        app,
+        "/v1/assets/00000000-0000-0000-0000-000000000001/analytics/playback",
+        Some("Bearer wrong-secret"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_playback_telemetry_requires_internal_token() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let body = serde_json::json!({"events": []}).to_string();
+
+    let response = post_internal_telemetry(app.clone(), body.clone(), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post_internal_telemetry(app, body, Some("wrong-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_playback_telemetry_rejects_unknown_secret_fields() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let body = serde_json::json!({
+        "events": [{
+            "event_id": "evt-1",
+            "observed_at": "2026-06-13T12:00:00.000Z",
+            "asset_id": "00000000-0000-0000-0000-000000000001",
+            "artifact_path": "hls/master.m3u8",
+            "edge_id": "edge-1",
+            "region": "local",
+            "cache_status": "MISS",
+            "status_code": 200,
+            "bytes_served": 123,
+            "content_type": "application/vnd.apple.mpegurl",
+            "duration_ms": 12,
+            "authorization": "Bearer secret"
+        }]
+    })
+    .to_string();
+
+    let response = post_internal_telemetry(app, body, Some("internal")).await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[test]
