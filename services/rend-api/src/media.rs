@@ -10,6 +10,8 @@ use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::{fs, io, process::Command, time};
 
+use crate::events::{self, ArtifactEventInput};
+
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
@@ -463,6 +465,18 @@ async fn persist_artifacts_and_state(
         .await
         .context("failed to start artifact transaction")?;
     let mut opener_artifact_id = None;
+    let previous_playable_state: String = sqlx::query_scalar(
+        "
+        SELECT playable_state
+        FROM rend.assets
+        WHERE id = $1::uuid
+        FOR UPDATE
+        ",
+    )
+    .bind(asset_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("failed to lock asset playable state")?;
 
     for artifact in artifacts {
         let artifact_id: String = insert_artifact(&mut tx, asset_id, artifact)
@@ -471,6 +485,21 @@ async fn persist_artifacts_and_state(
         if artifact.object_key == opener_object_key {
             opener_artifact_id = Some(artifact_id);
         }
+    }
+
+    let artifact_event_inputs = artifacts
+        .iter()
+        .map(|artifact| ArtifactEventInput {
+            kind: artifact.kind,
+            object_key: &artifact.object_key,
+            content_type: artifact.content_type,
+            byte_size: artifact.byte_size,
+        })
+        .collect::<Vec<_>>();
+    for event in events::artifact_generated_events(asset_id, &artifact_event_inputs) {
+        events::insert_asset_event(&mut tx, asset_id, event.event_type, event.metadata)
+            .await
+            .with_context(|| format!("failed to insert {} event", event.event_type))?;
     }
 
     sqlx::query(
@@ -488,6 +517,17 @@ async fn persist_artifacts_and_state(
     .execute(&mut *tx)
     .await
     .context("failed to update asset playable state")?;
+
+    if previous_playable_state != playable_state {
+        events::insert_asset_event(
+            &mut tx,
+            asset_id,
+            events::EVENT_PLAYABLE_STATE_CHANGED,
+            events::playable_state_changed_metadata(&previous_playable_state, playable_state),
+        )
+        .await
+        .context("failed to insert playable state event")?;
+    }
 
     tx.commit()
         .await
@@ -519,6 +559,23 @@ async fn insert_artifact(
 }
 
 async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
+    let mut tx = db
+        .begin()
+        .await
+        .context("failed to start failed-state transaction")?;
+    let previous_playable_state: String = sqlx::query_scalar(
+        "
+        SELECT playable_state
+        FROM rend.assets
+        WHERE id = $1::uuid
+        FOR UPDATE
+        ",
+    )
+    .bind(asset_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("failed to lock asset playable state")?;
+
     sqlx::query(
         "
         UPDATE rend.assets
@@ -529,9 +586,24 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
         ",
     )
     .bind(asset_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await
     .context("failed to update failed playable state")?;
+
+    if previous_playable_state != "failed" {
+        events::insert_asset_event(
+            &mut tx,
+            asset_id,
+            events::EVENT_PLAYABLE_STATE_CHANGED,
+            events::playable_state_changed_metadata(&previous_playable_state, "failed"),
+        )
+        .await
+        .context("failed to insert failed playable state event")?;
+    }
+
+    tx.commit()
+        .await
+        .context("failed to commit failed-state transaction")?;
     Ok(())
 }
 
