@@ -1,0 +1,447 @@
+# Rend Edge Host Runbook V1
+
+This runbook prepares the Docker deployment shape for first real us-east and
+london edge host trials. It does not provision cloud resources, DNS, anycast,
+Terraform, Kubernetes, Better Auth, billing, or dashboard surfaces.
+
+The local source of truth is still `compose.yml` and `.env.docker.example`.
+The production-style examples in this runbook keep the same service names,
+container ports, health endpoints, internal tokens, cache paths, and telemetry
+paths used by the local Docker stack.
+
+## Current Deployment Shape
+
+- `rend-api`: control-plane HTTP API on container port `4000`. It owns
+  migrations, upload ingest, asset state, playback bootstrap, edge warm/purge
+  calls, and playback telemetry ingest into ClickHouse.
+- `rend-media-worker`: same API binary started as `rend-api worker media`. It
+  claims media jobs, runs `ffmpeg`/`ffprobe`, writes artifacts to object
+  storage, and asks the active edge to warm artifacts.
+- `rend-edge`: playback edge on container port `4100`. It validates signed
+  playback tokens locally, fills a node-local cache from object storage, exposes
+  `/internal/warm` and `/internal/purge`, exposes token-protected `/metrics`,
+  and spools telemetry to local disk before sending it to `rend-api`.
+
+Current limitation for first trials: `rend-api` has one `REND_EDGE_WARM_URL`
+and one `REND_EDGE_PURGE_URL`. Treat one edge host as the API's active warm and
+purge target at a time. The second regional edge can still be warmed directly
+with the remote smoke commands below, matching the local two-edge smoke shape.
+
+## Minimum Edge Host Requirements
+
+These are first-trial minimums for one `rend-edge` process. They are not final
+capacity targets.
+
+| Concern | Minimum | Preferred for trial |
+| --- | --- | --- |
+| CPU | 4 dedicated x86_64 vCPU | 8 vCPU |
+| RAM | 8 GiB | 16 GiB |
+| Cache disk | 250 GiB local SSD/NVMe | 500 GiB to 1 TiB NVMe |
+| Telemetry spool | 10 GiB persistent SSD | 20 GiB separate filesystem |
+| Logs | 5 GiB retained by Docker logging | 20 GiB or external drain |
+| Network | 1 Gbps NIC, low jitter | 10 Gbps NIC or provider equivalent |
+| OS | Debian 12 or Ubuntu 24.04 LTS | Same, current kernel updates applied |
+| Runtime | Docker Engine 25+ with Compose v2 | Docker Engine 26+ with Compose v2.26+ |
+
+Bandwidth assumptions for first trials:
+
+- The edge should have enough egress for real playback tests without rate
+  limiting. Assume public playback can burst to the NIC line rate.
+- Origin/object-store egress must tolerate cold cache fills and explicit warm
+  operations. A single cold request may pull the full requested artifact before
+  it is served from cache.
+- API telemetry traffic is small compared with playback, but it must be
+  reliable. If the API telemetry endpoint is unavailable, the edge spools JSONL
+  events locally until it can replay them.
+- DNS and NTP outbound access must work. Playback tokens are time-bound, so
+  clock skew will look like playback authorization failure.
+
+Recommended disk layout:
+
+```text
+/opt/rend/edge.compose.yml              # compose template copy
+/etc/rend/rend-edge.env                 # region-specific edge env
+/var/lib/rend/edge-cache                # node-local SSD/NVMe cache
+/var/spool/rend/edge-telemetry          # persistent telemetry JSONL spool
+/var/log/rend                           # optional host log drain target
+```
+
+Mount `/var/lib/rend/edge-cache` on the fastest local disk. Use ext4 or XFS
+with `noatime` if the provider allows it. Keep the telemetry spool on persistent
+storage; cache files may be discarded, but spooled telemetry should survive
+service restarts and image rollbacks.
+
+The Docker image runs as uid/gid `10001`. Before first start:
+
+```sh
+sudo mkdir -p /opt/rend /etc/rend /var/lib/rend/edge-cache /var/spool/rend/edge-telemetry /var/log/rend
+sudo chown -R 10001:10001 /var/lib/rend /var/spool/rend
+```
+
+## Firewall And Network Ports
+
+This section covers public playback, private/internal endpoints, metrics, and
+outbound origin/API telemetry.
+
+All endpoints currently share the edge service port inside the container
+(`4100`). For production-style exposure, put a reverse proxy or host firewall in
+front of the container. Direct public `4100` exposure is acceptable only for
+short trials with known test clients.
+
+| Direction | Port | Source | Destination | Purpose |
+| --- | --- | --- | --- | --- |
+| Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. |
+| Inbound trial-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while no proxy exists. Do not leave open broadly. |
+| Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
+| Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
+| Outbound origin | TCP `443` | `rend-edge` | S3-compatible endpoint | Artifact fills and origin readiness checks. |
+| Outbound telemetry | TCP `443` or private `4000` | `rend-edge` | `rend-api` telemetry endpoint | `POST /internal/telemetry/playback`. |
+| Outbound image pull | TCP `443` | Host Docker daemon | Container registry | Deploy and rollback image pulls. |
+| Outbound platform | UDP/TCP `53`, UDP `123` | Host | DNS and NTP | Name resolution and token clock correctness. |
+
+Control-plane host exposure:
+
+- Public or private API ingress should terminate on `rend-api` port `4000`
+  through a proxy. The template binds `4000` to `127.0.0.1` by default.
+- `POST /internal/telemetry/playback` must be reachable from edge hosts and
+  must require `x-rend-internal-token` or `x-rend-telemetry-token`.
+- Postgres, Redis, ClickHouse, and object storage are external dependencies for
+  production trials and are not included in the production-style compose
+  templates.
+
+## Volume Paths
+
+| Service | Container path | Host path | Notes |
+| --- | --- | --- | --- |
+| `rend-edge` | `/var/lib/rend/edge-cache` | `/var/lib/rend/edge-cache` | Local cache. Safe to purge or replace during rollback. |
+| `rend-edge` | `/var/spool/rend/edge-telemetry` | `/var/spool/rend/edge-telemetry` | JSONL spool at `playback-events.jsonl`. Preserve across restarts. |
+| `rend-edge` | Docker logs | Docker `json-file` or host log drain | Template rotates at `100m` x `5`. |
+| `rend-api` | Docker logs | Docker `json-file` or host log drain | Inspect for migrations, readiness, telemetry ingest. |
+| `rend-media-worker` | Docker logs | Docker `json-file` or host log drain | Inspect for job claims, ffmpeg failures, warm failures. |
+
+## Env Var Sets
+
+Example files:
+
+- API: `docs/env/rend-api.env.example`
+- Worker: `docs/env/rend-media-worker.env.example`
+- us-east edge: `docs/env/rend-edge-us-east.env.example`
+- london edge: `docs/env/rend-edge-london.env.example`
+
+Secrets in these files are placeholders. Production values must come from the
+host or deployment platform and must not be committed.
+
+API required set:
+
+- Data dependencies: `DATABASE_URL`, `REND_REDIS_URL`, `CLICKHOUSE_URL`,
+  `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`,
+  `OBJECT_STORE_HEALTH_URL`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+- API/runtime: `REND_API_BIND_ADDR`, `REND_API_AUTO_MIGRATE`,
+  `REND_API_INLINE_MEDIA_PROCESSING`, `REND_DEV_API_KEY`,
+  `REND_HTTP_TIMEOUT_SECS`
+- Playback: `REND_PLAYBACK_BASE_URL`, `REND_PLAYBACK_SIGNING_KEY_ID`,
+  `REND_PLAYBACK_SIGNING_SECRET`, `REND_PLAYBACK_TOKEN_TTL_SECS`,
+  `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
+- Edge internal: `REND_EDGE_WARM_URL`, `REND_EDGE_PURGE_URL`,
+  `REND_EDGE_INTERNAL_TOKEN`, `REND_EDGE_WARM_MAX_ARTIFACTS`
+- Telemetry ingest/analytics: `REND_INTERNAL_TELEMETRY_TOKEN`,
+  `REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES`,
+  `REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH`,
+  `REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS`,
+  `REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS`
+- Media config loaded by the API binary: `REND_FFMPEG_PATH`,
+  `REND_FFPROBE_PATH`, `REND_MEDIA_PROCESS_TIMEOUT_SECS`,
+  `REND_MEDIA_JOB_MAX_ATTEMPTS`, `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`,
+  `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`
+
+Worker required set:
+
+- Same data dependency, object storage, playback signing, edge internal, and
+  telemetry values as the API.
+- Worker-specific values: `REND_API_AUTO_MIGRATE=false`,
+  `REND_API_INLINE_MEDIA_PROCESSING=false`, `REND_MEDIA_WORKER_ID`,
+  `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`, `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`,
+  `REND_MEDIA_PROCESS_TIMEOUT_SECS`, `REND_FFMPEG_PATH`,
+  `REND_FFPROBE_PATH`.
+
+Edge required set:
+
+- Object storage: `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+- Region identity: `REND_EDGE_ID`, `REND_EDGE_REGION`
+- Runtime and volumes: `REND_EDGE_BIND_ADDR`, `REND_EDGE_CACHE_DIR`,
+  `REND_EDGE_TELEMETRY_SPOOL_DIR`, `REND_HTTP_TIMEOUT_SECS`
+- Origin health: `REND_EDGE_ORIGIN_HEALTH_URL`
+- Internal auth and limits: `REND_EDGE_INTERNAL_TOKEN`,
+  `REND_EDGE_WARM_MAX_ARTIFACTS`, `REND_EDGE_MAX_IN_FLIGHT_FILLS`
+- Telemetry: `REND_EDGE_TELEMETRY_ENABLED`,
+  `REND_EDGE_TELEMETRY_INGEST_URL`, `REND_INTERNAL_TELEMETRY_TOKEN`,
+  `REND_EDGE_TELEMETRY_QUEUE_CAPACITY`,
+  `REND_EDGE_TELEMETRY_BATCH_SIZE`,
+  `REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS`,
+  `REND_EDGE_TELEMETRY_REQUEST_TIMEOUT_SECS`,
+  `REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES`
+- Playback signing: `REND_PLAYBACK_SIGNING_KEY_ID`,
+  `REND_PLAYBACK_SIGNING_SECRET`
+
+us-east edge values should set `REND_EDGE_REGION=us-east` and a unique
+`REND_EDGE_ID`, for example `rend-edge-us-east-001`. London should set
+`REND_EDGE_REGION=london` and a unique `REND_EDGE_ID`, for example
+`rend-edge-london-001`. Both regions must share the same playback signing key
+as the API for a given trial.
+
+## Compose Templates
+
+Production-style templates are checked in under `docs/templates/`:
+
+- `docs/templates/control-plane.compose.yml`
+- `docs/templates/edge-host.compose.yml`
+
+Control-plane host bootstrap:
+
+```sh
+sudo mkdir -p /opt/rend /etc/rend
+sudo cp docs/templates/control-plane.compose.yml /opt/rend/control-plane.compose.yml
+sudo cp docs/env/rend-api.env.example /etc/rend/rend-api.env
+sudo cp docs/env/rend-media-worker.env.example /etc/rend/rend-media-worker.env
+sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
+
+export REND_API_IMAGE=registry.example.com/rend-api:trial-001
+export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-001
+docker compose -f /opt/rend/control-plane.compose.yml pull
+docker compose -f /opt/rend/control-plane.compose.yml up -d
+```
+
+Edge host bootstrap:
+
+```sh
+sudo mkdir -p /opt/rend /etc/rend /var/lib/rend/edge-cache /var/spool/rend/edge-telemetry
+sudo chown -R 10001:10001 /var/lib/rend /var/spool/rend
+sudo cp docs/templates/edge-host.compose.yml /opt/rend/edge.compose.yml
+sudo cp docs/env/rend-edge-us-east.env.example /etc/rend/rend-edge.env
+sudoedit /etc/rend/rend-edge.env
+
+export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-001
+docker compose -f /opt/rend/edge.compose.yml pull
+docker compose -f /opt/rend/edge.compose.yml up -d
+```
+
+For london, use `docs/env/rend-edge-london.env.example` and keep the same edge
+compose template.
+
+## Remote Edge Health And Smoke Commands
+
+Set these variables from the operator laptop or a bastion. `EDGE_INTERNAL_BASE`
+should use a private address or VPN path when available.
+
+```sh
+API_BASE=https://api.example.com
+EDGE_BASE=https://edge-us-east.example.com
+EDGE_INTERNAL_BASE=http://10.0.10.12:4100
+REND_DEV_API_KEY=replace-me
+REND_EDGE_INTERNAL_TOKEN=replace-me
+ASSET_ID=00000000-0000-0000-0000-000000000000
+```
+
+Health and readiness:
+
+```sh
+curl -fsS "$EDGE_BASE/healthz"
+curl -fsS "$EDGE_BASE/readyz"
+```
+
+Metrics auth check. The first command should return `401`; the second should
+return Prometheus text including `rend_edge_up` and `rend_edge_ready`.
+
+```sh
+curl -sS -o /tmp/rend-edge-metrics-unauth.body -w "%{http_code}\n" "$EDGE_INTERNAL_BASE/metrics"
+curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" "$EDGE_INTERNAL_BASE/metrics"
+```
+
+Fetch a signed playback token from the API for a known `hls_ready` asset:
+
+```sh
+curl -fsS \
+  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  "$API_BASE/v1/assets/$ASSET_ID/playback" \
+  -o /tmp/rend-playback-bootstrap.json
+
+TOKEN="$(
+  python3 - /tmp/rend-playback-bootstrap.json <<'PY'
+import json, sys
+from urllib.parse import parse_qs, urlparse
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    url = json.load(f)["playback_url"]
+print(parse_qs(urlparse(url).query)["token"][0])
+PY
+)"
+```
+
+Warm endpoint check:
+
+```sh
+curl -fsS \
+  -X POST "$EDGE_INTERNAL_BASE/internal/warm" \
+  -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
+  -H "content-type: application/json" \
+  --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"opener.mp4\"]}"
+```
+
+Signed playback check:
+
+```sh
+SIGNED_MANIFEST="$EDGE_BASE/v/$ASSET_ID/hls/master.m3u8?token=$TOKEN"
+curl -fsS -D /tmp/rend-edge-playback.headers -o /tmp/rend-edge-master.m3u8 "$SIGNED_MANIFEST"
+grep -i '^x-rend-cache:' /tmp/rend-edge-playback.headers
+test -s /tmp/rend-edge-master.m3u8
+```
+
+Telemetry flush check:
+
+```sh
+curl -fsS -o /dev/null "$SIGNED_MANIFEST"
+sleep 5
+curl -fsS \
+  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  "$API_BASE/v1/assets/$ASSET_ID/analytics/playback?window_seconds=600"
+```
+
+If analytics does not show recent playback, inspect the edge spool:
+
+```sh
+ssh edge-us-east 'docker compose -f /opt/rend/edge.compose.yml exec -T rend-edge sh -lc "ls -lh /var/spool/rend/edge-telemetry && wc -l /var/spool/rend/edge-telemetry/playback-events.jsonl 2>/dev/null || true"'
+```
+
+The spool file may be absent when telemetry has flushed successfully.
+
+## Deploy Steps
+
+Control-plane deploy:
+
+```sh
+export REND_API_IMAGE=registry.example.com/rend-api:trial-002
+export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-002
+
+sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
+docker compose -f /opt/rend/control-plane.compose.yml pull
+docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-api
+curl -fsS http://127.0.0.1:4000/readyz
+docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-media-worker
+docker compose -f /opt/rend/control-plane.compose.yml ps
+```
+
+Edge deploy:
+
+```sh
+export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-002
+
+sudoedit /etc/rend/rend-edge.env
+docker compose -f /opt/rend/edge.compose.yml pull
+docker compose -f /opt/rend/edge.compose.yml up -d --no-deps rend-edge
+curl -fsS http://127.0.0.1:4100/readyz
+curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
+```
+
+After each deploy, run the remote health and smoke commands above. For an edge
+trial, verify both a warmed `HIT` and at least one cold `MISS` after purging a
+single artifact.
+
+## Rollback Steps
+
+Edge rollback:
+
+```sh
+export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-001
+docker compose -f /opt/rend/edge.compose.yml pull rend-edge
+docker compose -f /opt/rend/edge.compose.yml up -d --no-deps rend-edge
+curl -fsS http://127.0.0.1:4100/readyz
+```
+
+Control-plane rollback:
+
+```sh
+export REND_API_IMAGE=registry.example.com/rend-api:trial-001
+export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-001
+docker compose -f /opt/rend/control-plane.compose.yml pull
+docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-api
+curl -fsS http://127.0.0.1:4000/readyz
+docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-media-worker
+```
+
+Rollback order:
+
+1. Roll back `rend-edge` first for playback cache, token validation, origin, or
+   telemetry-spool regressions.
+2. Roll back `rend-media-worker` for ffmpeg, artifact-generation, or warm-call
+   regressions.
+3. Roll back `rend-api` last. Treat Postgres migrations as forward-only unless
+   a tested rollback migration exists.
+
+Do not delete `/var/spool/rend/edge-telemetry` during rollback unless the
+telemetry ingest contract changed incompatibly. It is safe to purge
+`/var/lib/rend/edge-cache` if cache contents are suspected bad.
+
+## Logs And Metrics Guidance
+
+API logs to inspect:
+
+- Startup migration failures when `REND_API_AUTO_MIGRATE=true`
+- `/readyz` dependency failures for Postgres, Redis, or object storage
+- Upload errors and asset state transitions
+- Edge warm/purge HTTP status and response bodies
+- Telemetry ingest failures, especially ClickHouse insert/query errors
+
+Worker logs to inspect:
+
+- Media job claim and completion cadence
+- `ffmpeg`/`ffprobe` failures and timeout errors
+- Jobs that reach max attempts
+- Warm-call failures after artifact generation
+
+Edge logs to inspect:
+
+- Startup bind address, edge id, and region
+- Cache directory permission or disk errors
+- `/readyz` origin failures
+- Playback `401`, `404`, timeout, and origin fetch errors
+- `too many in-flight edge cache fills`
+- `failed to send playback telemetry batch; spooling locally`
+- `playback telemetry spool is full; dropping event`
+
+Current metric and counter signals:
+
+- Edge `/metrics`: `rend_edge_up` and `rend_edge_ready`
+- Playback response header: `X-Rend-Cache` with `HIT`, `MISS`, or `COALESCED`
+- Warm response summary: `warmed`, `already_warm`, `not_found`, `failed`
+- API playback analytics:
+  `GET /v1/assets/<asset_id>/analytics/playback?window_seconds=...`
+  returns `request_count`, `bytes_served`, `cache_status_counts`, and
+  `status_code_counts`
+- Telemetry health: edge spool file size and line count under
+  `/var/spool/rend/edge-telemetry/playback-events.jsonl`
+- Origin health: edge `/readyz` origin check plus playback `error_code` values
+  in analytics for non-2xx responses
+
+For first trials, alert manually on any sustained `rend_edge_ready=0`, rising
+spool size, `not_found` or `failed` warm summaries, elevated playback 5xx/401,
+or a cache mix that stays mostly `MISS` after warm operations.
+
+## Local Validation
+
+Run the checked-in validator before using the examples:
+
+```sh
+scripts/validate-edge-deploy-templates.sh
+```
+
+Then run the local Docker smoke:
+
+```sh
+bun run backend:docker:smoke
+```
+
+The local smoke still uses `compose.yml` and `.env.docker.example`. The
+production-style templates intentionally omit local Postgres, Redis, MinIO, and
+ClickHouse because first real host trials should point at managed or separately
+provisioned dependencies.
