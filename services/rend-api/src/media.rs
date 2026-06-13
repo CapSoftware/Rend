@@ -30,6 +30,7 @@ pub struct ProcessMediaRequest {
 
 pub struct ProcessMediaOutcome {
     pub playable_state: String,
+    pub playback_artifact_paths: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -56,6 +57,7 @@ pub async fn process_uploaded_source(request: ProcessMediaRequest) -> Result<Pro
             set_failed_playable_state(&request.db, &request.asset_id).await?;
             Ok(ProcessMediaOutcome {
                 playable_state: "failed".to_owned(),
+                playback_artifact_paths: Vec::new(),
             })
         }
     }
@@ -144,6 +146,11 @@ async fn process_in_dir(
 
     Ok(ProcessMediaOutcome {
         playable_state: playable_state.to_owned(),
+        playback_artifact_paths: playback_artifact_paths(
+            &request.asset_id,
+            &artifacts,
+            playable_state,
+        ),
     })
 }
 
@@ -617,6 +624,47 @@ pub fn hls_segment_object_key(asset_id: &str, segment_name: &str) -> String {
     format!("videos/{asset_id}/hls/{segment_name}")
 }
 
+fn playback_artifact_paths(
+    asset_id: &str,
+    artifacts: &[UploadedArtifact],
+    playable_state: &str,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    let opener_key = opener_object_key(asset_id);
+    if matches!(playable_state, "opener_ready" | "hls_ready")
+        && artifacts
+            .iter()
+            .any(|artifact| artifact.object_key == opener_key)
+    {
+        paths.push("opener.mp4".to_owned());
+    }
+
+    if playable_state != "hls_ready" {
+        return paths;
+    }
+
+    let manifest_key = hls_manifest_object_key(asset_id);
+    if artifacts
+        .iter()
+        .any(|artifact| artifact.object_key == manifest_key)
+    {
+        paths.push("hls/master.m3u8".to_owned());
+    }
+
+    let object_prefix = format!("videos/{asset_id}/");
+    let mut segment_paths = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "segment")
+        .filter_map(|artifact| artifact.object_key.strip_prefix(&object_prefix))
+        .filter(|artifact_path| artifact_path.starts_with("hls/"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    segment_paths.sort();
+    paths.extend(segment_paths);
+
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +686,75 @@ mod tests {
         assert_eq!(
             hls_segment_object_key("asset-123", "segment_00000.ts"),
             "videos/asset-123/hls/segment_00000.ts"
+        );
+    }
+
+    #[test]
+    fn playback_artifact_paths_include_opener_manifest_and_sorted_segments_when_hls_ready() {
+        let artifacts = vec![
+            UploadedArtifact {
+                kind: "segment",
+                object_key: hls_segment_object_key("asset-123", "segment_00001.ts"),
+                content_type: "video/mp2t",
+                byte_size: 1,
+            },
+            UploadedArtifact {
+                kind: "opener",
+                object_key: opener_object_key("asset-123"),
+                content_type: "video/mp4",
+                byte_size: 1,
+            },
+            UploadedArtifact {
+                kind: "manifest",
+                object_key: hls_manifest_object_key("asset-123"),
+                content_type: "application/vnd.apple.mpegurl",
+                byte_size: 1,
+            },
+            UploadedArtifact {
+                kind: "segment",
+                object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
+                content_type: "video/mp2t",
+                byte_size: 1,
+            },
+            UploadedArtifact {
+                kind: "thumbnail",
+                object_key: thumbnail_object_key("asset-123"),
+                content_type: "image/jpeg",
+                byte_size: 1,
+            },
+        ];
+
+        assert_eq!(
+            playback_artifact_paths("asset-123", &artifacts, "hls_ready"),
+            vec![
+                "opener.mp4".to_owned(),
+                "hls/master.m3u8".to_owned(),
+                "hls/segment_00000.ts".to_owned(),
+                "hls/segment_00001.ts".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn playback_artifact_paths_include_only_opener_when_hls_is_not_ready() {
+        let artifacts = vec![
+            UploadedArtifact {
+                kind: "opener",
+                object_key: opener_object_key("asset-123"),
+                content_type: "video/mp4",
+                byte_size: 1,
+            },
+            UploadedArtifact {
+                kind: "segment",
+                object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
+                content_type: "video/mp2t",
+                byte_size: 1,
+            },
+        ];
+
+        assert_eq!(
+            playback_artifact_paths("asset-123", &artifacts, "opener_ready"),
+            vec!["opener.mp4".to_owned()]
         );
     }
 
