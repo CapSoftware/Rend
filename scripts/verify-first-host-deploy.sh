@@ -10,8 +10,13 @@ asset_id="${ASSET_ID:-}"
 dev_api_key="${REND_DEV_API_KEY:-}"
 database_url="${DATABASE_URL:-}"
 edge_id="${REND_EDGE_ID:-}"
+expected_edges="${REND_EXPECTED_EDGES:-}"
 edge_internal_token="${REND_EDGE_INTERNAL_TOKEN:-}"
 control_plane_url="${REND_CONTROL_PLANE_URL:-}"
+clickhouse_url="${CLICKHOUSE_URL:-}"
+clickhouse_database="${CLICKHOUSE_DATABASE:-rend}"
+clickhouse_user="${CLICKHOUSE_USER:-}"
+clickhouse_password="${CLICKHOUSE_PASSWORD:-}"
 api_env=""
 edge_env=""
 skip_registration=false
@@ -38,8 +43,13 @@ Options:
   --dev-api-key KEY           API bearer key for asset and analytics endpoints.
   --database-url URL          Optional Postgres URL for edge registry visibility.
   --edge-id ID                Edge id to verify in registry.
+  --expected-edges LIST       Expected edge_id=region=base_url list to verify in registry.
   --edge-internal-token TOKEN Internal edge token for heartbeat fallback.
   --control-plane-url URL     Internal API/control-plane URL for heartbeat fallback.
+  --clickhouse-url URL        ClickHouse HTTP URL for telemetry health.
+  --clickhouse-database NAME  ClickHouse database. Default: rend.
+  --clickhouse-user USER      ClickHouse user.
+  --clickhouse-password PASS  ClickHouse password.
   --api-env FILE              Read REND_DEV_API_KEY and DATABASE_URL defaults from file.
   --edge-env FILE             Read edge id/token/control-plane/base URL defaults from file.
   --rewrite-playback-base     Rewrite API playback URL host to --edge-base before fetching.
@@ -84,12 +94,32 @@ while [[ $# -gt 0 ]]; do
       edge_id="${2:?missing value for $1}"
       shift 2
       ;;
+    --expected-edges)
+      expected_edges="${2:?missing value for $1}"
+      shift 2
+      ;;
     --edge-internal-token)
       edge_internal_token="${2:?missing value for $1}"
       shift 2
       ;;
     --control-plane-url)
       control_plane_url="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --clickhouse-url)
+      clickhouse_url="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --clickhouse-database)
+      clickhouse_database="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --clickhouse-user)
+      clickhouse_user="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --clickhouse-password)
+      clickhouse_password="${2:?missing value for $1}"
       shift 2
       ;;
     --api-env)
@@ -135,11 +165,17 @@ if [[ -n "$api_env" ]]; then
   operator_require_file "$api_env"
   dev_api_key="${dev_api_key:-$(operator_env_value "$api_env" REND_DEV_API_KEY 2>/dev/null || true)}"
   database_url="${database_url:-$(operator_env_value "$api_env" DATABASE_URL 2>/dev/null || true)}"
+  expected_edges="${expected_edges:-$(operator_env_value "$api_env" REND_EXPECTED_EDGES 2>/dev/null || true)}"
+  clickhouse_url="${clickhouse_url:-$(operator_env_value "$api_env" CLICKHOUSE_URL 2>/dev/null || true)}"
+  clickhouse_database="${clickhouse_database:-$(operator_env_value "$api_env" CLICKHOUSE_DATABASE 2>/dev/null || true)}"
+  clickhouse_user="${clickhouse_user:-$(operator_env_value "$api_env" CLICKHOUSE_USER 2>/dev/null || true)}"
+  clickhouse_password="${clickhouse_password:-$(operator_env_value "$api_env" CLICKHOUSE_PASSWORD 2>/dev/null || true)}"
 fi
 
 if [[ -n "$edge_env" ]]; then
   operator_require_file "$edge_env"
   edge_id="${edge_id:-$(operator_env_value "$edge_env" REND_EDGE_ID 2>/dev/null || true)}"
+  expected_edges="${expected_edges:-$(operator_env_value "$edge_env" REND_EXPECTED_EDGES 2>/dev/null || true)}"
   edge_internal_token="${edge_internal_token:-$(operator_env_value "$edge_env" REND_EDGE_INTERNAL_TOKEN 2>/dev/null || true)}"
   control_plane_url="${control_plane_url:-$(operator_env_value "$edge_env" REND_CONTROL_PLANE_URL 2>/dev/null || true)}"
   if [[ -z "${REND_EDGE_BASE_URL:-}" && "$edge_base" == "http://127.0.0.1:4100" ]]; then
@@ -175,6 +211,65 @@ print(
 PY
 }
 
+registry_sql_for_expected_edges() {
+  python3 - "$1" <<'PY'
+import sys
+edge_ids = []
+for raw in sys.argv[1].split(","):
+    parts = raw.strip().split("=", 2)
+    if len(parts) == 3:
+        edge_ids.append(parts[0].replace("'", "''"))
+if not edge_ids:
+    raise SystemExit("REND_EXPECTED_EDGES did not contain any edge ids")
+quoted = ",".join(f"'{edge_id}'" for edge_id in edge_ids)
+print(
+    "SELECT edge_id, region, COALESCE(base_url, ''), status, "
+    "(last_heartbeat_at IS NOT NULL AND last_heartbeat_at >= now() - interval '120 seconds')::text "
+    "FROM rend.edge_nodes "
+    f"WHERE edge_id IN ({quoted}) AND status <> 'removed' "
+    "ORDER BY edge_id"
+)
+PY
+}
+
+validate_expected_edge_rows() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+expected_raw, rows_raw = sys.argv[1], sys.argv[2]
+expected = {}
+for raw in expected_raw.split(","):
+    parts = raw.strip().split("=", 2)
+    if len(parts) == 3:
+        expected[parts[0].strip()] = (parts[1].strip(), parts[2].strip().rstrip("/"))
+
+rows = {}
+for line in rows_raw.splitlines():
+    cols = line.split("\t")
+    if len(cols) >= 5:
+        edge_id, region, base_url, status, active = cols[:5]
+        rows[edge_id] = (region, base_url.rstrip("/"), status, active)
+
+missing = sorted(set(expected) - set(rows))
+if missing:
+    raise SystemExit(f"missing expected edge registrations: {', '.join(missing)}")
+
+bad = []
+for edge_id, (region, base_url) in expected.items():
+    row_region, row_base_url, status, active = rows[edge_id]
+    if row_region != region:
+        bad.append(f"{edge_id} region {row_region!r} != {region!r}")
+    if row_base_url != base_url:
+        bad.append(f"{edge_id} base_url {row_base_url!r} != {base_url!r}")
+    if status != "healthy":
+        bad.append(f"{edge_id} status {status!r} != 'healthy'")
+    if active != "true":
+        bad.append(f"{edge_id} heartbeat is stale or missing")
+if bad:
+    raise SystemExit("; ".join(bad))
+PY
+}
+
 heartbeat_payload() {
   python3 - "$1" <<'PY'
 import json
@@ -186,6 +281,23 @@ PY
 check_registration() {
   if [[ "$skip_registration" == "true" ]]; then
     operator_warn "skipping edge registration visibility check"
+    return 0
+  fi
+
+  if [[ -n "$expected_edges" ]]; then
+    if [[ -z "$database_url" || ! command -v psql >/dev/null 2>&1 ]]; then
+      operator_fail "expected edge registry check requires --database-url/--api-env and psql"
+      return 0
+    fi
+    local rows sql
+    sql="$(registry_sql_for_expected_edges "$expected_edges")"
+    rows="$(PGCONNECT_TIMEOUT=8 psql "$database_url" -F $'\t' -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
+    if validate_expected_edge_rows "$expected_edges" "$rows" 2>/tmp/rend-edge-registry-error.$$; then
+      operator_ok "all expected edges are registered healthy"
+    else
+      operator_fail "expected edge registry check failed: $(cat /tmp/rend-edge-registry-error.$$)"
+    fi
+    rm -f /tmp/rend-psql-error.$$ /tmp/rend-edge-registry-error.$$
     return 0
   fi
 
@@ -230,6 +342,35 @@ check_registration() {
     operator_ok "edge registration is visible via control-plane heartbeat endpoint"
   else
     operator_fail "edge heartbeat visibility check failed with HTTP $http_code: $(cat "$body_file")"
+  fi
+}
+
+check_clickhouse_telemetry() {
+  if [[ -z "$clickhouse_url" ]]; then
+    operator_fail "ClickHouse telemetry health requires --clickhouse-url or --api-env"
+    return 0
+  fi
+  if [[ -z "$clickhouse_user" || -z "$clickhouse_password" ]]; then
+    operator_fail "ClickHouse telemetry health requires clickhouse user and password"
+    return 0
+  fi
+
+  local url body_file exists
+  url="${clickhouse_url%/}"
+  body_file="$tmp_dir/clickhouse-telemetry-health.txt"
+  if ! curl -fsS --max-time 10 -u "$clickhouse_user:$clickhouse_password" \
+    "$url/?database=$clickhouse_database&query=SELECT%201" -o "$body_file"; then
+    operator_fail "ClickHouse SELECT 1 telemetry health probe failed"
+    return 0
+  fi
+  exists="$(
+    curl -fsS --max-time 10 -u "$clickhouse_user:$clickhouse_password" \
+      "$url/?database=$clickhouse_database&query=EXISTS%20TABLE%20playback_events" || true
+  )"
+  if [[ "$exists" == "1" ]]; then
+    operator_ok "ClickHouse playback telemetry table is present"
+  else
+    operator_fail "ClickHouse playback_events table is missing or not queryable"
   fi
 }
 
@@ -372,6 +513,7 @@ check_playback_and_analytics() {
 check_readyz "api" "$api_base"
 check_readyz "edge" "$edge_base"
 check_registration
+check_clickhouse_telemetry
 check_playback_and_analytics
 
 operator_finish
