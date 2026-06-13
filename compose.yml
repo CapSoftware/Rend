@@ -1,5 +1,90 @@
 name: rend-local
 
+x-rend-build-api: &rend-build-api
+  context: .
+  dockerfile: Dockerfile
+  target: rend-api
+
+x-rend-build-worker: &rend-build-worker
+  context: .
+  dockerfile: Dockerfile
+  target: rend-media-worker
+
+x-rend-build-edge: &rend-build-edge
+  context: .
+  dockerfile: Dockerfile
+  target: rend-edge
+
+x-rend-common-env: &rend-common-env
+  DATABASE_URL: postgres://rend:rend@postgres:5432/rend
+  REND_REDIS_URL: redis://redis:6379
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_DATABASE: rend
+  CLICKHOUSE_USER: rend
+  CLICKHOUSE_PASSWORD: rend
+  OBJECT_STORE_HEALTH_URL: http://minio:9000/minio/health/ready
+  S3_ENDPOINT: http://minio:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: rend-local
+  AWS_ACCESS_KEY_ID: rend_minio
+  AWS_SECRET_ACCESS_KEY: rend_minio_password
+  REND_DEV_API_KEY: dev-api-key
+  REND_EDGE_INTERNAL_TOKEN: dev-internal-token
+  REND_INTERNAL_TELEMETRY_TOKEN: dev-internal-token
+  REND_PLAYBACK_SIGNING_KEY_ID: local-dev-playback-key
+  REND_PLAYBACK_SIGNING_SECRET: local-dev-playback-signing-secret
+  REND_PLAYBACK_TOKEN_TTL_SECS: "900"
+  REND_HTTP_TIMEOUT_SECS: "120"
+  REND_MEDIA_PROCESS_TIMEOUT_SECS: "60"
+  REND_MEDIA_JOB_MAX_ATTEMPTS: "3"
+  REND_MEDIA_WORKER_POLL_INTERVAL_SECS: "1"
+  REND_MEDIA_JOB_LOCK_TIMEOUT_SECS: "300"
+  REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES: "262144"
+  REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH: "100"
+  REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS: "86400"
+  REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS: "604800"
+  REND_EDGE_WARM_MAX_ARTIFACTS: "4"
+  REND_EDGE_MAX_IN_FLIGHT_FILLS: "64"
+  REND_EDGE_TELEMETRY_ENABLED: "true"
+  REND_EDGE_TELEMETRY_QUEUE_CAPACITY: "1024"
+  REND_EDGE_TELEMETRY_BATCH_SIZE: "100"
+  REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS: "2"
+  REND_EDGE_TELEMETRY_REQUEST_TIMEOUT_SECS: "2"
+  REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES: "10485760"
+  RUST_LOG: info
+
+x-rend-service-deps: &rend-service-deps
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  minio-init:
+    condition: service_completed_successfully
+  clickhouse:
+    condition: service_healthy
+  clickhouse-init:
+    condition: service_completed_successfully
+
+x-edge-service: &edge-service
+  image: rend-edge:local
+  build: *rend-build-edge
+  restart: unless-stopped
+  depends_on:
+    minio:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+    rend-api:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4100/readyz"]
+    interval: 10s
+    timeout: 3s
+    retries: 12
+    start_period: 10s
+
 services:
   postgres:
     image: postgres:16-alpine
