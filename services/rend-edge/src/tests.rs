@@ -206,6 +206,9 @@ fn test_state_with_max_in_flight_and_telemetry(
         playback_keyring: test_auth().0,
         warm_max_artifacts: 4,
         max_in_flight_fills,
+        cache_max_bytes: None,
+        max_origin_artifact_bytes: DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
+        cache_min_free_bytes: 0,
         control_plane: None,
         request_timeout: Duration::from_secs(10),
     };
@@ -216,7 +219,50 @@ fn test_state_with_max_in_flight_and_telemetry(
         http: reqwest::Client::new(),
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
+        started_at: Instant::now(),
+    })
+}
+
+fn test_state_with_resource_limits(
+    cache_dir: PathBuf,
+    origin_endpoint: String,
+    max_origin_artifact_bytes: u64,
+    cache_max_bytes: Option<u64>,
+    cache_min_free_bytes: u64,
+) -> Arc<AppState> {
+    let config = EdgeConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        edge_id: "test-edge".to_owned(),
+        region: "test".to_owned(),
+        cache_dir,
+        origin_health_url: format!("{origin_endpoint}/minio/health/ready"),
+        s3_endpoint: origin_endpoint,
+        s3_region: "us-east-1".to_owned(),
+        s3_bucket: "rend-local".to_owned(),
+        aws_access_key_id: "test".to_owned(),
+        aws_secret_access_key: "test".to_owned(),
+        internal_token: "test-internal-token".to_owned(),
+        playback_telemetry: telemetry::TelemetryConfig::disabled(),
+        playback_keyring: test_auth().0,
+        warm_max_artifacts: 4,
+        max_in_flight_fills: DEFAULT_MAX_IN_FLIGHT_FILLS,
+        cache_max_bytes,
+        max_origin_artifact_bytes,
+        cache_min_free_bytes,
+        control_plane: None,
+        request_timeout: Duration::from_secs(10),
+    };
+    let s3 = build_s3_client(&config);
+
+    Arc::new(AppState {
+        config,
+        http: reqwest::Client::new(),
+        s3,
+        in_flight_fills: Arc::new(FillRegistry::default()),
+        metrics: Arc::new(EdgeMetrics::default()),
+        telemetry: telemetry::TelemetryHandle::disabled(),
         started_at: Instant::now(),
     })
 }
@@ -245,6 +291,17 @@ async fn post_purge(app: Router, body: impl Into<Body>, token: Option<&str>) -> 
     }
 
     app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn get_metrics(app: Router, token: Option<&str>) -> Response {
+    let mut builder = Request::builder().method("GET").uri("/metrics");
+    if let Some(token) = token {
+        builder = builder.header("x-rend-internal-token", token);
+    }
+
+    app.oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap()
 }
@@ -788,6 +845,44 @@ async fn playback_succeeds_when_telemetry_ingest_is_down() {
 }
 
 #[tokio::test]
+async fn metrics_include_cache_fill_and_telemetry_series() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("metrics");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"cached-opener").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let hit = get_playback(app.clone(), signed_playback_uri("asset-123", "opener.mp4")).await;
+    assert_eq!(hit.status, StatusCode::OK);
+    let unauthorized = get_playback(app.clone(), "/v/asset-123/opener.mp4").await;
+    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+
+    let response = get_metrics(app, Some("test-internal-token")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let metrics = String::from_utf8(body.to_vec()).unwrap();
+    assert!(metrics.contains("# TYPE rend_edge_cache_requests_total counter"));
+    assert!(
+        metrics.contains(
+            "rend_edge_cache_requests_total{edge_id=\"test-edge\",region=\"test\",cache_status=\"HIT\"} 1"
+        )
+    );
+    assert!(
+        metrics.contains(
+            "rend_edge_cache_requests_total{edge_id=\"test-edge\",region=\"test\",cache_status=\"error\"} 1"
+        )
+    );
+    assert!(metrics.contains("rend_edge_in_flight_fills{edge_id=\"test-edge\",region=\"test\"} 0"));
+    assert!(metrics.contains("rend_edge_telemetry_events_total"));
+    assert!(metrics.contains("rend_edge_telemetry_spool_bytes"));
+}
+
+#[tokio::test]
 async fn playback_miss_fetches_origin_writes_cache_then_hits() {
     let mut objects = HashMap::new();
     objects.insert(
@@ -819,6 +914,73 @@ async fn playback_miss_fetches_origin_writes_cache_then_hits() {
         requests.lock().unwrap().as_slice(),
         ["rend-local/videos/asset-123/hls/master.m3u8"]
     );
+}
+
+#[tokio::test]
+async fn playback_rejects_origin_artifact_over_configured_limit() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"too-large".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("origin-size-guard");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 3, None, 0);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+    assert!(!cache_path.exists());
+}
+
+#[tokio::test]
+async fn playback_cache_size_guard_rejects_write_before_cache_mutation() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"opener-bytes".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("cache-size-guard");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 1024, Some(3), 0);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!cache_path.exists());
+    let json: Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("cache size guard"));
+}
+
+#[tokio::test]
+async fn warm_cache_size_guard_reports_failed_entry() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"opener-bytes".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("warm-cache-size-guard");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 1024, Some(3), 0);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = post_warm(
+        app,
+        warm_body("asset-123", &["opener.mp4"]),
+        Some("test-internal-token"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(json["results"][0]["status"], "failed");
+    assert_eq!(json["summary"]["failed"], 1);
+    assert!(!cache_path.exists());
 }
 
 #[tokio::test]
