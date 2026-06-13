@@ -252,9 +252,12 @@ struct AppState {
 
 #[derive(Serialize)]
 struct HealthResponse<'a> {
-    service: &'a str,
+    service: String,
     status: &'a str,
     version: &'a str,
+    package_version: &'a str,
+    git_sha: String,
+    build_time: String,
     uptime_ms: u128,
 }
 
@@ -939,11 +942,22 @@ fn media_worker_id() -> String {
     }
 }
 
+fn release_env(name: &str, fallback: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthResponse<'static>> {
     Json(HealthResponse {
-        service: "rend-api",
+        service: release_env("REND_SERVICE_NAME", "rend-api"),
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        package_version: env!("CARGO_PKG_VERSION"),
+        git_sha: release_env("REND_GIT_SHA", "unknown"),
+        build_time: release_env("REND_BUILD_TIME", "unknown"),
         uptime_ms: state.started_at.elapsed().as_millis(),
     })
 }
