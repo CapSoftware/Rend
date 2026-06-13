@@ -18,6 +18,7 @@ node_modules/
 
 # testing
 coverage/
+fixtures/media/*.mp4
 
 # next.js
 apps/*/.next/
