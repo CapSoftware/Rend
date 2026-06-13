@@ -117,9 +117,10 @@ Playback URLs are signed with `REND_PLAYBACK_SIGNING_KEY_ID`,
 processes must use the same key id and secret. The local player bootstrap
 returns up to `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS` first HLS segment
 hints, defaulting to `2`.
-Set `REND_EDGE_PURGE_URL` to the local edge purge endpoint when you want asset
-deletion to make a best-effort cache purge call, for example
-`http://127.0.0.1:4100/internal/purge`.
+Edges can register with the API via `REND_CONTROL_PLANE_URL`; API and worker
+warm/purge calls fan out to healthy rows in `rend.edge_nodes`. The
+`REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` settings are local fallback
+targets when no healthy registry edge is active.
 Raw playback request telemetry is stored in ClickHouse, not
 `rend.asset_events`. Postgres remains the source of truth for assets, artifacts,
 jobs, lifecycle events, deletion state, and other control-plane state. Edge
@@ -308,8 +309,8 @@ curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
   -H 'authorization: Bearer dev-api-key' | jq
 
-# Delete is authenticated and idempotent. It marks rend.assets.deleted_at and,
-# when REND_EDGE_PURGE_URL is configured, asks rend-edge to purge local cached
+# Delete is authenticated and idempotent. It marks rend.assets.deleted_at and
+# asks healthy registered edges, or the fallback purge URL, to purge cached
 # playback bytes for the asset.
 curl -s -X DELETE http://127.0.0.1:4000/v1/assets/$asset_id \
   -H 'authorization: Bearer dev-api-key' | jq
