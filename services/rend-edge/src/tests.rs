@@ -13,13 +13,26 @@ const NOW: u64 = 1_800_000_000;
 #[derive(Clone)]
 struct FakeOriginState {
     objects: Arc<Mutex<HashMap<String, FakeOriginObject>>>,
+    active_requests: Arc<Mutex<usize>>,
+    metrics: FakeOriginMetrics,
+}
+
+#[derive(Clone)]
+struct FakeOriginMetrics {
     requests: Arc<Mutex<Vec<String>>>,
+    max_active_requests: Arc<Mutex<usize>>,
 }
 
 #[derive(Clone)]
 enum FakeOriginObject {
     Body(Vec<u8>),
+    DelayedBody { bytes: Vec<u8>, delay: Duration },
     Error(StatusCode),
+    DelayedNoSuchKey { delay: Duration },
+}
+
+struct FakeOriginRequestGuard {
+    active_requests: Arc<Mutex<usize>>,
 }
 
 #[derive(Deserialize)]
@@ -40,35 +53,60 @@ async fn fake_s3_get(
     State(state): State<FakeOriginState>,
     AxumPath(path): AxumPath<FakeS3Path>,
 ) -> Response {
+    let _guard = track_fake_origin_request(&state);
+
     state
+        .metrics
         .requests
         .lock()
         .unwrap()
         .push(format!("{}/{}", path.bucket, path.key));
 
     let object = state.objects.lock().unwrap().get(&path.key).cloned();
+    if let Some(delay) = object.as_ref().map(FakeOriginObject::delay) {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     match object {
         Some(FakeOriginObject::Body(bytes)) => (StatusCode::OK, bytes).into_response(),
+        Some(FakeOriginObject::DelayedBody { bytes, .. }) => {
+            (StatusCode::OK, bytes).into_response()
+        }
         Some(FakeOriginObject::Error(status)) => status.into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "application/xml")],
-            format!(
-                "<Error><Code>NoSuchKey</Code><Key>{}</Key></Error>",
-                path.key
-            ),
-        )
-            .into_response(),
+        Some(FakeOriginObject::DelayedNoSuchKey { .. }) => no_such_key_response(&path.key),
+        None => no_such_key_response(&path.key),
     }
+}
+
+fn no_such_key_response(key: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "application/xml")],
+        format!("<Error><Code>NoSuchKey</Code><Key>{key}</Key></Error>"),
+    )
+        .into_response()
 }
 
 async fn spawn_fake_origin(
     objects: HashMap<String, FakeOriginObject>,
 ) -> (String, Arc<Mutex<Vec<String>>>) {
-    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (endpoint, metrics) = spawn_fake_origin_with_metrics(objects).await;
+    (endpoint, metrics.requests)
+}
+
+async fn spawn_fake_origin_with_metrics(
+    objects: HashMap<String, FakeOriginObject>,
+) -> (String, FakeOriginMetrics) {
+    let metrics = FakeOriginMetrics {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        max_active_requests: Arc::new(Mutex::new(0)),
+    };
     let state = FakeOriginState {
         objects: Arc::new(Mutex::new(objects)),
-        requests: requests.clone(),
+        active_requests: Arc::new(Mutex::new(0)),
+        metrics: metrics.clone(),
     };
     let app = Router::new()
         .route("/{bucket}/{*key}", get(fake_s3_get))
@@ -79,7 +117,48 @@ async fn spawn_fake_origin(
         axum::serve(listener, app).await.unwrap();
     });
 
-    (format!("http://{addr}"), requests)
+    (format!("http://{addr}"), metrics)
+}
+
+impl FakeOriginObject {
+    fn delay(&self) -> Duration {
+        match self {
+            Self::Body(_) | Self::Error(_) => Duration::ZERO,
+            Self::DelayedBody { delay, .. } | Self::DelayedNoSuchKey { delay } => *delay,
+        }
+    }
+}
+
+impl FakeOriginMetrics {
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    fn max_active_requests(&self) -> usize {
+        *self.max_active_requests.lock().unwrap()
+    }
+}
+
+impl Drop for FakeOriginRequestGuard {
+    fn drop(&mut self) {
+        let mut active_requests = self.active_requests.lock().unwrap();
+        *active_requests = active_requests.saturating_sub(1);
+    }
+}
+
+fn track_fake_origin_request(state: &FakeOriginState) -> FakeOriginRequestGuard {
+    let active_now = {
+        let mut active_requests = state.active_requests.lock().unwrap();
+        *active_requests += 1;
+        *active_requests
+    };
+
+    let mut max_active_requests = state.metrics.max_active_requests.lock().unwrap();
+    *max_active_requests = (*max_active_requests).max(active_now);
+
+    FakeOriginRequestGuard {
+        active_requests: state.active_requests.clone(),
+    }
 }
 
 fn test_cache_dir(name: &str) -> PathBuf {
@@ -87,6 +166,14 @@ fn test_cache_dir(name: &str) -> PathBuf {
 }
 
 fn test_state(cache_dir: PathBuf, origin_endpoint: String) -> Arc<AppState> {
+    test_state_with_max_in_flight(cache_dir, origin_endpoint, DEFAULT_MAX_IN_FLIGHT_FILLS)
+}
+
+fn test_state_with_max_in_flight(
+    cache_dir: PathBuf,
+    origin_endpoint: String,
+    max_in_flight_fills: usize,
+) -> Arc<AppState> {
     let config = EdgeConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         edge_id: "test-edge".to_owned(),
@@ -101,6 +188,7 @@ fn test_state(cache_dir: PathBuf, origin_endpoint: String) -> Arc<AppState> {
         internal_token: "test-internal-token".to_owned(),
         playback_keyring: test_auth().0,
         warm_max_artifacts: 4,
+        max_in_flight_fills,
         request_timeout: Duration::from_secs(10),
     };
     let s3 = build_s3_client(&config);
@@ -109,6 +197,7 @@ fn test_state(cache_dir: PathBuf, origin_endpoint: String) -> Arc<AppState> {
         config,
         http: reqwest::Client::new(),
         s3,
+        in_flight_fills: Arc::new(FillRegistry::default()),
         started_at: Instant::now(),
     })
 }
@@ -172,6 +261,89 @@ fn tamper_last_char(value: &str) -> String {
     let last = output.pop().unwrap();
     output.push(if last == 'A' { 'B' } else { 'A' });
     output
+}
+
+struct PlaybackTestResponse {
+    status: StatusCode,
+    cache_status: Option<String>,
+    content_type: Option<String>,
+    body: Vec<u8>,
+}
+
+fn signed_playback_uri(asset_id: &str, artifact_path: &str) -> String {
+    let (_keyring, issuer) = test_auth();
+    let token = issuer.issue_asset_playback_token(asset_id, NOW).unwrap();
+    format!("/v/{asset_id}/{artifact_path}?token={token}")
+}
+
+async fn get_playback(app: Router, uri: impl AsRef<str>) -> PlaybackTestResponse {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+
+    PlaybackTestResponse {
+        status,
+        cache_status: headers
+            .get("x-rend-cache")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        content_type: headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        body,
+    }
+}
+
+async fn get_playback_concurrently(
+    app: Router,
+    uri: String,
+    request_count: usize,
+) -> Vec<PlaybackTestResponse> {
+    let barrier = Arc::new(tokio::sync::Barrier::new(request_count));
+    let mut handles = Vec::with_capacity(request_count);
+    for _ in 0..request_count {
+        let app = app.clone();
+        let uri = uri.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            get_playback(app, uri).await
+        }));
+    }
+
+    let mut responses = Vec::with_capacity(request_count);
+    for handle in handles {
+        responses.push(handle.await.unwrap());
+    }
+    responses
+}
+
+async fn wait_for_in_flight_count(state: &AppState, expected: usize) {
+    for _ in 0..100 {
+        if state.in_flight_fills.len() == expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!(
+        "timed out waiting for {expected} in-flight fills; last count was {}",
+        state.in_flight_fills.len()
+    );
 }
 
 #[test]
@@ -534,6 +706,249 @@ async fn warm_fetches_origin_and_writes_same_cache_key_as_playback() {
         requests.lock().unwrap().as_slice(),
         ["rend-local/videos/asset-123/hls/master.m3u8"]
     );
+}
+
+#[tokio::test]
+async fn playback_serves_existing_cache_hit_without_origin() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-hit");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"cached-opener").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
+    assert_eq!(response.body, b"cached-opener");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_miss_fetches_origin_writes_cache_then_hits() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/master.m3u8".to_owned(),
+        FakeOriginObject::Body(b"#EXTM3U\n".to_vec()),
+    );
+    let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("playback-miss");
+    let cache_path = cache_dir.join("videos/asset-123/hls/master.m3u8");
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let uri = signed_playback_uri("asset-123", "hls/master.m3u8");
+
+    let first = get_playback(app.clone(), uri.clone()).await;
+    let second = get_playback(app, uri).await;
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(
+        first.content_type.as_deref(),
+        Some("application/vnd.apple.mpegurl")
+    );
+    assert_eq!(first.body, b"#EXTM3U\n");
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(second.body, first.body);
+    assert_eq!(fs::read(cache_path).await.unwrap(), b"#EXTM3U\n");
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["rend-local/videos/asset-123/hls/master.m3u8"]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_same_artifact_misses_share_one_origin_fill() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/segment_00000.ts".to_owned(),
+        FakeOriginObject::DelayedBody {
+            bytes: b"segment-bytes".to_vec(),
+            delay: Duration::from_millis(250),
+        },
+    );
+    let (origin_endpoint, metrics) = spawn_fake_origin_with_metrics(objects).await;
+    let state = test_state(test_cache_dir("coalesce-same"), origin_endpoint);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+    let uri = signed_playback_uri("asset-123", "hls/segment_00000.ts");
+
+    let responses = get_playback_concurrently(app, uri, 6).await;
+
+    let miss_count = responses
+        .iter()
+        .filter(|response| response.cache_status.as_deref() == Some("MISS"))
+        .count();
+    let coalesced_count = responses
+        .iter()
+        .filter(|response| response.cache_status.as_deref() == Some("COALESCED"))
+        .count();
+    assert_eq!(miss_count, 1);
+    assert_eq!(coalesced_count, 5);
+    for response in &responses {
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, b"segment-bytes");
+    }
+    assert_eq!(metrics.request_count(), 1);
+    assert_eq!(
+        fs::read(
+            state
+                .config
+                .cache_dir
+                .join("videos/asset-123/hls/segment_00000.ts")
+        )
+        .await
+        .unwrap(),
+        b"segment-bytes"
+    );
+    assert_eq!(state.in_flight_fills.len(), 0);
+}
+
+#[tokio::test]
+async fn different_artifact_misses_fill_concurrently() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::DelayedBody {
+            bytes: b"opener-bytes".to_vec(),
+            delay: Duration::from_millis(250),
+        },
+    );
+    objects.insert(
+        "videos/asset-123/hls/master.m3u8".to_owned(),
+        FakeOriginObject::DelayedBody {
+            bytes: b"#EXTM3U\n".to_vec(),
+            delay: Duration::from_millis(250),
+        },
+    );
+    let (origin_endpoint, metrics) = spawn_fake_origin_with_metrics(objects).await;
+    let state = test_state(test_cache_dir("coalesce-different"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let opener_handle = {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await
+        })
+    };
+    let manifest_handle = {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            get_playback(app, signed_playback_uri("asset-123", "hls/master.m3u8")).await
+        })
+    };
+
+    let opener = opener_handle.await.unwrap();
+    let manifest = manifest_handle.await.unwrap();
+
+    assert_eq!(opener.status, StatusCode::OK);
+    assert_eq!(opener.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(opener.body, b"opener-bytes");
+    assert_eq!(manifest.status, StatusCode::OK);
+    assert_eq!(manifest.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(manifest.body, b"#EXTM3U\n");
+    assert_eq!(metrics.request_count(), 2);
+    assert_eq!(metrics.max_active_requests(), 2);
+}
+
+#[tokio::test]
+async fn origin_failure_wakes_waiters_and_removes_in_flight_entry() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::DelayedNoSuchKey {
+            delay: Duration::from_millis(250),
+        },
+    );
+    let (origin_endpoint, metrics) = spawn_fake_origin_with_metrics(objects).await;
+    let state = test_state(test_cache_dir("coalesce-failure"), origin_endpoint);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+    let uri = signed_playback_uri("asset-123", "opener.mp4");
+
+    let responses = get_playback_concurrently(app.clone(), uri.clone(), 5).await;
+
+    for response in &responses {
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+        assert!(response.cache_status.is_none());
+    }
+    assert_eq!(metrics.request_count(), 1);
+    assert_eq!(state.in_flight_fills.len(), 0);
+
+    let retry = get_playback(app, uri).await;
+
+    assert_eq!(retry.status, StatusCode::NOT_FOUND);
+    assert_eq!(metrics.request_count(), 2);
+    assert_eq!(state.in_flight_fills.len(), 0);
+}
+
+#[tokio::test]
+async fn in_flight_registry_bound_is_enforced_for_new_artifacts() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-a/opener.mp4".to_owned(),
+        FakeOriginObject::DelayedBody {
+            bytes: b"asset-a-opener".to_vec(),
+            delay: Duration::from_millis(300),
+        },
+    );
+    objects.insert(
+        "videos/asset-b/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"asset-b-opener".to_vec()),
+    );
+    let (origin_endpoint, metrics) = spawn_fake_origin_with_metrics(objects).await;
+    let state = test_state_with_max_in_flight(test_cache_dir("coalesce-bound"), origin_endpoint, 1);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+    let first_handle = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            get_playback(app, signed_playback_uri("asset-a", "opener.mp4")).await
+        })
+    };
+
+    wait_for_in_flight_count(&state, 1).await;
+    let rejected = get_playback(app, signed_playback_uri("asset-b", "opener.mp4")).await;
+
+    assert_eq!(rejected.status, StatusCode::SERVICE_UNAVAILABLE);
+    let json: Value = serde_json::from_slice(&rejected.body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("too many in-flight edge cache fills")
+    );
+
+    let first = first_handle.await.unwrap();
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(first.body, b"asset-a-opener");
+    assert_eq!(metrics.request_count(), 1);
+    assert_eq!(state.in_flight_fills.len(), 0);
+}
+
+#[tokio::test]
+async fn unauthorized_playback_is_rejected_before_cache_origin_or_coalescing() {
+    let (origin_endpoint, metrics) = spawn_fake_origin_with_metrics(HashMap::new()).await;
+    let cache_dir = test_cache_dir("auth-before-cache");
+    fs::write(&cache_dir, b"not-a-directory").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = get_playback(app, "/v/asset-123/opener.mp4").await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert!(response.cache_status.is_none());
+    assert_eq!(metrics.request_count(), 0);
+    assert_eq!(state.in_flight_fills.len(), 0);
 }
 
 #[test]
