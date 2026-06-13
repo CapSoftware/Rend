@@ -137,7 +137,7 @@ async fn process_in_dir(
         "opener_ready"
     };
 
-    persist_artifacts_and_state(
+    let promoted = persist_artifacts_and_state(
         &request.db,
         &request.asset_id,
         &artifacts,
@@ -145,6 +145,13 @@ async fn process_in_dir(
         &opener_artifact.object_key,
     )
     .await?;
+
+    if !promoted {
+        return Ok(ProcessMediaOutcome {
+            playable_state: "deleted".to_owned(),
+            playback_artifact_paths: Vec::new(),
+        });
+    }
 
     Ok(ProcessMediaOutcome {
         playable_state: playable_state.to_owned(),
@@ -463,24 +470,38 @@ async fn persist_artifacts_and_state(
     artifacts: &[UploadedArtifact],
     playable_state: &str,
     opener_object_key: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut tx = db
         .begin()
         .await
         .context("failed to start artifact transaction")?;
     let mut opener_artifact_id = None;
-    let previous_playable_state: String = sqlx::query_scalar(
+    let row: Option<(String, bool)> = sqlx::query_as(
         "
-        SELECT playable_state
+        SELECT playable_state, deleted_at IS NOT NULL
         FROM rend.assets
         WHERE id = $1::uuid
         FOR UPDATE
         ",
     )
     .bind(asset_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .context("failed to lock asset playable state")?;
+
+    let Some((previous_playable_state, deleted)) = row else {
+        tx.commit()
+            .await
+            .context("failed to commit missing-asset artifact transaction")?;
+        return Ok(false);
+    };
+
+    if deleted {
+        tx.commit()
+            .await
+            .context("failed to commit deleted-asset artifact transaction")?;
+        return Ok(false);
+    }
 
     for artifact in artifacts {
         let artifact_id: String = insert_artifact(&mut tx, asset_id, artifact)
@@ -513,6 +534,7 @@ async fn persist_artifacts_and_state(
             playable_state = $2,
             current_opener_artifact_id = $3::uuid
         WHERE id = $1::uuid
+          AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -536,7 +558,7 @@ async fn persist_artifacts_and_state(
     tx.commit()
         .await
         .context("failed to commit artifact transaction")?;
-    Ok(())
+    Ok(true)
 }
 
 async fn insert_artifact(
@@ -567,18 +589,32 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
         .begin()
         .await
         .context("failed to start failed-state transaction")?;
-    let previous_playable_state: String = sqlx::query_scalar(
+    let row: Option<(String, bool)> = sqlx::query_as(
         "
-        SELECT playable_state
+        SELECT playable_state, deleted_at IS NOT NULL
         FROM rend.assets
         WHERE id = $1::uuid
         FOR UPDATE
         ",
     )
     .bind(asset_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .context("failed to lock asset playable state")?;
+
+    let Some((previous_playable_state, deleted)) = row else {
+        tx.commit()
+            .await
+            .context("failed to commit missing-asset failed-state transaction")?;
+        return Ok(());
+    };
+
+    if deleted {
+        tx.commit()
+            .await
+            .context("failed to commit deleted-asset failed-state transaction")?;
+        return Ok(());
+    }
 
     sqlx::query(
         "
@@ -587,6 +623,7 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
             playable_state = 'failed',
             current_opener_artifact_id = NULL
         WHERE id = $1::uuid
+          AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
