@@ -3489,6 +3489,20 @@ mod tests {
     }
 
     #[test]
+    fn delete_asset_normalizes_uuid_and_rejects_malformed_id() {
+        assert_eq!(
+            normalize_asset_id("00000000-0000-0000-0000-000000000ABC").unwrap(),
+            "00000000-0000-0000-0000-000000000abc"
+        );
+
+        let Err(error) = normalize_asset_id("not-a-uuid") else {
+            panic!("malformed asset id unexpectedly normalized");
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "malformed asset_id");
+    }
+
+    #[test]
     fn asset_events_unknown_asset_returns_404() {
         let Err(error) = asset_events_response(false, "asset-123".to_owned(), Vec::new()) else {
             panic!("unknown asset unexpectedly returned lifecycle events");
@@ -3725,6 +3739,10 @@ mod tests {
             events::EVENT_EDGE_WARMING_ATTEMPTED,
             events::EVENT_EDGE_WARMING_SUCCEEDED,
             events::EVENT_UPLOAD_RESPONSE_READY,
+            events::EVENT_ASSET_DELETION_REQUESTED,
+            events::EVENT_ASSET_DELETED,
+            events::EVENT_EDGE_PURGE_ATTEMPTED,
+            events::EVENT_EDGE_PURGE_SUCCEEDED,
         ]);
 
         for required in [
