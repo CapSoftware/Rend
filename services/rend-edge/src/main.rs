@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
@@ -26,12 +27,14 @@ use rend_playback_auth::{
     SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncWriteExt, net::TcpListener};
+use tokio::{fs, io::AsyncWriteExt, net::TcpListener, sync::Notify};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_WARM_MAX_ARTIFACTS: usize = 4;
 const HARD_WARM_MAX_ARTIFACTS: usize = 16;
+const DEFAULT_MAX_IN_FLIGHT_FILLS: usize = 64;
+const HARD_MAX_IN_FLIGHT_FILLS: usize = 1024;
 const INTERNAL_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ASSET_ID_LEN: usize = 128;
 
@@ -50,6 +53,7 @@ struct EdgeConfig {
     internal_token: String,
     playback_keyring: SingleKeyring,
     warm_max_artifacts: usize,
+    max_in_flight_fills: usize,
     request_timeout: Duration,
 }
 
@@ -71,6 +75,12 @@ impl EdgeConfig {
             (1..=HARD_WARM_MAX_ARTIFACTS).contains(&warm_max_artifacts),
             "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_WARM_MAX_ARTIFACTS}"
         );
+        let max_in_flight_fills =
+            env_usize("REND_EDGE_MAX_IN_FLIGHT_FILLS", DEFAULT_MAX_IN_FLIGHT_FILLS)?;
+        anyhow::ensure!(
+            (1..=HARD_MAX_IN_FLIGHT_FILLS).contains(&max_in_flight_fills),
+            "REND_EDGE_MAX_IN_FLIGHT_FILLS must be between 1 and {HARD_MAX_IN_FLIGHT_FILLS}"
+        );
 
         Ok(Self {
             bind_addr: env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?,
@@ -89,6 +99,7 @@ impl EdgeConfig {
             internal_token: env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token"),
             playback_keyring,
             warm_max_artifacts,
+            max_in_flight_fills,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
         })
     }
@@ -99,6 +110,7 @@ struct AppState {
     config: EdgeConfig,
     http: reqwest::Client,
     s3: S3Client,
+    in_flight_fills: Arc<FillRegistry>,
     started_at: Instant,
 }
 
@@ -237,13 +249,140 @@ struct PlaybackArtifact {
     content_type: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PlaybackError {
     Unauthorized,
     NotFound(String),
     OriginNotFound(String),
     Origin(String),
     Io(String),
+    Overloaded(String),
+}
+
+#[derive(Default)]
+struct FillRegistry {
+    fills: std::sync::Mutex<HashMap<String, Arc<InFlightFill>>>,
+}
+
+struct InFlightFill {
+    notify: Notify,
+    outcome: std::sync::Mutex<Option<FillOutcome>>,
+}
+
+#[derive(Clone)]
+enum FillOutcome {
+    Succeeded,
+    Failed(PlaybackError),
+}
+
+enum FillSlot {
+    Leader(FillLeaderGuard),
+    Waiter(Arc<InFlightFill>),
+}
+
+struct FillLeaderGuard {
+    registry: Arc<FillRegistry>,
+    cache_key: String,
+    fill: Arc<InFlightFill>,
+    completed: bool,
+}
+
+impl FillRegistry {
+    fn acquire(
+        self: &Arc<Self>,
+        cache_key: &str,
+        max_in_flight_fills: usize,
+    ) -> std::result::Result<FillSlot, PlaybackError> {
+        let mut fills = lock_mutex(&self.fills);
+        if let Some(fill) = fills.get(cache_key) {
+            return Ok(FillSlot::Waiter(fill.clone()));
+        }
+
+        if fills.len() >= max_in_flight_fills {
+            return Err(PlaybackError::Overloaded(format!(
+                "too many in-flight edge cache fills; limit is {max_in_flight_fills}"
+            )));
+        }
+
+        let fill = Arc::new(InFlightFill::new());
+        fills.insert(cache_key.to_owned(), fill.clone());
+        Ok(FillSlot::Leader(FillLeaderGuard {
+            registry: self.clone(),
+            cache_key: cache_key.to_owned(),
+            fill,
+            completed: false,
+        }))
+    }
+
+    fn complete(&self, cache_key: &str, fill: &Arc<InFlightFill>, outcome: FillOutcome) {
+        {
+            let mut fills = lock_mutex(&self.fills);
+            if fills
+                .get(cache_key)
+                .is_some_and(|current| Arc::ptr_eq(current, fill))
+            {
+                fills.remove(cache_key);
+            }
+        }
+
+        fill.complete(outcome);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        lock_mutex(&self.fills).len()
+    }
+}
+
+impl InFlightFill {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            outcome: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn complete(&self, outcome: FillOutcome) {
+        *lock_mutex(&self.outcome) = Some(outcome);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) -> FillOutcome {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(outcome) = lock_mutex(&self.outcome).clone() {
+                return outcome;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl FillLeaderGuard {
+    fn complete(mut self, outcome: FillOutcome) {
+        self.registry.complete(&self.cache_key, &self.fill, outcome);
+        self.completed = true;
+    }
+}
+
+impl Drop for FillLeaderGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.registry.complete(
+                &self.cache_key,
+                &self.fill,
+                FillOutcome::Failed(PlaybackError::Origin(
+                    "edge cache fill was cancelled".to_owned(),
+                )),
+            );
+        }
+    }
+}
+
+fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug)]
@@ -272,6 +411,7 @@ async fn main() -> Result<()> {
         config,
         http: reqwest::Client::new(),
         s3,
+        in_flight_fills: Arc::new(FillRegistry::default()),
         started_at: Instant::now(),
     });
     let app = build_app(state.clone(), request_timeout);
@@ -430,35 +570,84 @@ async fn playback_inner(
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
-    match fs::read(&cache_path).await {
-        Ok(bytes) => {
-            let content_length = u64::try_from(bytes.len()).ok();
-            return Ok(artifact_response(
-                artifact.content_type,
-                "HIT",
-                Body::from(bytes),
-                content_length,
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(PlaybackError::Io(format!(
-                "failed to read cached artifact {}: {error}",
-                cache_path.display()
-            )));
-        }
+    if let Some(bytes) = read_cache_file(&cache_path).await? {
+        return Ok(artifact_bytes_response(&artifact, "HIT", bytes));
     }
 
-    let bytes = fetch_origin_artifact(&state, &artifact).await?;
-    let content_length = u64::try_from(bytes.len()).ok();
-    write_cache_file(&cache_path, &bytes).await?;
+    match state
+        .in_flight_fills
+        .acquire(&artifact.cache_key, state.config.max_in_flight_fills)?
+    {
+        FillSlot::Leader(leader) => {
+            let result = fill_cache_from_origin(&state, &artifact, &cache_path).await;
+            let outcome = match &result {
+                Ok(_) => FillOutcome::Succeeded,
+                Err(error) => FillOutcome::Failed(error.clone()),
+            };
+            leader.complete(outcome);
 
-    Ok(artifact_response(
+            result?;
+            let bytes = read_filled_cache_file(&cache_path).await?;
+            Ok(artifact_bytes_response(&artifact, "MISS", bytes))
+        }
+        FillSlot::Waiter(fill) => {
+            wait_for_coalesced_fill(fill).await?;
+            let bytes = read_filled_cache_file(&cache_path).await?;
+            Ok(artifact_bytes_response(&artifact, "COALESCED", bytes))
+        }
+    }
+}
+
+async fn read_cache_file(path: &FsPath) -> std::result::Result<Option<Vec<u8>>, PlaybackError> {
+    match fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(PlaybackError::Io(format!(
+            "failed to read cached artifact {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+async fn read_filled_cache_file(path: &FsPath) -> std::result::Result<Vec<u8>, PlaybackError> {
+    read_cache_file(path).await?.ok_or_else(|| {
+        PlaybackError::Io(format!(
+            "filled cache artifact {} was missing before it could be served",
+            path.display()
+        ))
+    })
+}
+
+async fn fill_cache_from_origin(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    cache_path: &FsPath,
+) -> std::result::Result<(), PlaybackError> {
+    let bytes = fetch_origin_artifact(state, artifact).await?;
+    write_cache_file(cache_path, &bytes).await
+}
+
+async fn wait_for_coalesced_fill(
+    fill: Arc<InFlightFill>,
+) -> std::result::Result<(), PlaybackError> {
+    match fill.wait().await {
+        FillOutcome::Succeeded => Ok(()),
+        FillOutcome::Failed(error) => Err(error),
+    }
+}
+
+fn artifact_bytes_response(
+    artifact: &PlaybackArtifact,
+    cache_status: &'static str,
+    bytes: Vec<u8>,
+) -> Response {
+    let content_length = u64::try_from(bytes.len()).ok();
+    artifact_response(
         artifact.content_type,
-        "MISS",
+        cache_status,
         Body::from(bytes),
         content_length,
-    ))
+    )
 }
 
 async fn warm(State(state): State<Arc<AppState>>, Json(request): Json<WarmRequest>) -> Response {
@@ -1177,6 +1366,10 @@ impl IntoResponse for PlaybackError {
                     "edge cache operation failed".to_owned(),
                 )
             }
+            PlaybackError::Overloaded(message) => {
+                tracing::warn!(error = %message, "edge cache fill registry is full");
+                (StatusCode::SERVICE_UNAVAILABLE, message)
+            }
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()
@@ -1190,7 +1383,8 @@ impl PlaybackError {
             PlaybackError::NotFound(message)
             | PlaybackError::OriginNotFound(message)
             | PlaybackError::Origin(message)
-            | PlaybackError::Io(message) => message,
+            | PlaybackError::Io(message)
+            | PlaybackError::Overloaded(message) => message,
         }
     }
 }
