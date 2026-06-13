@@ -33,6 +33,8 @@ use tokio::net::TcpListener;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod media;
+
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 #[derive(Clone)]
@@ -48,6 +50,7 @@ struct ApiConfig {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     playback_base_url: String,
+    media_processing: media::MediaProcessingConfig,
     auto_migrate: bool,
     request_timeout: Duration,
 }
@@ -87,8 +90,13 @@ impl ApiConfig {
             aws_access_key_id,
             aws_secret_access_key,
             playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
+            media_processing: media::MediaProcessingConfig {
+                ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
+                ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
+                process_timeout: env_duration_secs("REND_MEDIA_PROCESS_TIMEOUT_SECS", 60)?,
+            },
             auto_migrate: env_bool("REND_API_AUTO_MIGRATE", true)?,
-            request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
+            request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
         })
     }
 }
@@ -332,19 +340,50 @@ async fn create_video_inner(
     .await
     .map_err(AppError::internal)?;
 
-    let (source_state, playable_state): (String, String) = sqlx::query_as(
+    sqlx::query(
         "
         UPDATE rend.assets
         SET source_state = 'uploaded', playable_state = 'not_playable'
         WHERE id = $1::uuid
-        RETURNING source_state, playable_state
         ",
     )
     .bind(&asset_id)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await
     .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
+
+    let media_outcome = media::process_uploaded_source(media::ProcessMediaRequest {
+        asset_id: asset_id.clone(),
+        source_object_key: source_object_key.clone(),
+        s3_bucket: state.config.s3_bucket.clone(),
+        s3: state.s3.clone(),
+        db: state.db.clone(),
+        config: state.config.media_processing.clone(),
+    })
+    .await
+    .map_err(AppError::internal)?;
+
+    let (source_state, playable_state): (String, String) = sqlx::query_as(
+        "
+        SELECT source_state, playable_state
+        FROM rend.assets
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(&asset_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(AppError::internal)?;
+
+    if playable_state != media_outcome.playable_state {
+        tracing::warn!(
+            asset_id,
+            expected_playable_state = %media_outcome.playable_state,
+            actual_playable_state = %playable_state,
+            "asset playable state differed after media processing",
+        );
+    }
 
     Ok(CreateVideoResponse {
         asset_id: asset_id.clone(),
