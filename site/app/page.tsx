@@ -612,7 +612,7 @@ export default function Home() {
             href="https://rend.so"
             className="border-b border-line transition hover:border-ink hover:text-ink"
           >
-            rend.so
+            Rend.so
           </a>
         </p>
       </footer>
