@@ -148,6 +148,7 @@ bun run backend:smoke:media
 bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
 bun run backend:smoke:asset-events
+bun run backend:smoke:lifecycle-sse
 ```
 
 The smoke flow starts local dependencies, checks `ffmpeg -version` and
@@ -174,6 +175,11 @@ fixture, checks `GET /v1/assets/<asset_id>`, checks
 `GET /v1/assets/<asset_id>/events`, verifies ordered lifecycle events and
 `after_sequence` polling, and confirms unauthenticated and unknown-asset
 requests are rejected.
+
+The lifecycle SSE smoke opens authenticated `GET /v1/events`, uploads a
+fixture, verifies durable lifecycle frames through media processing and edge
+warming, and reconnects with `Last-Event-ID` to prove replay resumes after the
+sequence cursor.
 
 Manual upload, bootstrap, and local playback:
 
@@ -216,6 +222,29 @@ after_sequence=$(
 
 curl -s "http://127.0.0.1:4000/v1/assets/$asset_id/events?after_sequence=$after_sequence&limit=25" \
   -H 'authorization: Bearer dev-api-key' | jq
+
+# In another terminal, observe the durable lifecycle stream. Each SSE frame uses
+# rend.asset_events.sequence as its id and rend.asset_events.event_type as its
+# event name.
+curl -N http://127.0.0.1:4000/v1/events \
+  -H 'authorization: Bearer dev-api-key' \
+  -H 'accept: text/event-stream'
+
+# Optional asset filter. Unknown well-formed asset ids simply stream no events.
+curl -N "http://127.0.0.1:4000/v1/events?asset_id=$asset_id" \
+  -H 'authorization: Bearer dev-api-key' \
+  -H 'accept: text/event-stream'
+
+# Replay after a durable sequence cursor. Last-Event-ID takes precedence over
+# after_sequence when both are present.
+curl -N "http://127.0.0.1:4000/v1/events?after_sequence=$after_sequence" \
+  -H 'authorization: Bearer dev-api-key' \
+  -H 'accept: text/event-stream'
+
+curl -N "http://127.0.0.1:4000/v1/events?after_sequence=0" \
+  -H 'authorization: Bearer dev-api-key' \
+  -H "Last-Event-ID: $after_sequence" \
+  -H 'accept: text/event-stream'
 
 open "http://127.0.0.1:4000/player?asset_id=$asset_id"
 
