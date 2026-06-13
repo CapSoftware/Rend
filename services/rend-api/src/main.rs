@@ -19,7 +19,7 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -44,6 +44,7 @@ use tracing_subscriber::EnvFilter;
 mod events;
 mod jobs;
 mod media;
+mod telemetry;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -80,6 +81,7 @@ struct ApiConfig {
     playback_bootstrap_prefetch_segments: usize,
     edge_warm: EdgeWarmConfig,
     edge_purge: EdgePurgeConfig,
+    playback_telemetry: telemetry::TelemetryConfig,
     media_processing: media::MediaProcessingConfig,
     media_job_max_attempts: i32,
     inline_media_processing: bool,
@@ -157,6 +159,7 @@ impl ApiConfig {
                 "REND_EDGE_INTERNAL_TOKEN must not be empty when an internal edge URL is configured"
             );
         }
+        let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
 
         for (key, value) in [
             ("REND_DEV_API_KEY", &dev_api_key),
@@ -203,6 +206,7 @@ impl ApiConfig {
                 url: edge_purge_url,
                 internal_token: edge_internal_token,
             },
+            playback_telemetry,
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
@@ -568,9 +572,22 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         )
         .route("/v1/assets/{asset_id}/events", get(get_asset_events))
         .route("/v1/assets/{asset_id}/playback", get(get_asset_playback))
+        .route(
+            "/v1/assets/{asset_id}/analytics/playback",
+            get(telemetry::get_playback_analytics),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_dev_api_key,
+        ));
+    let telemetry_routes = Router::new()
+        .route("/playback", post(telemetry::post_playback_telemetry))
+        .route_layer(DefaultBodyLimit::max(
+            state.config.playback_telemetry.max_body_bytes,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            telemetry::require_internal_telemetry_token,
         ));
 
     Router::new()
@@ -580,6 +597,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/v1/readyz", get(readyz))
         .route("/player", get(player_harness))
         .merge(authenticated_routes)
+        .nest("/internal/telemetry", telemetry_routes)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
