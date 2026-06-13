@@ -6,6 +6,8 @@ cd "$root_dir"
 
 api_base="${REND_API_BASE_URL:-http://127.0.0.1:4000}"
 edge_base="${REND_EDGE_BASE_URL:-http://127.0.0.1:4100}"
+api_base="${api_base%/}"
+edge_base="${edge_base%/}"
 fixture_path="${REND_SMOKE_FIXTURE:-$root_dir/fixtures/media/rend-fixture.mp4}"
 tmp_dir="$(mktemp -d)"
 api_started=0
