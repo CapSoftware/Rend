@@ -12,20 +12,23 @@ paths used by the local Docker stack.
 ## Current Deployment Shape
 
 - `rend-api`: control-plane HTTP API on container port `4000`. It owns
-  migrations, upload ingest, asset state, playback bootstrap, edge warm/purge
-  calls, and playback telemetry ingest into ClickHouse.
+  migrations, upload ingest, asset state, playback bootstrap, the
+  `rend.edge_nodes` registry, best-effort edge warm/purge fanout, and playback
+  telemetry ingest into ClickHouse.
 - `rend-media-worker`: same API binary started as `rend-api worker media`. It
   claims media jobs, runs `ffmpeg`/`ffprobe`, writes artifacts to object
-  storage, and asks the active edge to warm artifacts.
+  storage, and asks healthy registered edges to warm artifacts.
 - `rend-edge`: playback edge on container port `4100`. It validates signed
   playback tokens locally, fills a node-local cache from object storage, exposes
   `/internal/warm` and `/internal/purge`, exposes token-protected `/metrics`,
+  registers and heartbeats with `rend-api` when `REND_CONTROL_PLANE_URL` is set,
   and spools telemetry to local disk before sending it to `rend-api`.
 
-Current limitation for first trials: `rend-api` has one `REND_EDGE_WARM_URL`
-and one `REND_EDGE_PURGE_URL`. Treat one edge host as the API's active warm and
-purge target at a time. The second regional edge can still be warmed directly
-with the remote smoke commands below, matching the local two-edge smoke shape.
+`rend.edge_nodes` is the source of registered edge nodes. API and media worker
+warm/purge fanout targets every row with `status='healthy'`, a non-empty
+`base_url`, and a fresh heartbeat. `REND_EDGE_WARM_URL` and
+`REND_EDGE_PURGE_URL` remain fallback-only local/dev settings when the registry
+has no healthy active edge.
 
 ## Minimum Edge Host Requirements
 
@@ -95,6 +98,7 @@ short trials with known test clients.
 | Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
 | Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
 | Outbound origin | TCP `443` | `rend-edge` | S3-compatible endpoint | Artifact fills and origin readiness checks. |
+| Outbound control plane | TCP `443` or private `4000` | `rend-edge` | `rend-api` internal edge endpoints | `POST /internal/edges/register` and `/internal/edges/heartbeat`. |
 | Outbound telemetry | TCP `443` or private `4000` | `rend-edge` | `rend-api` telemetry endpoint | `POST /internal/telemetry/playback`. |
 | Outbound image pull | TCP `443` | Host Docker daemon | Container registry | Deploy and rollback image pulls. |
 | Outbound platform | UDP/TCP `53`, UDP `123` | Host | DNS and NTP | Name resolution and token clock correctness. |
@@ -103,6 +107,8 @@ Control-plane host exposure:
 
 - Public or private API ingress should terminate on `rend-api` port `4000`
   through a proxy. The template binds `4000` to `127.0.0.1` by default.
+- `POST /internal/edges/register` and `/internal/edges/heartbeat` must be
+  reachable from edge hosts and must require `x-rend-internal-token`.
 - `POST /internal/telemetry/playback` must be reachable from edge hosts and
   must require `x-rend-internal-token` or `x-rend-telemetry-token`.
 - Postgres, Redis, ClickHouse, and object storage are external dependencies for
@@ -143,8 +149,9 @@ API required set:
 - Playback: `REND_PLAYBACK_BASE_URL`, `REND_PLAYBACK_SIGNING_KEY_ID`,
   `REND_PLAYBACK_SIGNING_SECRET`, `REND_PLAYBACK_TOKEN_TTL_SECS`,
   `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
-- Edge internal: `REND_EDGE_WARM_URL`, `REND_EDGE_PURGE_URL`,
-  `REND_EDGE_INTERNAL_TOKEN`, `REND_EDGE_WARM_MAX_ARTIFACTS`
+- Edge registry/fanout: `REND_EDGE_INTERNAL_TOKEN`,
+  `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`.
+  `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are fallback-only.
 - Telemetry ingest/analytics: `REND_INTERNAL_TELEMETRY_TOKEN`,
   `REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES`,
   `REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH`,
@@ -172,6 +179,8 @@ Edge required set:
 - Region identity: `REND_EDGE_ID`, `REND_EDGE_REGION`
 - Runtime and volumes: `REND_EDGE_BIND_ADDR`, `REND_EDGE_CACHE_DIR`,
   `REND_EDGE_TELEMETRY_SPOOL_DIR`, `REND_HTTP_TIMEOUT_SECS`
+- Control plane: `REND_CONTROL_PLANE_URL`, `REND_EDGE_BASE_URL`,
+  `REND_EDGE_HEARTBEAT_INTERVAL_SECS`, optional `REND_EDGE_CACHE_MAX_BYTES`
 - Origin health: `REND_EDGE_ORIGIN_HEALTH_URL`
 - Internal auth and limits: `REND_EDGE_INTERNAL_TOKEN`,
   `REND_EDGE_WARM_MAX_ARTIFACTS`, `REND_EDGE_MAX_IN_FLIGHT_FILLS`
@@ -185,11 +194,13 @@ Edge required set:
 - Playback signing: `REND_PLAYBACK_SIGNING_KEY_ID`,
   `REND_PLAYBACK_SIGNING_SECRET`
 
-us-east edge values should set `REND_EDGE_REGION=us-east` and a unique
-`REND_EDGE_ID`, for example `rend-edge-us-east-001`. London should set
-`REND_EDGE_REGION=london` and a unique `REND_EDGE_ID`, for example
-`rend-edge-london-001`. Both regions must share the same playback signing key
-as the API for a given trial.
+us-east edge values should set `REND_EDGE_REGION=us-east`, a unique
+`REND_EDGE_ID`, and an API-reachable `REND_EDGE_BASE_URL`, for example
+`rend-edge-us-east-001` and `https://edge-us-east.example.com`. London should
+set `REND_EDGE_REGION=london`, a unique `REND_EDGE_ID`, and its own
+`REND_EDGE_BASE_URL`, for example `rend-edge-london-001` and
+`https://edge-london.example.com`. Both regions must share the same playback
+signing key and `REND_EDGE_INTERNAL_TOKEN` as the API for a given trial.
 
 ## Compose Templates
 
@@ -259,6 +270,13 @@ curl -sS -o /tmp/rend-edge-metrics-unauth.body -w "%{http_code}\n" "$EDGE_INTERN
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" "$EDGE_INTERNAL_BASE/metrics"
 ```
 
+Control-plane registration check from the control-plane host:
+
+```sh
+psql "$DATABASE_URL" -c \
+  "SELECT edge_id, region, base_url, status, last_heartbeat_at FROM rend.edge_nodes ORDER BY edge_id"
+```
+
 Fetch a signed playback token from the API for a known `hls_ready` asset:
 
 ```sh
@@ -278,7 +296,7 @@ PY
 )"
 ```
 
-Warm endpoint check:
+Direct edge warm endpoint check:
 
 ```sh
 curl -fsS \
@@ -286,6 +304,16 @@ curl -fsS \
   -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
   -H "content-type: application/json" \
   --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"opener.mp4\"]}"
+```
+
+Registry fanout check. After an upload reaches `hls_ready`, the asset lifecycle
+events should include `edge.warming_succeeded` with an `edges` array listing
+each healthy registered edge and its per-edge status.
+
+```sh
+curl -fsS \
+  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  "$API_BASE/v1/assets/$ASSET_ID/events?limit=100"
 ```
 
 Signed playback check:
@@ -343,9 +371,10 @@ curl -fsS http://127.0.0.1:4100/readyz
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
 ```
 
-After each deploy, run the remote health and smoke commands above. For an edge
-trial, verify both a warmed `HIT` and at least one cold `MISS` after purging a
-single artifact.
+After each deploy, run the remote health and smoke commands above. For a
+multi-edge trial, verify each registered edge appears in `rend.edge_nodes`, the
+warm lifecycle event includes every healthy edge, each edge can serve a warmed
+`HIT`, and at least one cold `MISS` still works after a targeted purge.
 
 ## Rollback Steps
 
@@ -389,7 +418,7 @@ API logs to inspect:
 - Startup migration failures when `REND_API_AUTO_MIGRATE=true`
 - `/readyz` dependency failures for Postgres, Redis, or object storage
 - Upload errors and asset state transitions
-- Edge warm/purge HTTP status and response bodies
+- Edge warm/purge fanout lifecycle events, including per-edge status summaries
 - Telemetry ingest failures, especially ClickHouse insert/query errors
 
 Worker logs to inspect:
@@ -402,6 +431,7 @@ Worker logs to inspect:
 Edge logs to inspect:
 
 - Startup bind address, edge id, and region
+- Control-plane registration or heartbeat failures
 - Cache directory permission or disk errors
 - `/readyz` origin failures
 - Playback `401`, `404`, timeout, and origin fetch errors
