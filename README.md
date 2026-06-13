@@ -47,7 +47,7 @@ Cloud shape:
 | Edge | Bare-metal `rend-edge` nodes in US East and London with local RAM/NVMe/SSD cache |
 | Routing | Rend playback URLs routed by GeoDNS, latency DNS, or regional routing |
 | Authorization | Signed playback URLs or tokens validated locally at the edge |
-| Analytics | Playback analytics for views, watch time, startup, region, and cache state |
+| Analytics | Playback request analytics for request counts, bytes, region, status, and cache state |
 | Resilience | Origin or CDN backup path without exposing provider URLs |
 
 ## v1
@@ -61,7 +61,7 @@ Video on demand, built around fast startup:
 - [ ] **HLS playback**: opener first, adaptive renditions after that
 - [ ] **Drop-in player** with page-load prefetch
 - [ ] **Signed playback**: tokens validated locally at the edge
-- [ ] **Playback analytics**: views, watch minutes, startup success, region, cache state
+- [ ] **Playback request analytics**: request counts, bytes, status, region, cache state
 - [ ] **SDKs and an MCP server**, generated from one OpenAPI spec
 - [ ] **Measured speed**: baseline upload-to-playable and first-frame metrics
 
@@ -76,7 +76,8 @@ approved accounts while delivery economics are measured.
 - [`services/rend-edge/`](./services/rend-edge) — Rust playback edge skeleton
 - [`crates/`](./crates) — shared Rust crates
 - [`migrations/`](./migrations) — Postgres migrations for Rend-owned metadata
-- [`compose.yml`](./compose.yml) — local Postgres, MinIO, and Redis
+- [`clickhouse/`](./clickhouse) — ClickHouse schema for raw playback request telemetry
+- [`compose.yml`](./compose.yml) — local Postgres, ClickHouse, MinIO, and Redis
 - [`packages/`](./packages) — shared packages for future apps and services
 
 ## Develop
@@ -99,9 +100,10 @@ configuration.
 
 ### Local backend foundation
 
-This starts the V1 foundation: Postgres, MinIO, Redis, migrations,
-health-checking API/edge skeletons, the raw source upload storage path, and
-local async media artifact generation for uploaded sources.
+This starts the V1 foundation: Postgres, ClickHouse, MinIO, Redis, migrations,
+health-checking API/edge skeletons, the raw source upload storage path, local
+async media artifact generation for uploaded sources, and minimal playback
+request telemetry.
 
 Local media processing requires `ffmpeg` and `ffprobe` on `PATH`, or explicit
 binary paths in `REND_FFMPEG_PATH` and `REND_FFPROBE_PATH`. Uploads enqueue
@@ -118,6 +120,12 @@ hints, defaulting to `2`.
 Set `REND_EDGE_PURGE_URL` to the local edge purge endpoint when you want asset
 deletion to make a best-effort cache purge call, for example
 `http://127.0.0.1:4100/internal/purge`.
+Raw playback request telemetry is stored in ClickHouse, not
+`rend.asset_events`. Postgres remains the source of truth for assets, artifacts,
+jobs, lifecycle events, deletion state, and other control-plane state. Edge
+telemetry is sent asynchronously through a bounded queue and local JSONL spool;
+telemetry failures must not fail or materially delay playback. Analytics queries
+dedupe by `event_id` because ClickHouse does not enforce uniqueness.
 
 ```bash
 cp .env.example .env.local
@@ -150,6 +158,7 @@ bun run backend:smoke:async-media
 bun run backend:smoke:media
 bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
+bun run backend:smoke:playback-telemetry
 bun run backend:smoke:edge-coalescing
 bun run backend:smoke:asset-events
 bun run backend:smoke:lifecycle-sse
@@ -198,6 +207,13 @@ opener URL from playback bootstrap, purges that opener from the edge cache,
 launches concurrent cold requests for the same URL, and verifies one `MISS`, at
 least one `COALESCED`, identical nonempty bodies, and a later `HIT`.
 
+The playback telemetry smoke starts Postgres, ClickHouse, Redis, MinIO, the API,
+the edge, and the media worker; uploads a fixture; waits for HLS playback;
+fetches the signed manifest twice; waits for the edge queue/flusher; and verifies
+`GET /v1/assets/<asset_id>/analytics/playback` reports deduped request, byte,
+`HIT`, `MISS`, and `200` status aggregates. It does not assert watch time,
+startup success, viewer identity, or billing-grade accuracy.
+
 Edge cache behavior:
 
 - `rend-edge` validates signed playback tokens locally before cache lookup,
@@ -218,6 +234,19 @@ Edge cache behavior:
   existing fill.
 - Current cold fills still buffer the origin object before writing the cache and
   serving the response. True stream-while-writing cache fill remains a follow-up.
+
+Playback telemetry behavior:
+
+- `rend-edge` emits one request event for each public playback artifact request
+  after the auth/cache/origin outcome is known.
+- Events include `event_id`, `observed_at`, `asset_id`, `artifact_path`,
+  `edge_id`, `region`, `cache_status`, `status_code`, `bytes_served`,
+  `content_type`, `duration_ms`, and optional `error_code`.
+- Events never include signed URL query strings, tokens, authorization headers,
+  cookies, full request headers, full URLs, or client IPs.
+- `GET /v1/assets/<asset_id>/analytics/playback` returns bounded-window,
+  `event_id`-deduped aggregates only: request count, bytes served, cache status
+  counts, status code counts, first seen, and last seen.
 
 Manual upload, bootstrap, and local playback:
 
