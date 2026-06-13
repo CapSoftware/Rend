@@ -5,6 +5,9 @@ does not provision cloud resources.
 
 For first real us-east and london edge host trials, use the operational runbook
 and production-style examples in [`docs/edge-host-runbook-v1.md`](edge-host-runbook-v1.md).
+Use the image release workflow in [`docs/release-images-v1.md`](release-images-v1.md)
+to build trial images and deploy immutable digest refs from the release
+manifest.
 
 ## Service Topology
 
@@ -69,6 +72,14 @@ Deploy the same image targets:
 The runtime image includes `ffmpeg` and `ffprobe` so the media worker can run
 without host media tooling. In production, run API, worker, and edge as separate
 services even when they share a repository and image lineage.
+
+Canonical image repositories are `rend-api`, `rend-media-worker`, and
+`rend-edge`. For a registry prefix such as `registry.example.com/rend`, the
+release script builds `registry.example.com/rend/rend-api`,
+`registry.example.com/rend/rend-media-worker`, and
+`registry.example.com/rend/rend-edge`. Production compose variables should use
+the manifest `image_digest` values, for example
+`registry.example.com/rend/rend-api@sha256:...`, instead of mutable tags.
 
 ## Required Env Vars
 
@@ -191,17 +202,95 @@ every Compose startup. The schema uses `CREATE DATABASE IF NOT EXISTS` and
 MinIO bucket creation is handled by the local-only `minio-init` one-shot
 service. Production object storage should be provisioned outside this repo.
 
+## Operator Harness
+
+Use the checked-in operator scripts for first-host trials. They do not provision
+cloud resources, DNS, TLS, proxies, registry credentials, image signing, or
+SBOMs.
+
+Validate production env files before deploy:
+
+```sh
+scripts/validate-production-env.sh --role control-plane
+scripts/validate-production-env.sh --role edge-host
+```
+
+The validator requires vars to be present, rejects placeholder values, rejects
+local/dev defaults unless `--allow-dev-defaults` is passed, and checks URL,
+port, boolean, numeric, and path shapes. For local Docker example dry-runs:
+
+```sh
+scripts/validate-production-env.sh --role all --allow-dev-defaults \
+  --api-env .env.docker.example \
+  --worker-env .env.docker.example \
+  --edge-env .env.docker.example
+```
+
+Run host preflight before deploy. Production manifests must contain
+`image_digest` refs for the required services:
+
+```sh
+scripts/preflight-control-plane-host.sh \
+  --manifest .rend/releases/trial-001.json
+
+scripts/preflight-edge-host.sh \
+  --manifest .rend/releases/trial-001.json
+```
+
+The control-plane preflight checks Docker/Compose, compose/env files, manifest
+digest refs, managed dependency connectivity where local tools allow it, and
+host bind ports. The edge preflight checks Docker/Compose, edge env, manifest
+digest ref, uid/gid `10001` cache and spool writeability, object-store health,
+control-plane register/heartbeat reachability, telemetry ingest reachability,
+and host bind ports.
+
+Use deploy helpers in dry-run mode first to print the exact Compose commands
+with manifest image refs:
+
+```sh
+scripts/deploy-control-plane-host.sh \
+  --manifest .rend/releases/trial-001.json \
+  --dry-run
+
+scripts/deploy-edge-host.sh \
+  --manifest .rend/releases/trial-001.json \
+  --dry-run
+```
+
+After deploy, verify the first-host path:
+
+```sh
+scripts/verify-first-host-deploy.sh \
+  --api-base https://api.example.com \
+  --edge-base https://edge-us-east.example.com \
+  --api-env /etc/rend/rend-api.env \
+  --edge-env /etc/rend/rend-edge.env \
+  --asset-id 00000000-0000-0000-0000-000000000000
+```
+
+The verifier checks API `/readyz`, edge `/readyz`, edge registration visibility
+via Postgres or the internal heartbeat endpoint, signed playback for the
+provided asset, and playback analytics increasing after the smoke request.
+
 ## Deploy Order
 
 1. Provision managed Postgres, Redis, S3-compatible storage, and ClickHouse.
 2. Apply or confirm ClickHouse schema.
-3. Deploy `rend-api` with `REND_API_AUTO_MIGRATE=true` for the migration step.
-4. Start `rend-api` serving traffic after `/readyz` passes.
-5. Start `rend-edge` nodes with unique `REND_EDGE_ID`, `REND_EDGE_REGION`,
+3. From a clean git worktree, build and optionally push images with
+   `bun run release:images -- --tag trial-001 --registry <registry-prefix>
+   --push`.
+4. Copy production-style compose files, real env files, and the release
+   manifest to the target hosts.
+5. Run `scripts/validate-production-env.sh` and the relevant preflight script on
+   each host.
+6. Run the deploy helper with `--dry-run`, then run it without `--dry-run`.
+7. Deploy `rend-api` with `REND_API_AUTO_MIGRATE=true` for the migration step.
+8. Start `rend-api` serving traffic after `/readyz` passes.
+9. Start `rend-edge` nodes with unique `REND_EDGE_ID`, `REND_EDGE_REGION`,
    API-reachable `REND_EDGE_BASE_URL`, cache volume, and telemetry spool volume.
-6. Start `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
-7. Confirm edges are healthy in `rend.edge_nodes`, then run
-   upload/playback/telemetry smoke checks.
+10. Start `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
+11. Run `scripts/verify-first-host-deploy.sh` with a provided `hls_ready` asset
+    to confirm edge registration, signed playback, and telemetry analytics.
 
 ## Rollback Basics
 
