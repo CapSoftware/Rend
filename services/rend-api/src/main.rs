@@ -26,11 +26,14 @@ use axum::{
 };
 use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame};
-use rend_config::{env_bool, env_duration_secs, env_socket_addr, env_string, load_dotenv};
+use rend_config::{
+    env_bool, env_duration_secs, env_socket_addr, env_string, env_usize, load_dotenv,
+};
 use rend_playback_auth::{
     PlaybackAuthError, PlaybackTokenIssuer, SigningKey, current_unix_timestamp,
+    is_valid_hls_segment_name,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
@@ -39,6 +42,10 @@ use tracing_subscriber::EnvFilter;
 mod media;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
+
+const DEFAULT_EDGE_WARM_MAX_ARTIFACTS: usize = 4;
+const HARD_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
+const EDGE_WARM_LOG_BODY_LIMIT_BYTES: usize = 1024;
 
 #[derive(Clone)]
 struct ApiConfig {
@@ -54,9 +61,17 @@ struct ApiConfig {
     aws_secret_access_key: String,
     playback_base_url: String,
     playback_token_issuer: PlaybackTokenIssuer,
+    edge_warm: EdgeWarmConfig,
     media_processing: media::MediaProcessingConfig,
     auto_migrate: bool,
     request_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct EdgeWarmConfig {
+    url: Option<String>,
+    internal_token: String,
+    max_artifacts: usize,
 }
 
 impl ApiConfig {
@@ -74,6 +89,22 @@ impl ApiConfig {
             "local-dev-playback-signing-secret",
         );
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
+        let edge_warm_url = optional_env_url("REND_EDGE_WARM_URL");
+        let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
+        let edge_warm_max_artifacts = env_usize(
+            "REND_EDGE_WARM_MAX_ARTIFACTS",
+            DEFAULT_EDGE_WARM_MAX_ARTIFACTS,
+        )?;
+        anyhow::ensure!(
+            (1..=HARD_EDGE_WARM_MAX_ARTIFACTS).contains(&edge_warm_max_artifacts),
+            "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_EDGE_WARM_MAX_ARTIFACTS}"
+        );
+        if edge_warm_url.is_some() {
+            anyhow::ensure!(
+                !edge_internal_token.trim().is_empty(),
+                "REND_EDGE_INTERNAL_TOKEN must not be empty when REND_EDGE_WARM_URL is configured"
+            );
+        }
 
         for (key, value) in [
             ("REND_DEV_API_KEY", &dev_api_key),
@@ -110,6 +141,11 @@ impl ApiConfig {
             aws_secret_access_key,
             playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
             playback_token_issuer,
+            edge_warm: EdgeWarmConfig {
+                url: edge_warm_url,
+                internal_token: edge_internal_token,
+                max_artifacts: edge_warm_max_artifacts,
+            },
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
@@ -167,6 +203,12 @@ struct CreateVideoResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EdgeWarmRequest {
+    asset_id: String,
+    artifact_paths: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -266,6 +308,12 @@ fn build_s3_client(config: &ApiConfig) -> S3Client {
         .build();
 
     S3Client::from_conf(s3_config)
+}
+
+fn optional_env_url(key: &str) -> Option<String> {
+    let value = env_string(key, "");
+    let value = value.trim().trim_end_matches('/').to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthResponse<'static>> {
@@ -412,6 +460,16 @@ async fn create_video_inner(
             "asset playable state differed after media processing",
         );
     }
+
+    maybe_warm_edge(
+        &state.http,
+        &state.config.edge_warm,
+        &asset_id,
+        &playable_state,
+        &media_outcome.playback_artifact_paths,
+    )
+    .await;
+
     let now = current_unix_timestamp().map_err(AppError::internal)?;
     let playback_url = playback_url(
         &state.config.playback_base_url,
@@ -495,6 +553,139 @@ fn playback_artifact_path(playable_state: &str) -> &'static str {
         "hls_ready" => "hls/master.m3u8",
         "opener_ready" => "opener.mp4",
         _ => "opener.mp4",
+    }
+}
+
+async fn maybe_warm_edge(
+    http: &reqwest::Client,
+    config: &EdgeWarmConfig,
+    asset_id: &str,
+    playable_state: &str,
+    generated_artifact_paths: &[String],
+) {
+    let Some(request) =
+        edge_warm_request(config, asset_id, playable_state, generated_artifact_paths)
+    else {
+        return;
+    };
+
+    if let Err(error) = send_edge_warm_request(http, config, &request).await {
+        tracing::warn!(
+            asset_id,
+            error = %error,
+            "edge warm request failed; upload remains playable",
+        );
+    }
+}
+
+fn edge_warm_request(
+    config: &EdgeWarmConfig,
+    asset_id: &str,
+    playable_state: &str,
+    generated_artifact_paths: &[String],
+) -> Option<EdgeWarmRequest> {
+    config.url.as_ref()?;
+    let artifact_paths = edge_warm_artifact_paths(
+        playable_state,
+        generated_artifact_paths,
+        config.max_artifacts,
+    );
+    (!artifact_paths.is_empty()).then(|| EdgeWarmRequest {
+        asset_id: asset_id.to_owned(),
+        artifact_paths,
+    })
+}
+
+fn edge_warm_artifact_paths(
+    playable_state: &str,
+    generated_artifact_paths: &[String],
+    max_artifacts: usize,
+) -> Vec<String> {
+    if max_artifacts == 0 {
+        return Vec::new();
+    }
+
+    let mut artifact_paths = Vec::new();
+    match playable_state {
+        "opener_ready" => {
+            push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
+        }
+        "hls_ready" => {
+            push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
+            push_unique_artifact_path(&mut artifact_paths, "hls/master.m3u8");
+
+            let mut segments = generated_artifact_paths
+                .iter()
+                .filter(|path| is_hls_segment_artifact_path(path))
+                .cloned()
+                .collect::<Vec<_>>();
+            segments.sort();
+            for segment in segments {
+                push_unique_artifact_path(&mut artifact_paths, &segment);
+                if artifact_paths.len() >= max_artifacts {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    artifact_paths.truncate(max_artifacts);
+    artifact_paths
+}
+
+fn push_unique_artifact_path(paths: &mut Vec<String>, path: &str) {
+    if !paths.iter().any(|existing| existing == path) {
+        paths.push(path.to_owned());
+    }
+}
+
+fn is_hls_segment_artifact_path(path: &str) -> bool {
+    path.strip_prefix("hls/")
+        .is_some_and(is_valid_hls_segment_name)
+}
+
+async fn send_edge_warm_request(
+    http: &reqwest::Client,
+    config: &EdgeWarmConfig,
+    request: &EdgeWarmRequest,
+) -> std::result::Result<(), String> {
+    let Some(url) = config.url.as_deref() else {
+        return Ok(());
+    };
+
+    let response = http
+        .post(url)
+        .header("x-rend-internal-token", &config.internal_token)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| format!("failed to call {url}: {error}"))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("failed to read warm response body: {error}"));
+
+    Err(format!(
+        "edge warm endpoint returned {status}: {}",
+        limit_log_body(&body)
+    ))
+}
+
+fn limit_log_body(body: &str) -> String {
+    if body.len() > EDGE_WARM_LOG_BODY_LIMIT_BYTES {
+        let mut end = EDGE_WARM_LOG_BODY_LIMIT_BYTES;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...[truncated]", &body[..end])
+    } else {
+        body.to_owned()
     }
 }
 
@@ -702,6 +893,50 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use rend_playback_auth::{POLICY_ASSET_PLAYBACK_V1, decode_unverified_claims};
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Clone)]
+    struct WarmRecorder {
+        count: Arc<AtomicUsize>,
+        last_token: Arc<Mutex<Option<String>>>,
+        last_request: Arc<Mutex<Option<EdgeWarmRequest>>>,
+        status: StatusCode,
+    }
+
+    async fn record_warm(
+        State(recorder): State<WarmRecorder>,
+        headers: HeaderMap,
+        Json(request): Json<EdgeWarmRequest>,
+    ) -> Response {
+        recorder.count.fetch_add(1, Ordering::SeqCst);
+        let token = headers
+            .get("x-rend-internal-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        *recorder.last_token.lock().unwrap() = token;
+        *recorder.last_request.lock().unwrap() = Some(request);
+
+        recorder.status.into_response()
+    }
+
+    async fn spawn_warm_recorder(status: StatusCode) -> (String, WarmRecorder) {
+        let recorder = WarmRecorder {
+            count: Arc::new(AtomicUsize::new(0)),
+            last_token: Arc::new(Mutex::new(None)),
+            last_request: Arc::new(Mutex::new(None)),
+            status,
+        };
+        let app = Router::new()
+            .route("/internal/warm", post(record_warm))
+            .with_state(recorder.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("http://{addr}/internal/warm"), recorder)
+    }
 
     #[test]
     fn bearer_authorization_accepts_matching_dev_key() {
