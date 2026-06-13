@@ -3,15 +3,20 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
+source "$root_dir/scripts/smoke-common.sh"
 
 api_base="${REND_API_BASE_URL:-http://127.0.0.1:4000}"
 fixture_path="${REND_SMOKE_FIXTURE:-$root_dir/fixtures/media/rend-fixture.mp4}"
 response_file="$(mktemp)"
+asset_response="$(mktemp)"
 api_started=0
 api_pid=""
+worker_started=0
+worker_pid=""
 
 cleanup() {
-  rm -f "$response_file"
+  rm -f "$response_file" "$asset_response"
+  stop_media_worker
   if [[ "$api_started" == "1" && -n "$api_pid" ]]; then
     kill "$api_pid" >/dev/null 2>&1 || true
     wait "$api_pid" >/dev/null 2>&1 || true
@@ -50,6 +55,10 @@ export REND_DEV_API_KEY="${REND_DEV_API_KEY:-dev-api-key}"
 export REND_PLAYBACK_BASE_URL="${REND_PLAYBACK_BASE_URL:-http://127.0.0.1:4100}"
 export REND_HTTP_TIMEOUT_SECS="${REND_HTTP_TIMEOUT_SECS:-120}"
 export REND_MEDIA_PROCESS_TIMEOUT_SECS="${REND_MEDIA_PROCESS_TIMEOUT_SECS:-60}"
+export REND_API_INLINE_MEDIA_PROCESSING="${REND_API_INLINE_MEDIA_PROCESSING:-false}"
+export REND_MEDIA_JOB_MAX_ATTEMPTS="${REND_MEDIA_JOB_MAX_ATTEMPTS:-3}"
+export REND_MEDIA_WORKER_POLL_INTERVAL_SECS="${REND_MEDIA_WORKER_POLL_INTERVAL_SECS:-1}"
+export REND_MEDIA_JOB_LOCK_TIMEOUT_SECS="${REND_MEDIA_JOB_LOCK_TIMEOUT_SECS:-300}"
 export REND_FFMPEG_PATH="${REND_FFMPEG_PATH:-ffmpeg}"
 export REND_FFPROBE_PATH="${REND_FFPROBE_PATH:-ffprobe}"
 
@@ -89,6 +98,7 @@ for _ in $(seq 1 120); do
 done
 
 curl -fsS "$api_base/readyz" >/dev/null
+start_media_worker "rend-api-media-worker-smoke"
 
 status_code="$(
   curl -sS -o "$response_file" -w "%{http_code}" \
@@ -105,23 +115,10 @@ if [[ "$status_code" != "201" ]]; then
 fi
 
 asset_id="$(
-  python3 - "$response_file" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    response = json.load(f)
-required = ["asset_id", "source_state", "playable_state", "source_artifact_id", "source_object_key", "byte_size", "playback_url"]
-missing = [key for key in required if key not in response]
-if missing:
-    raise SystemExit(f"response missing fields: {', '.join(missing)}")
-if response["source_state"] != "uploaded":
-    raise SystemExit(f"expected source_state uploaded, got {response['source_state']}")
-if response["playable_state"] != "hls_ready":
-    raise SystemExit(f"expected playable_state hls_ready, got {response['playable_state']}")
-if int(response["byte_size"]) <= 0:
-    raise SystemExit("expected uploaded byte_size to be nonzero")
-print(response["asset_id"])
-PY
+  assert_async_upload_response "$response_file"
 )"
+
+poll_asset_until_hls_ready "$asset_id" "$asset_response"
 
 db_summary="$(
   docker compose exec -T postgres psql -U rend -d rend -t -A -F '|' -c "
