@@ -4,7 +4,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 pub const EVENT_ASSET_CREATED: &str = "asset.created";
 pub const EVENT_SOURCE_UPLOAD_STARTED: &str = "source.upload_started";
 pub const EVENT_SOURCE_UPLOADED: &str = "source.uploaded";
+pub const EVENT_MEDIA_PROCESSING_QUEUED: &str = "media.processing_queued";
 pub const EVENT_MEDIA_PROCESSING_STARTED: &str = "media.processing_started";
+pub const EVENT_MEDIA_PROCESSING_FAILED: &str = "media.processing_failed";
 pub const EVENT_ARTIFACT_GENERATED: &str = "artifact.generated";
 pub const EVENT_PLAYABLE_STATE_CHANGED: &str = "playable_state.changed";
 pub const EVENT_EDGE_WARMING_ATTEMPTED: &str = "edge.warming_attempted";
@@ -91,6 +93,27 @@ pub fn media_processing_started_metadata(source_state: &str, playable_state: &st
     json!({
         "source_state": source_state,
         "playable_state": playable_state,
+    })
+}
+
+pub fn media_processing_queued_metadata(job_id: &str, max_attempts: i32) -> Value {
+    json!({
+        "job_id": job_id,
+        "max_attempts": max_attempts,
+    })
+}
+
+pub fn media_processing_failed_metadata(
+    attempt: i32,
+    max_attempts: i32,
+    final_attempt: bool,
+    reason: &str,
+) -> Value {
+    json!({
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "final": final_attempt,
+        "reason": reason,
     })
 }
 
@@ -257,7 +280,9 @@ mod tests {
             asset_created_metadata("uploading", "not_playable"),
             source_upload_started_metadata("video/mp4", Some(123)),
             source_uploaded_metadata("video/mp4", 123),
+            media_processing_queued_metadata("job-123", 3),
             media_processing_started_metadata("uploaded", "not_playable"),
+            media_processing_failed_metadata(1, 3, false, "ffmpeg failed"),
             playable_state_changed_metadata("not_playable", "hls_ready"),
             edge_warming_metadata(&["opener.mp4".to_owned()]),
             edge_warming_failed_metadata(&["opener.mp4".to_owned()], "status_error", Some(502)),
