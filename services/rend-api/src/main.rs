@@ -1,4 +1,5 @@
 use std::{
+    convert::Infallible,
     net::SocketAddr,
     pin::Pin,
     sync::{
@@ -36,7 +37,7 @@ use rend_playback_auth::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::mpsc};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -53,6 +54,10 @@ const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
 const MAX_ASSET_EVENTS_LIMIT: usize = 100;
+const DEFAULT_EVENT_STREAM_BATCH_LIMIT: usize = 100;
+const EVENT_STREAM_CHANNEL_CAPACITY: usize = 16;
+const EVENT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const EVENT_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_MEDIA_JOB_MAX_ATTEMPTS: usize = 3;
 const HARD_MEDIA_JOB_MAX_ATTEMPTS: usize = 25;
 const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
@@ -807,10 +812,22 @@ struct AssetEventsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct EventStreamQuery {
+    asset_id: Option<String>,
+    after_sequence: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NormalizedAssetEventsQuery {
     after_sequence: i64,
     limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NormalizedEventStreamQuery {
+    asset_id: Option<String>,
+    after_sequence: i64,
 }
 
 #[derive(Serialize)]
@@ -916,6 +933,10 @@ struct CountedRequestBody {
     byte_count: Arc<AtomicU64>,
 }
 
+struct EventStreamBody {
+    receiver: mpsc::Receiver<Bytes>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     load_dotenv();
@@ -1015,6 +1036,7 @@ async fn run_media_worker(state: Arc<AppState>) -> Result<()> {
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
+        .route("/v1/events", get(get_event_stream))
         .route("/v1/assets/{asset_id}", get(get_asset_current))
         .route("/v1/assets/{asset_id}/events", get(get_asset_events))
         .route("/v1/assets/{asset_id}/playback", get(get_asset_playback))
@@ -1178,6 +1200,17 @@ async fn get_asset_events_inner(
     asset_events_response(asset_exists, asset_id, events)
 }
 
+async fn get_event_stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<EventStreamQuery>,
+) -> Response {
+    match normalize_event_stream_query(&headers, query) {
+        Ok(query) => event_stream_response(state, query),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn get_asset_playback(
     State(state): State<Arc<AppState>>,
     AxumPath(asset_id): AxumPath<String>,
@@ -1332,6 +1365,78 @@ async fn fetch_asset_events(
         .collect())
 }
 
+async fn fetch_event_stream_batch(
+    db: &PgPool,
+    asset_id: Option<&str>,
+    after_sequence: i64,
+) -> Result<Vec<AssetEventRecord>, AppError> {
+    let limit = i64::try_from(DEFAULT_EVENT_STREAM_BATCH_LIMIT).map_err(AppError::internal)?;
+    let rows: Vec<(String, String, i64, String, String, String)> = if let Some(asset_id) = asset_id
+    {
+        sqlx::query_as(
+            "
+            SELECT id::text,
+                   asset_id::text,
+                   sequence,
+                   event_type,
+                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+                   metadata::text
+            FROM rend.asset_events
+            WHERE asset_id::text = $1
+              AND sequence > $2
+            ORDER BY sequence
+            LIMIT $3
+            ",
+        )
+        .bind(asset_id)
+        .bind(after_sequence)
+        .bind(limit)
+        .fetch_all(db)
+        .await
+        .map_err(AppError::internal)?
+    } else {
+        sqlx::query_as(
+            "
+            SELECT id::text,
+                   asset_id::text,
+                   sequence,
+                   event_type,
+                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+                   metadata::text
+            FROM rend.asset_events
+            WHERE sequence > $1
+            ORDER BY sequence
+            LIMIT $2
+            ",
+        )
+        .bind(after_sequence)
+        .bind(limit)
+        .fetch_all(db)
+        .await
+        .map_err(AppError::internal)?
+    };
+
+    let query = NormalizedEventStreamQuery {
+        asset_id: asset_id.map(str::to_owned),
+        after_sequence,
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, asset_id, sequence, event_type, created_at, metadata_json)| AssetEventRecord {
+                id,
+                asset_id,
+                sequence,
+                event_type,
+                created_at,
+                metadata_json,
+            },
+        )
+        .filter(|record| event_stream_record_matches(record, &query))
+        .collect())
+}
+
 async fn fetch_asset_playback_record(
     db: &PgPool,
     asset_id: &str,
@@ -1412,6 +1517,67 @@ fn normalize_asset_events_query(query: AssetEventsQuery) -> NormalizedAssetEvent
     }
 }
 
+fn normalize_event_stream_query(
+    headers: &HeaderMap,
+    query: EventStreamQuery,
+) -> Result<NormalizedEventStreamQuery, AppError> {
+    let asset_id = match query.asset_id {
+        Some(asset_id) => {
+            let asset_id = asset_id.trim();
+            if !is_canonical_uuid(asset_id) {
+                return Err(AppError::bad_request("malformed asset_id"));
+            }
+            Some(asset_id.to_ascii_lowercase())
+        }
+        None => None,
+    };
+
+    let after_sequence = match headers.get("last-event-id") {
+        Some(value) => {
+            let value = value.to_str().map_err(|_| AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: "invalid Last-Event-ID".to_owned(),
+            })?;
+            parse_event_stream_cursor(value, "Last-Event-ID")?
+        }
+        None => match query.after_sequence {
+            Some(value) => parse_event_stream_cursor(&value, "after_sequence")?,
+            None => 0,
+        },
+    };
+
+    Ok(NormalizedEventStreamQuery {
+        asset_id,
+        after_sequence,
+    })
+}
+
+fn parse_event_stream_cursor(value: &str, field: &str) -> Result<i64, AppError> {
+    let cursor = value.trim().parse::<i64>().map_err(|_| AppError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("invalid {field}"),
+    })?;
+    if cursor < 0 {
+        return Err(AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("invalid {field}"),
+        });
+    }
+
+    Ok(cursor)
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+
+    value.bytes().enumerate().all(|(index, byte)| {
+        matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+            || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
+    })
+}
+
 fn asset_events_response(
     asset_exists: bool,
     asset_id: String,
@@ -1441,6 +1607,175 @@ fn asset_events_response(
         events,
         next_after_sequence,
     })
+}
+
+fn event_stream_response(state: Arc<AppState>, query: NormalizedEventStreamQuery) -> Response {
+    let (sender, receiver) = mpsc::channel(EVENT_STREAM_CHANNEL_CAPACITY);
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        stream_event_lifecycle(db, query, sender).await;
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header(header::CONNECTION, "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::new(EventStreamBody { receiver }))
+        .expect("SSE response builder should be valid")
+}
+
+async fn stream_event_lifecycle(
+    db: PgPool,
+    query: NormalizedEventStreamQuery,
+    sender: mpsc::Sender<Bytes>,
+) {
+    let mut cursor = query.after_sequence;
+    let mut last_heartbeat = Instant::now();
+
+    if sender
+        .send(Bytes::from_static(b": connected\n\n"))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        match fetch_event_stream_batch(&db, query.asset_id.as_deref(), cursor).await {
+            Ok(records) if !records.is_empty() => {
+                for record in records {
+                    cursor = record.sequence;
+                    match sse_frame(&record) {
+                        Ok(frame) => {
+                            if sender.send(frame).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                event_id = %record.id,
+                                sequence = record.sequence,
+                                error = %error.message,
+                                "failed to serialize lifecycle SSE event",
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    asset_id = query.asset_id.as_deref().unwrap_or("*"),
+                    after_sequence = cursor,
+                    error = %error.message,
+                    "failed to fetch lifecycle SSE events",
+                );
+            }
+        }
+
+        if last_heartbeat.elapsed() >= EVENT_STREAM_HEARTBEAT_INTERVAL {
+            if sender
+                .send(Bytes::from_static(b": heartbeat\n\n"))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            last_heartbeat = Instant::now();
+        }
+
+        tokio::time::sleep(EVENT_STREAM_POLL_INTERVAL).await;
+    }
+}
+
+fn event_stream_record_matches(
+    record: &AssetEventRecord,
+    query: &NormalizedEventStreamQuery,
+) -> bool {
+    record.sequence > query.after_sequence
+        && query
+            .asset_id
+            .as_deref()
+            .is_none_or(|asset_id| record.asset_id == asset_id)
+}
+
+fn sse_frame(record: &AssetEventRecord) -> Result<Bytes, AppError> {
+    let payload = external_safe_asset_event_response(record)?;
+    let data = serde_json::to_string(&payload).map_err(AppError::internal)?;
+
+    Ok(Bytes::from(format!(
+        "id: {}\nevent: {}\ndata: {}\n\n",
+        record.sequence, record.event_type, data
+    )))
+}
+
+fn external_safe_asset_event_response(
+    record: &AssetEventRecord,
+) -> Result<AssetEventResponse, AppError> {
+    let metadata = serde_json::from_str(&record.metadata_json).map_err(AppError::internal)?;
+
+    Ok(AssetEventResponse {
+        id: record.id.clone(),
+        asset_id: record.asset_id.clone(),
+        sequence: record.sequence,
+        event_type: record.event_type.clone(),
+        created_at: record.created_at.clone(),
+        metadata: external_safe_metadata(metadata),
+    })
+}
+
+fn external_safe_metadata(metadata: Value) -> Value {
+    match metadata {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    is_external_safe_key(&key).then(|| (key, external_safe_metadata(value)))
+                })
+                .collect(),
+        ),
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(external_safe_metadata).collect())
+        }
+        Value::String(value) => {
+            if is_external_safe_string(&value) {
+                Value::String(value)
+            } else {
+                Value::String("[redacted]".to_owned())
+            }
+        }
+        value => value,
+    }
+}
+
+fn is_external_safe_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ![
+        "token",
+        "secret",
+        "credential",
+        "authorization",
+        "playback_url",
+        "signed_url",
+    ]
+    .iter()
+    .any(|fragment| key.contains(fragment))
+}
+
+fn is_external_safe_string(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    ![
+        "?token=",
+        "bearer ",
+        "secret",
+        "credential",
+        "authorization",
+    ]
+    .iter()
+    .any(|fragment| value.contains(fragment))
 }
 
 fn playback_bootstrap_response(
@@ -2514,6 +2849,13 @@ fn init_tracing() {
 }
 
 impl AppError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -2600,6 +2942,23 @@ impl HttpBody for CountedRequestBody {
             Poll::Ready(Some(Err(error))) => {
                 Poll::Ready(Some(Err(std::io::Error::other(error.to_string()))))
             }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl HttpBody for EventStreamBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.receiver).poll_recv(cx) {
+            Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -2751,9 +3110,13 @@ mod tests {
     }
 
     fn event_record(sequence: i64, event_type: &str) -> AssetEventRecord {
+        event_record_for_asset("asset-123", sequence, event_type)
+    }
+
+    fn event_record_for_asset(asset_id: &str, sequence: i64, event_type: &str) -> AssetEventRecord {
         AssetEventRecord {
             id: format!("event-{sequence}"),
-            asset_id: "asset-123".to_owned(),
+            asset_id: asset_id.to_owned(),
             sequence,
             event_type: event_type.to_owned(),
             created_at: "2026-06-13T12:00:00.000Z".to_owned(),
@@ -2863,6 +3226,17 @@ mod tests {
             Some("Bearer wrong-secret"),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn event_stream_endpoint_requires_dev_api_key() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+
+        let response = route_response(app.clone(), "/v1/events", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(app, "/v1/events", Some("Bearer wrong-secret")).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
