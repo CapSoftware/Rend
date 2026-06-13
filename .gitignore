@@ -1,5 +1,8 @@
 docs/
 
+# rust
+target/
+
 # dependencies
 node_modules/
 /.pnp
@@ -28,6 +31,7 @@ dist/
 # misc
 .DS_Store
 *.pem
+.rend/
 
 # debug
 npm-debug.log*
