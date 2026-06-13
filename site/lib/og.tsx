@@ -212,7 +212,7 @@ export async function renderOgImage(page?: { title: string; subtitle?: string })
           fontSize: 22,
         }}
       >
-        <div style={{ display: "flex", color: INK, fontWeight: 500 }}>rend.so</div>
+        <div style={{ display: "flex", color: INK, fontWeight: 500 }}>Rend.so</div>
         <div style={{ display: "flex", color: MUTED }}>
           Open source · A Cap company
         </div>
@@ -284,7 +284,7 @@ export async function renderOgImage(page?: { title: string; subtitle?: string })
           color: MUTED,
         }}
       >
-        <div style={{ display: "flex", color: INK, fontWeight: 500 }}>rend.so</div>
+        <div style={{ display: "flex", color: INK, fontWeight: 500 }}>Rend.so</div>
         <div style={{ display: "flex", margin: "0 14px" }}>·</div>
         <div style={{ display: "flex" }}>Open source</div>
         <div style={{ display: "flex", margin: "0 14px" }}>·</div>
