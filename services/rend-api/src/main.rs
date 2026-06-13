@@ -596,6 +596,7 @@ struct ApiConfig {
     playback_token_issuer: PlaybackTokenIssuer,
     playback_bootstrap_prefetch_segments: usize,
     edge_warm: EdgeWarmConfig,
+    edge_purge: EdgePurgeConfig,
     media_processing: media::MediaProcessingConfig,
     media_job_max_attempts: i32,
     inline_media_processing: bool,
@@ -609,6 +610,12 @@ struct EdgeWarmConfig {
     url: Option<String>,
     internal_token: String,
     max_artifacts: usize,
+}
+
+#[derive(Clone)]
+struct EdgePurgeConfig {
+    url: Option<String>,
+    internal_token: String,
 }
 
 #[derive(Clone)]
@@ -651,6 +658,7 @@ impl ApiConfig {
             "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS must be at most {HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS}"
         );
         let edge_warm_url = optional_env_url("REND_EDGE_WARM_URL");
+        let edge_purge_url = optional_env_url("REND_EDGE_PURGE_URL");
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
         let edge_warm_max_artifacts = env_usize(
             "REND_EDGE_WARM_MAX_ARTIFACTS",
@@ -660,10 +668,10 @@ impl ApiConfig {
             (1..=HARD_EDGE_WARM_MAX_ARTIFACTS).contains(&edge_warm_max_artifacts),
             "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_EDGE_WARM_MAX_ARTIFACTS}"
         );
-        if edge_warm_url.is_some() {
+        if edge_warm_url.is_some() || edge_purge_url.is_some() {
             anyhow::ensure!(
                 !edge_internal_token.trim().is_empty(),
-                "REND_EDGE_INTERNAL_TOKEN must not be empty when REND_EDGE_WARM_URL is configured"
+                "REND_EDGE_INTERNAL_TOKEN must not be empty when an internal edge URL is configured"
             );
         }
 
@@ -705,8 +713,12 @@ impl ApiConfig {
             playback_bootstrap_prefetch_segments,
             edge_warm: EdgeWarmConfig {
                 url: edge_warm_url,
-                internal_token: edge_internal_token,
+                internal_token: edge_internal_token.clone(),
                 max_artifacts: edge_warm_max_artifacts,
+            },
+            edge_purge: EdgePurgeConfig {
+                url: edge_purge_url,
+                internal_token: edge_internal_token,
             },
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
