@@ -32,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_WARM_MAX_ARTIFACTS: usize = 4;
 const HARD_WARM_MAX_ARTIFACTS: usize = 16;
-const WARM_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+const INTERNAL_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ASSET_ID_LEN: usize = 128;
 
 #[derive(Clone)]
@@ -142,6 +142,13 @@ struct WarmRequest {
     artifact_paths: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurgeRequest {
+    asset_id: String,
+    artifact_paths: Option<Vec<String>>,
+}
+
 #[derive(Serialize)]
 struct WarmResponse {
     asset_id: String,
@@ -180,6 +187,34 @@ struct WarmSummary {
 }
 
 #[derive(Serialize)]
+struct PurgeResponse {
+    asset_id: String,
+    purged: Vec<PurgeEntryResponse>,
+    missing: Vec<PurgeEntryResponse>,
+    rejected: Vec<PurgeRejectedResponse>,
+    errors: Vec<PurgeErrorResponse>,
+}
+
+#[derive(Serialize)]
+struct PurgeEntryResponse {
+    artifact_path: String,
+    cache_key: String,
+}
+
+#[derive(Serialize)]
+struct PurgeRejectedResponse {
+    artifact_path: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct PurgeErrorResponse {
+    artifact_path: String,
+    cache_key: String,
+    error: String,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -213,6 +248,11 @@ enum PlaybackError {
 
 #[derive(Debug)]
 enum WarmRequestError {
+    BadRequest(String),
+}
+
+#[derive(Debug)]
+enum PurgeRequestError {
     BadRequest(String),
 }
 
@@ -276,9 +316,9 @@ fn build_s3_client(config: &EdgeConfig) -> S3Client {
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let internal_routes = Router::new()
         .route("/warm", post(warm))
-        .route_layer(DefaultBodyLimit::max(WARM_REQUEST_BODY_LIMIT_BYTES))
-        .route("/purge", post(internal_placeholder))
+        .route("/purge", post(purge))
         .route("/reload-config", post(internal_placeholder))
+        .route_layer(DefaultBodyLimit::max(INTERNAL_REQUEST_BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_internal_token,
@@ -457,6 +497,218 @@ async fn warm_inner(
         results,
         summary,
     })
+}
+
+async fn purge(State(state): State<Arc<AppState>>, Json(request): Json<PurgeRequest>) -> Response {
+    match purge_inner(state, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn purge_inner(
+    state: Arc<AppState>,
+    request: PurgeRequest,
+) -> std::result::Result<PurgeResponse, PurgeRequestError> {
+    if !is_safe_asset_id(&request.asset_id) {
+        return Err(PurgeRequestError::BadRequest(
+            "asset_id must use the playback asset id character set".to_owned(),
+        ));
+    }
+
+    let mut response = PurgeResponse {
+        asset_id: request.asset_id.clone(),
+        purged: Vec::new(),
+        missing: Vec::new(),
+        rejected: Vec::new(),
+        errors: Vec::new(),
+    };
+    let entries = purge_entries(&state, &request, &mut response).await;
+
+    for (artifact_path, artifact) in entries {
+        purge_artifact(&state, artifact_path, artifact, &mut response).await;
+    }
+
+    remove_empty_asset_cache_dirs(&state.config.cache_dir, &request.asset_id).await;
+    Ok(response)
+}
+
+async fn purge_entries(
+    state: &AppState,
+    request: &PurgeRequest,
+    response: &mut PurgeResponse,
+) -> Vec<(String, PlaybackArtifact)> {
+    match request.artifact_paths.as_deref() {
+        Some(artifact_paths) if !artifact_paths.is_empty() => explicit_purge_entries(
+            &request.asset_id,
+            artifact_paths,
+            state.config.warm_max_artifacts,
+            response,
+        ),
+        _ => discover_cached_playback_entries(state, &request.asset_id, response).await,
+    }
+}
+
+fn explicit_purge_entries(
+    asset_id: &str,
+    artifact_paths: &[String],
+    max_artifacts: usize,
+    response: &mut PurgeResponse,
+) -> Vec<(String, PlaybackArtifact)> {
+    let mut entries = Vec::new();
+    for (index, artifact_path) in artifact_paths.iter().enumerate() {
+        if index >= max_artifacts {
+            response.rejected.push(PurgeRejectedResponse {
+                artifact_path: artifact_path.clone(),
+                reason: format!("artifact_paths must include at most {max_artifacts} entries"),
+            });
+            continue;
+        }
+
+        match map_playback_artifact(asset_id, artifact_path) {
+            Ok(artifact) => entries.push((artifact_path.clone(), artifact)),
+            Err(_) => response.rejected.push(PurgeRejectedResponse {
+                artifact_path: artifact_path.clone(),
+                reason: "unsupported playback artifact path".to_owned(),
+            }),
+        }
+    }
+    entries
+}
+
+async fn discover_cached_playback_entries(
+    state: &AppState,
+    asset_id: &str,
+    response: &mut PurgeResponse,
+) -> Vec<(String, PlaybackArtifact)> {
+    let asset_cache_dir = state.config.cache_dir.join("videos").join(asset_id);
+    let mut entries = Vec::new();
+    let mut pending_dirs = vec![asset_cache_dir.clone()];
+
+    while let Some(dir) = pending_dirs.pop() {
+        let mut read_dir = match fs::read_dir(&dir).await {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                response.errors.push(PurgeErrorResponse {
+                    artifact_path: path_relative_to_asset(&asset_cache_dir, &dir),
+                    cache_key: path_relative_to_cache(&state.config.cache_dir, &dir),
+                    error: format!("failed to read cache directory: {error}"),
+                });
+                continue;
+            }
+        };
+
+        loop {
+            let entry = match read_dir.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    response.errors.push(PurgeErrorResponse {
+                        artifact_path: path_relative_to_asset(&asset_cache_dir, &dir),
+                        cache_key: path_relative_to_cache(&state.config.cache_dir, &dir),
+                        error: format!("failed to scan cache directory: {error}"),
+                    });
+                    break;
+                }
+            };
+            let path = entry.path();
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    response.errors.push(PurgeErrorResponse {
+                        artifact_path: path_relative_to_asset(&asset_cache_dir, &path),
+                        cache_key: path_relative_to_cache(&state.config.cache_dir, &path),
+                        error: format!("failed to inspect cache entry: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            if file_type.is_dir() {
+                pending_dirs.push(path);
+                continue;
+            }
+
+            let artifact_path = path_relative_to_asset(&asset_cache_dir, &path);
+            if !file_type.is_file() {
+                response.rejected.push(PurgeRejectedResponse {
+                    artifact_path,
+                    reason: "cache entry is not a regular file".to_owned(),
+                });
+                continue;
+            }
+
+            match map_playback_artifact(asset_id, &artifact_path) {
+                Ok(artifact) => entries.push((artifact_path, artifact)),
+                Err(_) => response.rejected.push(PurgeRejectedResponse {
+                    artifact_path,
+                    reason: "unsupported playback artifact path".to_owned(),
+                }),
+            }
+        }
+    }
+
+    entries
+}
+
+async fn purge_artifact(
+    state: &AppState,
+    artifact_path: String,
+    artifact: PlaybackArtifact,
+    response: &mut PurgeResponse,
+) {
+    let cache_path = state.config.cache_dir.join(&artifact.cache_key);
+    match fs::remove_file(&cache_path).await {
+        Ok(()) => response.purged.push(PurgeEntryResponse {
+            artifact_path,
+            cache_key: artifact.cache_key,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            response.missing.push(PurgeEntryResponse {
+                artifact_path,
+                cache_key: artifact.cache_key,
+            });
+        }
+        Err(error) => response.errors.push(PurgeErrorResponse {
+            artifact_path,
+            cache_key: artifact.cache_key,
+            error: format!("failed to remove cache file: {error}"),
+        }),
+    }
+}
+
+async fn remove_empty_asset_cache_dirs(cache_dir: &FsPath, asset_id: &str) {
+    let asset_cache_dir = cache_dir.join("videos").join(asset_id);
+    let hls_dir = asset_cache_dir.join("hls");
+    let videos_dir = cache_dir.join("videos");
+    let _ = fs::remove_dir(&hls_dir).await;
+    let _ = fs::remove_dir(&asset_cache_dir).await;
+    let _ = fs::remove_dir(&videos_dir).await;
+}
+
+fn path_relative_to_asset(asset_cache_dir: &FsPath, path: &FsPath) -> String {
+    path.strip_prefix(asset_cache_dir)
+        .ok()
+        .and_then(path_to_slash_string)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn path_relative_to_cache(cache_dir: &FsPath, path: &FsPath) -> String {
+    path.strip_prefix(cache_dir)
+        .ok()
+        .and_then(path_to_slash_string)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn path_to_slash_string(path: &FsPath) -> Option<String> {
+    let parts = path
+        .iter()
+        .map(|part| part.to_str())
+        .collect::<Option<Vec<_>>>()?;
+    Some(parts.join("/"))
 }
 
 fn validate_warm_request(
@@ -955,6 +1207,18 @@ impl IntoResponse for WarmRequestError {
     }
 }
 
+impl IntoResponse for PurgeRequestError {
+    fn into_response(self) -> Response {
+        match self {
+            PurgeRequestError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: message }),
+            )
+                .into_response(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,6 +1350,20 @@ mod tests {
             .unwrap()
     }
 
+    async fn post_purge(app: Router, body: impl Into<Body>, token: Option<&str>) -> Response {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/purge")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header("x-rend-internal-token", token);
+        }
+
+        app.oneshot(builder.body(body.into()).unwrap())
+            .await
+            .unwrap()
+    }
+
     async fn response_json(response: Response) -> Value {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
@@ -1096,6 +1374,19 @@ mod tests {
             "asset_id": asset_id,
             "artifact_paths": artifact_paths,
         })
+        .to_string()
+    }
+
+    fn purge_body(asset_id: &str, artifact_paths: Option<&[&str]>) -> String {
+        match artifact_paths {
+            Some(artifact_paths) => serde_json::json!({
+                "asset_id": asset_id,
+                "artifact_paths": artifact_paths,
+            }),
+            None => serde_json::json!({
+                "asset_id": asset_id,
+            }),
+        }
         .to_string()
     }
 
@@ -1237,6 +1528,111 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn purge_rejects_missing_or_wrong_internal_token() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("purge-auth"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+        let body = purge_body("asset-123", Some(&["opener.mp4"]));
+
+        let response = post_purge(app.clone(), body.clone(), None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = post_purge(app, body, Some("wrong-token")).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn purge_rejects_unsafe_asset_id() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let state = test_state(test_cache_dir("purge-unsafe-asset"), origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_purge(
+            app,
+            purge_body("../asset", Some(&["opener.mp4"])),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn purge_explicit_paths_remove_cache_and_report_missing_and_rejected() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let cache_dir = test_cache_dir("purge-explicit");
+        let opener_path = cache_dir.join("videos/asset-123/opener.mp4");
+        fs::create_dir_all(opener_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&opener_path, b"cached").await.unwrap();
+        let state = test_state(cache_dir, origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_purge(
+            app,
+            purge_body(
+                "asset-123",
+                Some(&["opener.mp4", "hls/master.m3u8", "thumbnail.jpg"]),
+            ),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["asset_id"], "asset-123");
+        assert_eq!(json["purged"][0]["artifact_path"], "opener.mp4");
+        assert_eq!(json["missing"][0]["artifact_path"], "hls/master.m3u8");
+        assert_eq!(json["rejected"][0]["artifact_path"], "thumbnail.jpg");
+        assert!(json["errors"].as_array().unwrap().is_empty());
+        assert!(!opener_path.exists());
+    }
+
+    #[tokio::test]
+    async fn purge_omitted_paths_remove_supported_cached_playback_files_only() {
+        let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+        let cache_dir = test_cache_dir("purge-all");
+        let opener_path = cache_dir.join("videos/asset-123/opener.mp4");
+        let manifest_path = cache_dir.join("videos/asset-123/hls/master.m3u8");
+        let segment_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+        let thumbnail_path = cache_dir.join("videos/asset-123/thumbnail.jpg");
+        fs::create_dir_all(manifest_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&opener_path, b"opener").await.unwrap();
+        fs::write(&manifest_path, b"manifest").await.unwrap();
+        fs::write(&segment_path, b"segment").await.unwrap();
+        fs::write(&thumbnail_path, b"thumbnail").await.unwrap();
+        let state = test_state(cache_dir, origin_endpoint);
+        let app = build_app(state, Duration::from_secs(10));
+
+        let response = post_purge(
+            app,
+            purge_body("asset-123", None),
+            Some("test-internal-token"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let purged = json["purged"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["artifact_path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(purged.contains(&"opener.mp4"));
+        assert!(purged.contains(&"hls/master.m3u8"));
+        assert!(purged.contains(&"hls/segment_00000.ts"));
+        assert_eq!(json["rejected"][0]["artifact_path"], "thumbnail.jpg");
+        assert!(!opener_path.exists());
+        assert!(!manifest_path.exists());
+        assert!(!segment_path.exists());
+        assert!(thumbnail_path.exists());
     }
 
     #[tokio::test]
