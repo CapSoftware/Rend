@@ -85,6 +85,7 @@ the manifest `image_digest` values, for example
 
 API:
 
+- `REND_ENV=local|trial|production`
 - `DATABASE_URL`
 - `REND_REDIS_URL`
 - `CLICKHOUSE_URL`
@@ -101,7 +102,10 @@ API:
 - `REND_API_AUTO_MIGRATE`
 - `REND_DEV_API_KEY`
 - `REND_PLAYBACK_BASE_URL`
+- `REND_MAX_UPLOAD_BYTES`
 - `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`
+- `REND_EXPECTED_EDGES`
+- `REND_ALLOW_INSECURE_EDGE_URLS`
 - `REND_EDGE_INTERNAL_TOKEN`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
 - `REND_PLAYBACK_SIGNING_KEY_ID`
@@ -110,6 +114,10 @@ API:
 
 `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional single-edge
 fallbacks for local/dev environments when no healthy registry entries exist.
+`REND_EXPECTED_EDGES` uses comma-separated
+`edge_id=region=base_url` entries. In `trial` and `production`, edge base URLs
+must be HTTPS unless `REND_ALLOW_INSECURE_EDGE_URLS=true` is set for a local
+dry-run.
 
 Worker:
 
@@ -125,12 +133,17 @@ Worker:
 
 Edge:
 
+- `REND_ENV=local|trial|production`
 - `REND_EDGE_BIND_ADDR`
 - `REND_EDGE_ID`
 - `REND_EDGE_REGION`
 - `REND_EDGE_BASE_URL`
+- `REND_EXPECTED_EDGES`
+- `REND_ALLOW_INSECURE_EDGE_URLS`
 - `REND_CONTROL_PLANE_URL`
 - `REND_EDGE_HEARTBEAT_INTERVAL_SECS`
+- `REND_EDGE_CACHE_MAX_BYTES`
+- `REND_EDGE_CACHE_MIN_FREE_BYTES`
 - `REND_EDGE_CACHE_DIR`
 - `REND_EDGE_ORIGIN_HEALTH_URL`
 - `S3_ENDPOINT`
@@ -139,6 +152,9 @@ Edge:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `REND_EDGE_INTERNAL_TOKEN`
+- `REND_EDGE_WARM_MAX_ARTIFACTS`
+- `REND_EDGE_MAX_IN_FLIGHT_FILLS`
+- `REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
 - `REND_EDGE_TELEMETRY_ENABLED`
 - `REND_EDGE_TELEMETRY_INGEST_URL`
@@ -154,6 +170,12 @@ Edge:
 Use `.env.example` for host development and `.env.docker.example` for Docker
 service-name defaults. Production secrets must come from the deployment
 platform, not checked-in env files.
+
+`trial` and `production` mode reject empty required secrets, checked-in dev
+defaults, and local service URLs such as `localhost`, `127.0.0.1`, `minio`,
+`rend-api`, or `rend-edge`. Full cache LRU eviction and stream-while-write cold
+fills remain later work unless trial data shows these resource guards block the
+first hosted trials.
 
 ## Volumes
 

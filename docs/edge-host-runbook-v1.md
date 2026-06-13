@@ -201,6 +201,11 @@ set `REND_EDGE_REGION=london`, a unique `REND_EDGE_ID`, and its own
 `REND_EDGE_BASE_URL`, for example `rend-edge-london-001` and
 `https://edge-london.example.com`. Both regions must share the same playback
 signing key and `REND_EDGE_INTERNAL_TOKEN` as the API for a given trial.
+Set `REND_ENV=trial` for first hosted trials. The API, worker, and every edge
+host must share the same `REND_EXPECTED_EDGES` list in
+`edge_id=region=https://base-url` format; registration and warm/purge fanout
+reject rows that do not match this list. Leave
+`REND_ALLOW_INSECURE_EDGE_URLS=false` for hosted trials.
 
 ## Compose Templates
 
@@ -316,7 +321,9 @@ scripts/check-docker-image-versions.sh --running
 ```
 
 Metrics auth check. The first command should return `401`; the second should
-return Prometheus text including `rend_edge_up` and `rend_edge_ready`.
+return Prometheus text including `rend_edge_up`, `rend_edge_ready`,
+`rend_edge_cache_requests_total`, `rend_edge_in_flight_fills`,
+`rend_edge_telemetry_events_total`, and `rend_edge_telemetry_spool_bytes`.
 
 ```sh
 curl -sS -o /tmp/rend-edge-metrics-unauth.body -w "%{http_code}\n" "$EDGE_INTERNAL_BASE/metrics"
@@ -489,6 +496,12 @@ Edge logs to inspect:
 Current metric and counter signals:
 
 - Edge `/metrics`: `rend_edge_up` and `rend_edge_ready`
+- Edge cache counters:
+  `rend_edge_cache_requests_total{cache_status="HIT|MISS|COALESCED|error"}`
+  and `rend_edge_in_flight_fills`
+- Edge telemetry counters:
+  `rend_edge_telemetry_events_total{state="queued|sent|spooled|dropped"}`
+  and `rend_edge_telemetry_spool_bytes`
 - Playback response header: `X-Rend-Cache` with `HIT`, `MISS`, or `COALESCED`
 - Warm response summary: `warmed`, `already_warm`, `not_found`, `failed`
 - API playback analytics:
@@ -503,6 +516,11 @@ Current metric and counter signals:
 For first trials, alert manually on any sustained `rend_edge_ready=0`, rising
 spool size, `not_found` or `failed` warm summaries, elevated playback 5xx/401,
 or a cache mix that stays mostly `MISS` after warm operations.
+
+The trial cache safety gate bounds upload size, origin artifact buffering,
+cache free-space reserve, and optional cache size. It does not implement full
+LRU eviction or stream-while-write cold fills yet; keep those as follow-up work
+unless trial traffic proves the guards block useful playback.
 
 ## Local Validation
 
