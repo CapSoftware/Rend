@@ -27,7 +27,25 @@ async fn record_warm(
     *recorder.last_token.lock().unwrap() = token;
     *recorder.last_request.lock().unwrap() = Some(request);
 
-    recorder.status.into_response()
+    if recorder.status.is_success() {
+        (
+            recorder.status,
+            Json(serde_json::json!({
+                "asset_id": "asset-123",
+                "results": [],
+                "summary": {
+                    "total": 0,
+                    "warmed": 0,
+                    "already_warm": 0,
+                    "not_found": 0,
+                    "failed": 0
+                }
+            })),
+        )
+            .into_response()
+    } else {
+        recorder.status.into_response()
+    }
 }
 
 async fn spawn_warm_recorder(status: StatusCode) -> (String, WarmRecorder) {
@@ -72,6 +90,10 @@ fn test_config() -> ApiConfig {
         playback_base_url: "http://127.0.0.1:4100".to_owned(),
         playback_token_issuer: test_issuer(),
         playback_bootstrap_prefetch_segments: DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
+        edge_registry: EdgeRegistryConfig {
+            internal_token: "internal".to_owned(),
+            active_heartbeat_window: Duration::from_secs(DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS),
+        },
         edge_warm: EdgeWarmConfig {
             url: None,
             internal_token: "internal".to_owned(),
@@ -234,6 +256,24 @@ async fn post_internal_telemetry(
         .unwrap()
 }
 
+async fn post_internal_edge_register(
+    app: Router,
+    body: impl Into<Body>,
+    token: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/internal/edges/register")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-rend-internal-token", token);
+    }
+
+    app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
 #[test]
 fn bearer_authorization_accepts_matching_dev_key() {
     let mut headers = HeaderMap::new();
@@ -360,6 +400,24 @@ async fn internal_playback_telemetry_requires_internal_token() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     let response = post_internal_telemetry(app, body, Some("wrong-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_edge_registration_requires_internal_token() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let body = serde_json::json!({
+        "edge_id": "edge-1",
+        "region": "local",
+        "base_url": "http://127.0.0.1:4100",
+        "status": "healthy"
+    })
+    .to_string();
+
+    let response = post_internal_edge_register(app.clone(), body.clone(), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post_internal_edge_register(app, body, Some("wrong-token")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -912,15 +970,10 @@ fn playback_url_is_absent_until_playable() {
 }
 
 #[test]
-fn edge_warm_request_is_absent_when_warm_url_is_unconfigured() {
-    let config = EdgeWarmConfig {
-        url: None,
-        internal_token: "internal".to_owned(),
-        max_artifacts: 4,
-    };
+fn edge_warm_request_is_absent_when_no_artifacts_are_selected() {
     let generated = vec!["hls/segment_00000.ts".to_owned()];
 
-    assert!(edge_warm_request(&config, "asset-123", "hls_ready", &generated).is_none());
+    assert!(edge_warm_request("asset-123", "not_playable", &generated, 4).is_none());
 }
 
 #[test]
@@ -949,6 +1002,32 @@ fn edge_warm_artifact_paths_skip_unplayable_states() {
     assert!(edge_warm_artifact_paths("not_playable", &[], 4).is_empty());
 }
 
+#[test]
+fn edge_registry_validation_normalizes_safe_values() {
+    assert_eq!(
+        normalize_edge_name("edge_id", " rend-edge.us-east-1 ").unwrap(),
+        "rend-edge.us-east-1"
+    );
+    assert_eq!(
+        normalize_edge_base_url("https://edge.example.com/").unwrap(),
+        "https://edge.example.com"
+    );
+    assert_eq!(
+        normalize_edge_status(Some("HEALTHY"), "registered").unwrap(),
+        "healthy"
+    );
+    assert_eq!(normalize_cache_max_bytes(Some(1024)).unwrap(), Some(1024));
+}
+
+#[test]
+fn edge_registry_validation_rejects_secret_bearing_base_urls() {
+    let error = normalize_edge_base_url("https://user:secret@edge.example.com").unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+    let error = normalize_edge_base_url("https://edge.example.com?token=secret").unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
     let (url, recorder) = spawn_warm_recorder(StatusCode::OK).await;
@@ -965,6 +1044,10 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
     maybe_warm_edge(
         None,
         &reqwest::Client::new(),
+        &EdgeRegistryConfig {
+            internal_token: "warm-secret".to_owned(),
+            active_heartbeat_window: Duration::from_secs(120),
+        },
         &config,
         "asset-123",
         "hls_ready",
@@ -1001,6 +1084,10 @@ async fn maybe_warm_edge_swallows_warm_endpoint_failure() {
     maybe_warm_edge(
         None,
         &reqwest::Client::new(),
+        &EdgeRegistryConfig {
+            internal_token: "warm-secret".to_owned(),
+            active_heartbeat_window: Duration::from_secs(120),
+        },
         &config,
         "asset-123",
         "opener_ready",
@@ -1009,6 +1096,43 @@ async fn maybe_warm_edge_swallows_warm_endpoint_failure() {
     .await;
 
     assert_eq!(recorder.count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn warm_fanout_posts_to_every_target_best_effort() {
+    let (ok_url, ok_recorder) = spawn_warm_recorder(StatusCode::OK).await;
+    let (failed_url, failed_recorder) =
+        spawn_warm_recorder(StatusCode::INTERNAL_SERVER_ERROR).await;
+    let targets = vec![
+        EdgeFanoutTarget {
+            edge_id: "edge-ok".to_owned(),
+            region: Some("local".to_owned()),
+            action_url: ok_url,
+            source: "registry",
+        },
+        EdgeFanoutTarget {
+            edge_id: "edge-failed".to_owned(),
+            region: Some("backup".to_owned()),
+            action_url: failed_url,
+            source: "registry",
+        },
+    ];
+    let request = EdgeWarmRequest {
+        asset_id: "asset-123".to_owned(),
+        artifact_paths: vec!["opener.mp4".to_owned()],
+    };
+
+    let results =
+        fanout_edge_warm_requests(&reqwest::Client::new(), "warm-secret", &targets, &request).await;
+
+    assert_eq!(ok_recorder.count.load(Ordering::SeqCst), 1);
+    assert_eq!(failed_recorder.count.load(Ordering::SeqCst), 1);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].edge_id, "edge-ok");
+    assert_eq!(results[0].status, "succeeded");
+    assert_eq!(results[1].edge_id, "edge-failed");
+    assert_eq!(results[1].status, "failed");
+    assert_eq!(results[1].http_status, Some(500));
 }
 
 #[test]
