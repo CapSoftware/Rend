@@ -39,6 +39,7 @@ const DEFAULT_MAX_IN_FLIGHT_FILLS: usize = 64;
 const HARD_MAX_IN_FLIGHT_FILLS: usize = 1024;
 const INTERNAL_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ASSET_ID_LEN: usize = 128;
+const DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -57,7 +58,16 @@ struct EdgeConfig {
     playback_keyring: SingleKeyring,
     warm_max_artifacts: usize,
     max_in_flight_fills: usize,
+    control_plane: Option<ControlPlaneConfig>,
     request_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct ControlPlaneConfig {
+    url: String,
+    edge_base_url: String,
+    cache_max_bytes: Option<i64>,
+    heartbeat_interval: Duration,
 }
 
 impl EdgeConfig {
@@ -87,9 +97,24 @@ impl EdgeConfig {
 
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
+        let bind_addr = env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?;
+        let control_plane_url = optional_env_url("REND_CONTROL_PLANE_URL");
+        let edge_base_url = optional_env_url("REND_EDGE_BASE_URL")
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", bind_addr.port()));
+        let cache_max_bytes = optional_i64_env("REND_EDGE_CACHE_MAX_BYTES")?;
+        let heartbeat_interval = env_duration_secs(
+            "REND_EDGE_HEARTBEAT_INTERVAL_SECS",
+            DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS,
+        )?;
+        let control_plane = control_plane_url.map(|url| ControlPlaneConfig {
+            url,
+            edge_base_url,
+            cache_max_bytes,
+            heartbeat_interval,
+        });
 
         Ok(Self {
-            bind_addr: env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?,
+            bind_addr,
             edge_id: env_string("REND_EDGE_ID", "local-edge-001"),
             region: env_string("REND_EDGE_REGION", "local"),
             cache_dir: env_path("REND_EDGE_CACHE_DIR", ".rend/cache"),
@@ -107,6 +132,7 @@ impl EdgeConfig {
             playback_keyring,
             warm_max_artifacts,
             max_in_flight_fills,
+            control_plane,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
         })
     }
@@ -147,6 +173,22 @@ struct DependencyCheck {
     status: &'static str,
     latency_ms: u128,
     message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ControlPlaneRegistrationRequest<'a> {
+    edge_id: &'a str,
+    region: &'a str,
+    base_url: &'a str,
+    status: &'a str,
+    cache_max_bytes: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ControlPlaneHeartbeatRequest<'a> {
+    edge_id: &'a str,
+    status: &'a str,
+    cache_max_bytes: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -439,6 +481,8 @@ async fn main() -> Result<()> {
         "rend-edge listening",
     );
 
+    spawn_control_plane_client(state.clone());
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -463,6 +507,27 @@ fn build_s3_client(config: &EdgeConfig) -> S3Client {
         .build();
 
     S3Client::from_conf(s3_config)
+}
+
+fn optional_env_url(key: &str) -> Option<String> {
+    let value = env_string(key, "");
+    let value = value.trim().trim_end_matches('/').to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn optional_i64_env(key: &str) -> Result<Option<i64>> {
+    let value = env_string(key, "");
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let parsed = value
+        .parse::<i64>()
+        .with_context(|| format!("{key} must be an integer"))?;
+    anyhow::ensure!(parsed >= 0, "{key} must be non-negative");
+
+    Ok(Some(parsed))
 }
 
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
@@ -532,6 +597,120 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     };
 
     (status, Json(body)).into_response()
+}
+
+fn spawn_control_plane_client(state: Arc<AppState>) {
+    if state.config.control_plane.is_none() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        run_control_plane_client(state).await;
+    });
+}
+
+async fn run_control_plane_client(state: Arc<AppState>) {
+    let Some(config) = state.config.control_plane.clone() else {
+        return;
+    };
+    let mut registered = false;
+
+    loop {
+        let status = current_control_plane_status(&state).await;
+        let result = if registered {
+            post_control_plane_heartbeat(&state, &config, status).await
+        } else {
+            post_control_plane_registration(&state, &config, status).await
+        };
+
+        match result {
+            Ok(()) => {
+                if !registered {
+                    tracing::info!(
+                        edge_id = %state.config.edge_id,
+                        region = %state.config.region,
+                        "registered edge with control plane",
+                    );
+                }
+                registered = true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    edge_id = %state.config.edge_id,
+                    region = %state.config.region,
+                    error = %error,
+                    "edge control-plane request failed",
+                );
+                registered = false;
+            }
+        }
+
+        tokio::time::sleep(config.heartbeat_interval).await;
+    }
+}
+
+async fn current_control_plane_status(state: &AppState) -> &'static str {
+    let cache = check_cache_dir(state).await;
+    let origin = check_origin(state).await;
+    if cache.status == "ok" && origin.status == "ok" {
+        "healthy"
+    } else {
+        "unhealthy"
+    }
+}
+
+async fn post_control_plane_registration(
+    state: &AppState,
+    config: &ControlPlaneConfig,
+    status: &str,
+) -> Result<()> {
+    let url = format!("{}/internal/edges/register", config.url);
+    let request = ControlPlaneRegistrationRequest {
+        edge_id: &state.config.edge_id,
+        region: &state.config.region,
+        base_url: &config.edge_base_url,
+        status,
+        cache_max_bytes: config.cache_max_bytes,
+    };
+
+    state
+        .http
+        .post(url)
+        .header("x-rend-internal-token", &state.config.internal_token)
+        .json(&request)
+        .send()
+        .await
+        .context("failed to send edge registration")?
+        .error_for_status()
+        .context("edge registration returned an error status")?;
+
+    Ok(())
+}
+
+async fn post_control_plane_heartbeat(
+    state: &AppState,
+    config: &ControlPlaneConfig,
+    status: &str,
+) -> Result<()> {
+    let url = format!("{}/internal/edges/heartbeat", config.url);
+    let request = ControlPlaneHeartbeatRequest {
+        edge_id: &state.config.edge_id,
+        status,
+        cache_max_bytes: config.cache_max_bytes,
+    };
+
+    state
+        .http
+        .post(url)
+        .header("x-rend-internal-token", &state.config.internal_token)
+        .json(&request)
+        .send()
+        .await
+        .context("failed to send edge heartbeat")?
+        .error_for_status()
+        .context("edge heartbeat returned an error status")?;
+
+    Ok(())
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
