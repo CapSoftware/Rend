@@ -28,7 +28,10 @@ use axum::{
 use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame};
 use rend_config::{
-    env_bool, env_duration_secs, env_socket_addr, env_string, env_usize, load_dotenv,
+    ExpectedEdges, RendEnv, env_bool, env_duration_secs, env_socket_addr, env_string, env_u64,
+    env_usize, load_dotenv, optional_env_url,
+    validate_edge_base_url as validate_config_edge_base_url, validate_optional_url,
+    validate_required_secret, validate_required_service_url, validate_required_url,
 };
 use rend_playback_auth::{
     PlaybackAuthError, PlaybackTokenIssuer, SigningKey, current_unix_timestamp,
@@ -64,6 +67,7 @@ const HARD_MEDIA_JOB_MAX_ATTEMPTS: usize = 25;
 const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
 const INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: u64 = 120;
+const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
 
 #[derive(Clone)]
@@ -91,12 +95,16 @@ struct ApiConfig {
     media_worker: MediaWorkerConfig,
     auto_migrate: bool,
     request_timeout: Duration,
+    max_upload_bytes: u64,
 }
 
 #[derive(Clone)]
 struct EdgeRegistryConfig {
     internal_token: String,
     active_heartbeat_window: Duration,
+    expected_edges: ExpectedEdges,
+    rend_env: RendEnv,
+    allow_insecure_edge_urls: bool,
 }
 
 #[derive(Clone)]
@@ -121,6 +129,15 @@ struct MediaWorkerConfig {
 
 impl ApiConfig {
     fn from_env() -> Result<Self> {
+        let rend_env = RendEnv::from_env()?;
+        let allow_insecure_edge_urls = env_bool("REND_ALLOW_INSECURE_EDGE_URLS", false)?;
+        let database_url = env_string("DATABASE_URL", "postgres://rend:rend@localhost:5432/rend");
+        let redis_url = env_string("REND_REDIS_URL", "redis://localhost:6379");
+        let clickhouse_url = env_string("CLICKHOUSE_URL", "http://localhost:8123");
+        let object_store_health_url = env_string(
+            "OBJECT_STORE_HEALTH_URL",
+            "http://localhost:9100/minio/health/ready",
+        );
         let dev_api_key = env_string("REND_DEV_API_KEY", "dev-api-key");
         let s3_endpoint = env_string("S3_ENDPOINT", "http://localhost:9100");
         let s3_region = env_string("S3_REGION", "us-east-1");
@@ -133,7 +150,13 @@ impl ApiConfig {
             "REND_PLAYBACK_SIGNING_SECRET",
             "local-dev-playback-signing-secret",
         );
+        let playback_base_url = env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100");
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
+        let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
+        anyhow::ensure!(
+            max_upload_bytes > 0,
+            "REND_MAX_UPLOAD_BYTES must be greater than 0"
+        );
         let inline_media_processing = env_bool("REND_API_INLINE_MEDIA_PROCESSING", false)?;
         let media_job_max_attempts = env_usize(
             "REND_MEDIA_JOB_MAX_ATTEMPTS",
@@ -154,6 +177,8 @@ impl ApiConfig {
         let edge_warm_url = optional_env_url("REND_EDGE_WARM_URL");
         let edge_purge_url = optional_env_url("REND_EDGE_PURGE_URL");
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
+        let expected_edges =
+            ExpectedEdges::from_env("REND_EXPECTED_EDGES", rend_env, allow_insecure_edge_urls)?;
         let edge_warm_max_artifacts = env_usize(
             "REND_EDGE_WARM_MAX_ARTIFACTS",
             DEFAULT_EDGE_WARM_MAX_ARTIFACTS,
@@ -170,9 +195,14 @@ impl ApiConfig {
             "REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS",
             DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS,
         )?;
+        let internal_telemetry_token = env_string("REND_INTERNAL_TELEMETRY_TOKEN", "");
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
 
         for (key, value) in [
+            ("DATABASE_URL", &database_url),
+            ("REND_REDIS_URL", &redis_url),
+            ("CLICKHOUSE_URL", &clickhouse_url),
+            ("OBJECT_STORE_HEALTH_URL", &object_store_health_url),
             ("REND_DEV_API_KEY", &dev_api_key),
             ("S3_ENDPOINT", &s3_endpoint),
             ("S3_REGION", &s3_region),
@@ -182,6 +212,45 @@ impl ApiConfig {
         ] {
             anyhow::ensure!(!value.trim().is_empty(), "{key} must not be empty");
         }
+        validate_required_secret(rend_env, "REND_DEV_API_KEY", &dev_api_key)?;
+        validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
+        let telemetry_secret_for_validation = if rend_env.is_strict() {
+            internal_telemetry_token.as_str()
+        } else {
+            playback_telemetry.internal_token.as_str()
+        };
+        validate_required_secret(
+            rend_env,
+            "REND_INTERNAL_TELEMETRY_TOKEN",
+            telemetry_secret_for_validation,
+        )?;
+        validate_required_secret(
+            rend_env,
+            "REND_PLAYBACK_SIGNING_KEY_ID",
+            &playback_signing_key_id,
+        )?;
+        validate_required_secret(
+            rend_env,
+            "REND_PLAYBACK_SIGNING_SECRET",
+            &playback_signing_secret,
+        )?;
+        validate_required_service_url(rend_env, "DATABASE_URL", &database_url)?;
+        validate_required_service_url(rend_env, "REND_REDIS_URL", &redis_url)?;
+        validate_required_url(rend_env, "CLICKHOUSE_URL", &clickhouse_url)?;
+        validate_required_url(
+            rend_env,
+            "OBJECT_STORE_HEALTH_URL",
+            &object_store_health_url,
+        )?;
+        validate_required_url(rend_env, "S3_ENDPOINT", &s3_endpoint)?;
+        validate_config_edge_base_url(
+            rend_env,
+            "REND_PLAYBACK_BASE_URL",
+            &playback_base_url,
+            allow_insecure_edge_urls,
+        )?;
+        validate_optional_url(rend_env, "REND_EDGE_WARM_URL", edge_warm_url.as_deref())?;
+        validate_optional_url(rend_env, "REND_EDGE_PURGE_URL", edge_purge_url.as_deref())?;
 
         let playback_token_issuer = PlaybackTokenIssuer::new(
             SigningKey::new(
@@ -193,24 +262,24 @@ impl ApiConfig {
 
         Ok(Self {
             bind_addr: env_socket_addr("REND_API_BIND_ADDR", "127.0.0.1:4000")?,
-            database_url: env_string("DATABASE_URL", "postgres://rend:rend@localhost:5432/rend"),
-            redis_url: env_string("REND_REDIS_URL", "redis://localhost:6379"),
-            object_store_health_url: env_string(
-                "OBJECT_STORE_HEALTH_URL",
-                "http://localhost:9100/minio/health/ready",
-            ),
+            database_url,
+            redis_url,
+            object_store_health_url,
             dev_api_key,
             s3_endpoint,
             s3_region,
             s3_bucket,
             aws_access_key_id,
             aws_secret_access_key,
-            playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
+            playback_base_url,
             playback_token_issuer,
             playback_bootstrap_prefetch_segments,
             edge_registry: EdgeRegistryConfig {
                 internal_token: edge_internal_token.clone(),
                 active_heartbeat_window: edge_active_heartbeat_window,
+                expected_edges,
+                rend_env,
+                allow_insecure_edge_urls,
             },
             edge_warm: EdgeWarmConfig {
                 url: edge_warm_url,
@@ -237,6 +306,7 @@ impl ApiConfig {
             },
             auto_migrate: env_bool("REND_API_AUTO_MIGRATE", true)?,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
+            max_upload_bytes,
         })
     }
 }
@@ -572,6 +642,7 @@ struct AppError {
 struct CountedRequestBody {
     body: Mutex<Pin<Box<Body>>>,
     byte_count: Arc<AtomicU64>,
+    max_bytes: u64,
 }
 
 struct EventStreamBody {
@@ -757,19 +828,15 @@ fn build_s3_client(config: &ApiConfig) -> S3Client {
     S3Client::from_conf(s3_config)
 }
 
-fn optional_env_url(key: &str) -> Option<String> {
-    let value = env_string(key, "");
-    let value = value.trim().trim_end_matches('/').to_owned();
-    (!value.is_empty()).then_some(value)
-}
-
 async fn register_edge_inner(
+    registry: &EdgeRegistryConfig,
     db: &PgPool,
     request: EdgeRegistrationRequest,
 ) -> Result<EdgeNodeResponse, AppError> {
     let edge_id = normalize_edge_name("edge_id", &request.edge_id)?;
     let region = normalize_edge_name("region", &request.region)?;
-    let base_url = normalize_edge_base_url(&request.base_url)?;
+    let base_url = normalize_edge_base_url(registry, &request.base_url)?;
+    validate_expected_edge_registration(registry, &edge_id, &region, &base_url)?;
     let status = normalize_edge_status(request.status.as_deref(), "healthy")?;
     let cache_max_bytes = normalize_cache_max_bytes(request.cache_max_bytes)?;
 
@@ -884,30 +951,45 @@ fn normalize_edge_name(field: &str, value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
-fn normalize_edge_base_url(base_url: &str) -> Result<String, AppError> {
-    let base_url = base_url.trim().trim_end_matches('/');
-    if base_url.is_empty() {
-        return Err(AppError::bad_request("base_url must not be empty"));
+fn normalize_edge_base_url(
+    registry: &EdgeRegistryConfig,
+    base_url: &str,
+) -> Result<String, AppError> {
+    rend_config::normalize_edge_base_url(
+        base_url,
+        registry.rend_env,
+        registry.allow_insecure_edge_urls,
+    )
+    .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+fn validate_expected_edge_registration(
+    registry: &EdgeRegistryConfig,
+    edge_id: &str,
+    region: &str,
+    base_url: &str,
+) -> Result<(), AppError> {
+    if registry.expected_edges.is_empty() {
+        return Ok(());
     }
 
-    let parsed = reqwest::Url::parse(base_url)
-        .map_err(|_| AppError::bad_request("base_url must be an absolute http(s) URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(AppError::bad_request(
-            "base_url must be an absolute http(s) URL",
-        ));
+    let Some(expected) = registry.expected_edges.get(edge_id) else {
+        return Err(AppError::bad_request(format!(
+            "edge_id {edge_id} is not configured in REND_EXPECTED_EDGES"
+        )));
+    };
+    if expected.region != region {
+        return Err(AppError::bad_request(format!(
+            "edge_id {edge_id} registered unexpected region {region}"
+        )));
     }
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(AppError::bad_request(
-            "base_url must not include credentials, query, or fragment",
-        ));
+    if expected.base_url != base_url {
+        return Err(AppError::bad_request(format!(
+            "edge_id {edge_id} registered unexpected base_url"
+        )));
     }
 
-    Ok(base_url.to_owned())
+    Ok(())
 }
 
 fn normalize_edge_status(status: Option<&str>, default: &str) -> Result<String, AppError> {
@@ -991,7 +1073,7 @@ async fn register_edge(
     State(state): State<Arc<AppState>>,
     Json(request): Json<EdgeRegistrationRequest>,
 ) -> Response {
-    match register_edge_inner(&state.db, request).await {
+    match register_edge_inner(&state.config.edge_registry, &state.db, request).await {
         Ok(edge) => (StatusCode::OK, Json(EdgeNodeEnvelope { edge })).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1951,7 +2033,7 @@ async fn create_video_inner(
     body: Body,
 ) -> Result<CreateVideoResponse, AppError> {
     let content_type = request_content_type(&headers);
-    let content_length = request_content_length(&headers)?;
+    let content_length = request_content_length(&headers, state.config.max_upload_bytes)?;
     let mut tx = state.db.begin().await.map_err(AppError::internal)?;
     let asset_id: String = sqlx::query_scalar(
         "
@@ -1983,7 +2065,7 @@ async fn create_video_inner(
 
     let source_object_key = source_object_key(&asset_id);
     let byte_count = Arc::new(AtomicU64::new(0));
-    let upload_body = counted_body_stream(body, byte_count.clone());
+    let upload_body = counted_body_stream(body, byte_count.clone(), state.config.max_upload_bytes);
     let mut put_object = state
         .s3
         .put_object()
@@ -1998,6 +2080,14 @@ async fn create_video_inner(
 
     if let Err(error) = put_object.send().await {
         mark_asset_failed(&state, &asset_id).await;
+        if byte_count.load(Ordering::Relaxed) > state.config.max_upload_bytes
+            || upload_error_is_payload_too_large(&error)
+        {
+            return Err(AppError::payload_too_large(format!(
+                "request body exceeds REND_MAX_UPLOAD_BYTES ({})",
+                state.config.max_upload_bytes
+            )));
+        }
         return Err(AppError::storage(error));
     }
 
@@ -2467,10 +2557,11 @@ async fn record_media_processing_failed_event(
     }
 }
 
-fn counted_body_stream(body: Body, byte_count: Arc<AtomicU64>) -> ByteStream {
+fn counted_body_stream(body: Body, byte_count: Arc<AtomicU64>, max_bytes: u64) -> ByteStream {
     ByteStream::from_body_1_x(CountedRequestBody {
         body: Mutex::new(Box::pin(body)),
         byte_count,
+        max_bytes,
     })
 }
 
@@ -2484,7 +2575,10 @@ fn request_content_type(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
-fn request_content_length(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
+fn request_content_length(
+    headers: &HeaderMap,
+    max_upload_bytes: u64,
+) -> Result<Option<i64>, AppError> {
     let Some(value) = headers.get(header::CONTENT_LENGTH) else {
         return Ok(None);
     };
@@ -2500,8 +2594,18 @@ fn request_content_length(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
         status: StatusCode::PAYLOAD_TOO_LARGE,
         message: "request body is too large".to_owned(),
     })?;
+    if u64::try_from(size).unwrap_or(u64::MAX) > max_upload_bytes {
+        return Err(AppError::payload_too_large(format!(
+            "content-length exceeds REND_MAX_UPLOAD_BYTES ({max_upload_bytes})"
+        )));
+    }
 
     Ok(Some(size))
+}
+
+fn upload_error_is_payload_too_large(error: impl std::fmt::Display) -> bool {
+    let message = error.to_string();
+    message.contains("REND_MAX_UPLOAD_BYTES") || message.contains("request body exceeds")
 }
 
 fn source_object_key(asset_id: &str) -> String {
@@ -2696,6 +2800,7 @@ async fn registered_edge_fanout_targets(
 
     edges
         .into_iter()
+        .filter(|edge| registered_edge_is_trusted(registry, edge))
         .map(|edge| EdgeFanoutTarget {
             action_url: edge_action_url(&edge.base_url, action),
             edge_id: edge.edge_id,
@@ -2703,6 +2808,26 @@ async fn registered_edge_fanout_targets(
             source: "registry",
         })
         .collect()
+}
+
+fn registered_edge_is_trusted(registry: &EdgeRegistryConfig, edge: &RegisteredEdgeNode) -> bool {
+    if registry.expected_edges.is_empty() {
+        return true;
+    }
+
+    let trusted =
+        registry
+            .expected_edges
+            .contains_match(&edge.edge_id, &edge.region, &edge.base_url);
+    if !trusted {
+        tracing::warn!(
+            edge_id = %edge.edge_id,
+            region = %edge.region,
+            base_url = %edge.base_url,
+            "skipping untrusted edge registry row for fanout",
+        );
+    }
+    trusted
 }
 
 async fn fetch_active_edge_nodes(
@@ -3259,6 +3384,13 @@ impl AppError {
             message: "failed to store source object".to_owned(),
         }
     }
+
+    fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+        }
+    }
 }
 
 impl EdgeWarmFailure {
@@ -3339,8 +3471,17 @@ impl HttpBody for CountedRequestBody {
         match body.as_mut().poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(bytes) = frame.data_ref() {
-                    this.byte_count
-                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                    let previous = this.byte_count.fetch_add(len, Ordering::Relaxed);
+                    if previous.saturating_add(len) > this.max_bytes {
+                        return Poll::Ready(Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "request body exceeds REND_MAX_UPLOAD_BYTES ({})",
+                                this.max_bytes
+                            ),
+                        ))));
+                    }
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
