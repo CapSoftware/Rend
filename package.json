@@ -18,6 +18,7 @@
     "backend:edge": "cargo run -p rend-edge",
     "backend:check": "cargo check --workspace",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
+    "backend:smoke:edge-cache": "scripts/smoke-edge-cache.sh",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
     "clean": "turbo clean"
