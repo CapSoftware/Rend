@@ -62,6 +62,8 @@ const EVENT_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_MEDIA_JOB_MAX_ATTEMPTS: usize = 3;
 const HARD_MEDIA_JOB_MAX_ATTEMPTS: usize = 25;
 const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
+const INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+const DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: u64 = 120;
 const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
 
 #[derive(Clone)]
@@ -79,6 +81,7 @@ struct ApiConfig {
     playback_base_url: String,
     playback_token_issuer: PlaybackTokenIssuer,
     playback_bootstrap_prefetch_segments: usize,
+    edge_registry: EdgeRegistryConfig,
     edge_warm: EdgeWarmConfig,
     edge_purge: EdgePurgeConfig,
     playback_telemetry: telemetry::TelemetryConfig,
@@ -88,6 +91,12 @@ struct ApiConfig {
     media_worker: MediaWorkerConfig,
     auto_migrate: bool,
     request_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct EdgeRegistryConfig {
+    internal_token: String,
+    active_heartbeat_window: Duration,
 }
 
 #[derive(Clone)]
@@ -153,12 +162,14 @@ impl ApiConfig {
             (1..=HARD_EDGE_WARM_MAX_ARTIFACTS).contains(&edge_warm_max_artifacts),
             "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_EDGE_WARM_MAX_ARTIFACTS}"
         );
-        if edge_warm_url.is_some() || edge_purge_url.is_some() {
-            anyhow::ensure!(
-                !edge_internal_token.trim().is_empty(),
-                "REND_EDGE_INTERNAL_TOKEN must not be empty when an internal edge URL is configured"
-            );
-        }
+        anyhow::ensure!(
+            !edge_internal_token.trim().is_empty(),
+            "REND_EDGE_INTERNAL_TOKEN must not be empty"
+        );
+        let edge_active_heartbeat_window = env_duration_secs(
+            "REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS",
+            DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS,
+        )?;
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
 
         for (key, value) in [
@@ -197,6 +208,10 @@ impl ApiConfig {
             playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
             playback_token_issuer,
             playback_bootstrap_prefetch_segments,
+            edge_registry: EdgeRegistryConfig {
+                internal_token: edge_internal_token.clone(),
+                active_heartbeat_window: edge_active_heartbeat_window,
+            },
             edge_warm: EdgeWarmConfig {
                 url: edge_warm_url,
                 internal_token: edge_internal_token.clone(),
@@ -437,6 +452,100 @@ struct EdgePurgeResponse {
     errors: Vec<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EdgeRegistrationRequest {
+    edge_id: String,
+    region: String,
+    base_url: String,
+    status: Option<String>,
+    cache_max_bytes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EdgeHeartbeatRequest {
+    edge_id: String,
+    status: Option<String>,
+    cache_max_bytes: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct EdgeNodeEnvelope {
+    edge: EdgeNodeResponse,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct EdgeNodeResponse {
+    edge_id: String,
+    region: String,
+    base_url: Option<String>,
+    status: String,
+    cache_max_bytes: Option<i64>,
+    last_heartbeat_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegisteredEdgeNode {
+    edge_id: String,
+    region: String,
+    base_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EdgeFanoutTarget {
+    edge_id: String,
+    region: Option<String>,
+    action_url: String,
+    source: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct EdgeFanoutAttempt {
+    edge_id: String,
+    region: Option<String>,
+    source: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct EdgeFanoutResult {
+    edge_id: String,
+    region: Option<String>,
+    source: &'static str,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warm_summary: Option<EdgeWarmResponseSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purge_summary: Option<EdgePurgeResponseSummary>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct EdgeWarmResponse {
+    #[serde(default)]
+    summary: EdgeWarmResponseSummary,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct EdgeWarmResponseSummary {
+    total: usize,
+    warmed: usize,
+    already_warm: usize,
+    not_found: usize,
+    failed: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct EdgePurgeResponseSummary {
+    purged: usize,
+    missing: usize,
+    rejected: usize,
+    errors: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EdgeWarmFailure {
     reason: &'static str,
@@ -589,6 +698,16 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             state.clone(),
             telemetry::require_internal_telemetry_token,
         ));
+    let edge_routes = Router::new()
+        .route("/register", post(register_edge))
+        .route("/heartbeat", post(heartbeat_edge))
+        .route_layer(DefaultBodyLimit::max(
+            INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_internal_edge_token,
+        ));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -597,6 +716,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/v1/readyz", get(readyz))
         .route("/player", get(player_harness))
         .merge(authenticated_routes)
+        .nest("/internal/edges", edge_routes)
         .nest("/internal/telemetry", telemetry_routes)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
@@ -638,6 +758,175 @@ fn optional_env_url(key: &str) -> Option<String> {
     let value = env_string(key, "");
     let value = value.trim().trim_end_matches('/').to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+async fn register_edge_inner(
+    db: &PgPool,
+    request: EdgeRegistrationRequest,
+) -> Result<EdgeNodeResponse, AppError> {
+    let edge_id = normalize_edge_name("edge_id", &request.edge_id)?;
+    let region = normalize_edge_name("region", &request.region)?;
+    let base_url = normalize_edge_base_url(&request.base_url)?;
+    let status = normalize_edge_status(request.status.as_deref(), "healthy")?;
+    let cache_max_bytes = normalize_cache_max_bytes(request.cache_max_bytes)?;
+
+    let row: (String, String, Option<String>, String, Option<i64>, Option<String>) =
+        sqlx::query_as(
+            "
+            INSERT INTO rend.edge_nodes (
+              edge_id,
+              region,
+              base_url,
+              cache_max_bytes,
+              status,
+              last_heartbeat_at
+            )
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT (edge_id) DO UPDATE
+            SET region = EXCLUDED.region,
+                base_url = EXCLUDED.base_url,
+                cache_max_bytes = EXCLUDED.cache_max_bytes,
+                status = EXCLUDED.status,
+                last_heartbeat_at = now()
+            RETURNING edge_id,
+                      region,
+                      base_url,
+                      status,
+                      cache_max_bytes,
+                      to_char(last_heartbeat_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+            ",
+        )
+        .bind(edge_id)
+        .bind(region)
+        .bind(base_url)
+        .bind(cache_max_bytes)
+        .bind(status)
+        .fetch_one(db)
+        .await
+        .map_err(AppError::internal)?;
+
+    Ok(edge_node_response(row))
+}
+
+async fn heartbeat_edge_inner(
+    db: &PgPool,
+    request: EdgeHeartbeatRequest,
+) -> Result<EdgeNodeResponse, AppError> {
+    let edge_id = normalize_edge_name("edge_id", &request.edge_id)?;
+    let status = normalize_edge_status(request.status.as_deref(), "healthy")?;
+    let cache_max_bytes = normalize_cache_max_bytes(request.cache_max_bytes)?;
+
+    let row: Option<(String, String, Option<String>, String, Option<i64>, Option<String>)> =
+        sqlx::query_as(
+            "
+            UPDATE rend.edge_nodes
+            SET status = $2,
+                cache_max_bytes = COALESCE($3, cache_max_bytes),
+                last_heartbeat_at = now()
+            WHERE edge_id = $1
+              AND status <> 'removed'
+            RETURNING edge_id,
+                      region,
+                      base_url,
+                      status,
+                      cache_max_bytes,
+                      to_char(last_heartbeat_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+            ",
+        )
+        .bind(edge_id)
+        .bind(status)
+        .bind(cache_max_bytes)
+        .fetch_optional(db)
+        .await
+        .map_err(AppError::internal)?;
+
+    row.map(edge_node_response)
+        .ok_or_else(|| AppError::not_found("edge node not registered"))
+}
+
+fn edge_node_response(
+    row: (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<String>,
+    ),
+) -> EdgeNodeResponse {
+    let (edge_id, region, base_url, status, cache_max_bytes, last_heartbeat_at) = row;
+    EdgeNodeResponse {
+        edge_id,
+        region,
+        base_url,
+        status,
+        cache_max_bytes,
+        last_heartbeat_at,
+    }
+}
+
+fn normalize_edge_name(field: &str, value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(AppError::bad_request(format!(
+            "{field} must be 1-128 characters and contain only letters, numbers, '-', '_', or '.'"
+        )));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_edge_base_url(base_url: &str) -> Result<String, AppError> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if base_url.is_empty() {
+        return Err(AppError::bad_request("base_url must not be empty"));
+    }
+
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|_| AppError::bad_request("base_url must be an absolute http(s) URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AppError::bad_request(
+            "base_url must be an absolute http(s) URL",
+        ));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::bad_request(
+            "base_url must not include credentials, query, or fragment",
+        ));
+    }
+
+    Ok(base_url.to_owned())
+}
+
+fn normalize_edge_status(status: Option<&str>, default: &str) -> Result<String, AppError> {
+    let status = status.unwrap_or(default).trim().to_ascii_lowercase();
+    if matches!(
+        status.as_str(),
+        "registered" | "healthy" | "draining" | "unhealthy" | "removed"
+    ) {
+        Ok(status)
+    } else {
+        Err(AppError::bad_request("unsupported edge status"))
+    }
+}
+
+fn normalize_cache_max_bytes(cache_max_bytes: Option<i64>) -> Result<Option<i64>, AppError> {
+    if matches!(cache_max_bytes, Some(bytes) if bytes < 0) {
+        return Err(AppError::bad_request(
+            "cache_max_bytes must be non-negative",
+        ));
+    }
+
+    Ok(cache_max_bytes)
 }
 
 fn media_worker_id() -> String {
@@ -682,6 +971,26 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     };
 
     (status, Json(body)).into_response()
+}
+
+async fn register_edge(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EdgeRegistrationRequest>,
+) -> Response {
+    match register_edge_inner(&state.db, request).await {
+        Ok(edge) => (StatusCode::OK, Json(EdgeNodeEnvelope { edge })).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn heartbeat_edge(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EdgeHeartbeatRequest>,
+) -> Response {
+    match heartbeat_edge_inner(&state.db, request).await {
+        Ok(edge) => (StatusCode::OK, Json(EdgeNodeEnvelope { edge })).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn create_video(
@@ -741,6 +1050,7 @@ async fn delete_asset_inner(
         maybe_purge_edge(
             &state.db,
             &state.http,
+            &state.config.edge_registry,
             &state.config.edge_purge,
             &asset_id,
             None,
@@ -1805,6 +2115,7 @@ async fn create_video_inner(
     maybe_warm_edge(
         Some(&state.db),
         &state.http,
+        &state.config.edge_registry,
         &state.config.edge_warm,
         &asset_id,
         &playable_state,
@@ -1932,6 +2243,7 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
     maybe_warm_edge(
         Some(&state.db),
         &state.http,
+        &state.config.edge_registry,
         &state.config.edge_warm,
         &job.asset_id,
         &outcome.playable_state,
@@ -2213,85 +2525,231 @@ fn playback_artifact_path(playable_state: &str) -> Option<&'static str> {
 async fn maybe_warm_edge(
     db: Option<&PgPool>,
     http: &reqwest::Client,
+    registry: &EdgeRegistryConfig,
     config: &EdgeWarmConfig,
     asset_id: &str,
     playable_state: &str,
     generated_artifact_paths: &[String],
 ) {
-    let Some(request) =
-        edge_warm_request(config, asset_id, playable_state, generated_artifact_paths)
-    else {
+    let Some(request) = edge_warm_request(
+        asset_id,
+        playable_state,
+        generated_artifact_paths,
+        config.max_artifacts,
+    ) else {
         return;
     };
+    let targets = edge_warm_fanout_targets(db, registry, config).await;
+    if targets.is_empty() {
+        return;
+    }
 
     if let Some(db) = db {
         record_edge_warm_event(
             db,
             asset_id,
             events::EVENT_EDGE_WARMING_ATTEMPTED,
-            events::edge_warming_metadata(&request.artifact_paths),
+            events::edge_warming_metadata(
+                &request.artifact_paths,
+                edge_fanout_attempts_value(&targets),
+            ),
         )
         .await;
     }
 
-    match send_edge_warm_request(http, config, &request).await {
-        Ok(()) => {
-            if let Some(db) = db {
-                record_edge_warm_event(
-                    db,
-                    asset_id,
-                    events::EVENT_EDGE_WARMING_SUCCEEDED,
-                    events::edge_warming_metadata(&request.artifact_paths),
-                )
-                .await;
-            }
-        }
-        Err(error) => {
-            if let Some(db) = db {
-                record_edge_warm_event(
-                    db,
-                    asset_id,
-                    events::EVENT_EDGE_WARMING_FAILED,
-                    events::edge_warming_failed_metadata(
-                        &request.artifact_paths,
-                        error.reason,
-                        error.status,
-                    ),
-                )
-                .await;
-            }
-            tracing::warn!(
-                asset_id,
-                error = %error,
-                "edge warm request failed; upload remains playable",
-            );
-        }
-    }
-}
+    let results = fanout_edge_warm_requests(http, &config.internal_token, &targets, &request).await;
+    let success_count = results
+        .iter()
+        .filter(|result| result.status == "succeeded")
+        .count();
 
-async fn record_edge_warm_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
-    if let Err(error) = events::insert_asset_event_pool(db, asset_id, event_type, metadata).await {
-        tracing::warn!(
+    if let Some(db) = db {
+        let event_type = if success_count > 0 {
+            events::EVENT_EDGE_WARMING_SUCCEEDED
+        } else {
+            events::EVENT_EDGE_WARMING_FAILED
+        };
+        record_edge_warm_event(
+            db,
             asset_id,
             event_type,
-            error = %error,
-            "failed to record edge warm lifecycle event",
+            events::edge_warming_metadata(
+                &request.artifact_paths,
+                edge_fanout_results_value(&results),
+            ),
+        )
+        .await;
+    }
+
+    for result in results.iter().filter(|result| result.status == "failed") {
+        tracing::warn!(
+            asset_id,
+            edge_id = %result.edge_id,
+            region = result.region.as_deref(),
+            source = result.source,
+            reason = result.reason.unwrap_or("unknown"),
+            status = result.http_status,
+            "edge warm fanout failed; upload remains playable",
         );
     }
 }
 
-fn edge_warm_request(
+async fn fanout_edge_warm_requests(
+    http: &reqwest::Client,
+    internal_token: &str,
+    targets: &[EdgeFanoutTarget],
+    request: &EdgeWarmRequest,
+) -> Vec<EdgeFanoutResult> {
+    let mut results = Vec::with_capacity(targets.len());
+    for target in targets {
+        match send_edge_warm_request(http, internal_token, &target.action_url, request).await {
+            Ok(response) => results.push(EdgeFanoutResult {
+                edge_id: target.edge_id.clone(),
+                region: target.region.clone(),
+                source: target.source,
+                status: "succeeded",
+                http_status: None,
+                reason: None,
+                warm_summary: Some(response.summary),
+                purge_summary: None,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    edge_id = %target.edge_id,
+                    region = target.region.as_deref(),
+                    source = target.source,
+                    error = %error,
+                    "edge warm request failed",
+                );
+                results.push(EdgeFanoutResult {
+                    edge_id: target.edge_id.clone(),
+                    region: target.region.clone(),
+                    source: target.source,
+                    status: "failed",
+                    http_status: error.status,
+                    reason: Some(error.reason),
+                    warm_summary: None,
+                    purge_summary: None,
+                });
+            }
+        }
+    }
+
+    results
+}
+
+async fn edge_warm_fanout_targets(
+    db: Option<&PgPool>,
+    registry: &EdgeRegistryConfig,
     config: &EdgeWarmConfig,
+) -> Vec<EdgeFanoutTarget> {
+    let mut targets = registered_edge_fanout_targets(db, registry, "warm").await;
+    if !targets.is_empty() {
+        return targets;
+    }
+
+    if let Some(url) = config.url.as_deref() {
+        targets.push(EdgeFanoutTarget {
+            edge_id: "single-edge-env-fallback".to_owned(),
+            region: None,
+            action_url: url.to_owned(),
+            source: "env_fallback",
+        });
+    }
+
+    targets
+}
+
+async fn registered_edge_fanout_targets(
+    db: Option<&PgPool>,
+    registry: &EdgeRegistryConfig,
+    action: &str,
+) -> Vec<EdgeFanoutTarget> {
+    let Some(db) = db else {
+        return Vec::new();
+    };
+
+    let edges = match fetch_active_edge_nodes(db, registry.active_heartbeat_window).await {
+        Ok(edges) => edges,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to fetch registered edge nodes; using edge env fallback if configured",
+            );
+            Vec::new()
+        }
+    };
+
+    edges
+        .into_iter()
+        .map(|edge| EdgeFanoutTarget {
+            action_url: edge_action_url(&edge.base_url, action),
+            edge_id: edge.edge_id,
+            region: Some(edge.region),
+            source: "registry",
+        })
+        .collect()
+}
+
+async fn fetch_active_edge_nodes(
+    db: &PgPool,
+    active_heartbeat_window: Duration,
+) -> sqlx::Result<Vec<RegisteredEdgeNode>> {
+    let active_after_secs = i64::try_from(active_heartbeat_window.as_secs()).unwrap_or(i64::MAX);
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "
+        SELECT edge_id, region, base_url
+        FROM rend.edge_nodes
+        WHERE status = 'healthy'
+          AND base_url IS NOT NULL
+          AND btrim(base_url) <> ''
+          AND last_heartbeat_at IS NOT NULL
+          AND last_heartbeat_at >= now() - ($1::double precision * interval '1 second')
+        ORDER BY region, edge_id
+        ",
+    )
+    .bind(active_after_secs)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(edge_id, region, base_url)| RegisteredEdgeNode {
+            edge_id,
+            region,
+            base_url: base_url.trim_end_matches('/').to_owned(),
+        })
+        .collect())
+}
+
+fn edge_action_url(base_url: &str, action: &str) -> String {
+    format!("{}/internal/{action}", base_url.trim_end_matches('/'))
+}
+
+fn edge_fanout_attempts_value(targets: &[EdgeFanoutTarget]) -> Value {
+    let attempts = targets
+        .iter()
+        .map(|target| EdgeFanoutAttempt {
+            edge_id: target.edge_id.clone(),
+            region: target.region.clone(),
+            source: target.source,
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_value(attempts).unwrap_or_else(|_| Value::Array(Vec::new()))
+}
+
+fn edge_fanout_results_value(results: &[EdgeFanoutResult]) -> Value {
+    serde_json::to_value(results).unwrap_or_else(|_| Value::Array(Vec::new()))
+}
+
+fn edge_warm_request(
     asset_id: &str,
     playable_state: &str,
     generated_artifact_paths: &[String],
+    max_artifacts: usize,
 ) -> Option<EdgeWarmRequest> {
-    config.url.as_ref()?;
-    let artifact_paths = edge_warm_artifact_paths(
-        playable_state,
-        generated_artifact_paths,
-        config.max_artifacts,
-    );
+    let artifact_paths =
+        edge_warm_artifact_paths(playable_state, generated_artifact_paths, max_artifacts);
     (!artifact_paths.is_empty()).then(|| EdgeWarmRequest {
         asset_id: asset_id.to_owned(),
         artifact_paths,
@@ -2336,6 +2794,17 @@ fn edge_warm_artifact_paths(
     artifact_paths
 }
 
+async fn record_edge_warm_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
+    if let Err(error) = events::insert_asset_event_pool(db, asset_id, event_type, metadata).await {
+        tracing::warn!(
+            asset_id,
+            event_type,
+            error = %error,
+            "failed to record edge warm lifecycle event",
+        );
+    }
+}
+
 fn push_unique_artifact_path(paths: &mut Vec<String>, path: &str) {
     if !paths.iter().any(|existing| existing == path) {
         paths.push(path.to_owned());
@@ -2349,23 +2818,23 @@ fn is_hls_segment_artifact_path(path: &str) -> bool {
 
 async fn send_edge_warm_request(
     http: &reqwest::Client,
-    config: &EdgeWarmConfig,
+    internal_token: &str,
+    url: &str,
     request: &EdgeWarmRequest,
-) -> std::result::Result<(), EdgeWarmFailure> {
-    let Some(url) = config.url.as_deref() else {
-        return Ok(());
-    };
-
+) -> std::result::Result<EdgeWarmResponse, EdgeWarmFailure> {
     let response = http
         .post(url)
-        .header("x-rend-internal-token", &config.internal_token)
+        .header("x-rend-internal-token", internal_token)
         .json(request)
         .send()
         .await
         .map_err(|error| EdgeWarmFailure::request(error.to_string()))?;
     let status = response.status();
     if status.is_success() {
-        return Ok(());
+        return response
+            .json::<EdgeWarmResponse>()
+            .await
+            .map_err(|error| EdgeWarmFailure::request(error.to_string()));
     }
 
     let body = response
@@ -2385,13 +2854,15 @@ async fn send_edge_warm_request(
 async fn maybe_purge_edge(
     db: &PgPool,
     http: &reqwest::Client,
+    registry: &EdgeRegistryConfig,
     config: &EdgePurgeConfig,
     asset_id: &str,
     artifact_paths: Option<Vec<String>>,
 ) -> bool {
-    let Some(_url) = config.url.as_deref() else {
+    let targets = edge_purge_fanout_targets(db, registry, config).await;
+    if targets.is_empty() {
         return false;
-    };
+    }
 
     let request = EdgePurgeRequest {
         asset_id: asset_id.to_owned(),
@@ -2403,43 +2874,113 @@ async fn maybe_purge_edge(
         db,
         asset_id,
         events::EVENT_EDGE_PURGE_ATTEMPTED,
-        events::edge_purge_attempted_metadata(artifact_paths),
+        events::edge_purge_metadata(artifact_paths, edge_fanout_attempts_value(&targets)),
     )
     .await;
 
-    match send_edge_purge_request(http, config, &request).await {
-        Ok(response) => {
-            record_edge_purge_event(
-                db,
-                asset_id,
-                events::EVENT_EDGE_PURGE_SUCCEEDED,
-                events::edge_purge_succeeded_metadata(
-                    artifact_paths,
-                    response.purged.len(),
-                    response.missing.len(),
-                    response.rejected.len(),
-                    response.errors.len(),
-                ),
-            )
-            .await;
-        }
-        Err(error) => {
-            record_edge_purge_event(
-                db,
-                asset_id,
-                events::EVENT_EDGE_PURGE_FAILED,
-                events::edge_purge_failed_metadata(artifact_paths, error.reason, error.status),
-            )
-            .await;
-            tracing::warn!(
-                asset_id,
-                error = %error,
-                "edge purge request failed; asset deletion remains committed",
-            );
-        }
+    let results =
+        fanout_edge_purge_requests(http, &config.internal_token, &targets, &request).await;
+    let success_count = results
+        .iter()
+        .filter(|result| result.status == "succeeded")
+        .count();
+    let event_type = if success_count > 0 {
+        events::EVENT_EDGE_PURGE_SUCCEEDED
+    } else {
+        events::EVENT_EDGE_PURGE_FAILED
+    };
+    record_edge_purge_event(
+        db,
+        asset_id,
+        event_type,
+        events::edge_purge_metadata(artifact_paths, edge_fanout_results_value(&results)),
+    )
+    .await;
+
+    for result in results.iter().filter(|result| result.status == "failed") {
+        tracing::warn!(
+            asset_id,
+            edge_id = %result.edge_id,
+            region = result.region.as_deref(),
+            source = result.source,
+            reason = result.reason.unwrap_or("unknown"),
+            status = result.http_status,
+            "edge purge fanout failed; asset deletion remains committed",
+        );
     }
 
     true
+}
+
+async fn fanout_edge_purge_requests(
+    http: &reqwest::Client,
+    internal_token: &str,
+    targets: &[EdgeFanoutTarget],
+    request: &EdgePurgeRequest,
+) -> Vec<EdgeFanoutResult> {
+    let mut results = Vec::with_capacity(targets.len());
+    for target in targets {
+        match send_edge_purge_request(http, internal_token, &target.action_url, request).await {
+            Ok(response) => results.push(EdgeFanoutResult {
+                edge_id: target.edge_id.clone(),
+                region: target.region.clone(),
+                source: target.source,
+                status: "succeeded",
+                http_status: None,
+                reason: None,
+                warm_summary: None,
+                purge_summary: Some(EdgePurgeResponseSummary {
+                    purged: response.purged.len(),
+                    missing: response.missing.len(),
+                    rejected: response.rejected.len(),
+                    errors: response.errors.len(),
+                }),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    edge_id = %target.edge_id,
+                    region = target.region.as_deref(),
+                    source = target.source,
+                    error = %error,
+                    "edge purge request failed",
+                );
+                results.push(EdgeFanoutResult {
+                    edge_id: target.edge_id.clone(),
+                    region: target.region.clone(),
+                    source: target.source,
+                    status: "failed",
+                    http_status: error.status,
+                    reason: Some(error.reason),
+                    warm_summary: None,
+                    purge_summary: None,
+                });
+            }
+        }
+    }
+
+    results
+}
+
+async fn edge_purge_fanout_targets(
+    db: &PgPool,
+    registry: &EdgeRegistryConfig,
+    config: &EdgePurgeConfig,
+) -> Vec<EdgeFanoutTarget> {
+    let mut targets = registered_edge_fanout_targets(Some(db), registry, "purge").await;
+    if !targets.is_empty() {
+        return targets;
+    }
+
+    if let Some(url) = config.url.as_deref() {
+        targets.push(EdgeFanoutTarget {
+            edge_id: "single-edge-env-fallback".to_owned(),
+            region: None,
+            action_url: url.to_owned(),
+            source: "env_fallback",
+        });
+    }
+
+    targets
 }
 
 async fn record_edge_purge_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
@@ -2455,16 +2996,13 @@ async fn record_edge_purge_event(db: &PgPool, asset_id: &str, event_type: &str, 
 
 async fn send_edge_purge_request(
     http: &reqwest::Client,
-    config: &EdgePurgeConfig,
+    internal_token: &str,
+    url: &str,
     request: &EdgePurgeRequest,
 ) -> std::result::Result<EdgePurgeResponse, EdgePurgeFailure> {
-    let Some(url) = config.url.as_deref() else {
-        return Ok(EdgePurgeResponse::default());
-    };
-
     let response = http
         .post(url)
-        .header("x-rend-internal-token", &config.internal_token)
+        .header("x-rend-internal-token", internal_token)
         .json(request)
         .send()
         .await
@@ -2539,6 +3077,29 @@ async fn require_dev_api_key(
     next: Next,
 ) -> Response {
     if is_authorized(request.headers(), &state.config.dev_api_key) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_owned(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+async fn require_internal_edge_token(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let provided = request
+        .headers()
+        .get("x-rend-internal-token")
+        .and_then(|value| value.to_str().ok());
+
+    if provided == Some(state.config.edge_registry.internal_token.as_str()) {
         next.run(request).await
     } else {
         (
