@@ -27,6 +27,9 @@ use axum::{
 use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame};
 use rend_config::{env_bool, env_duration_secs, env_socket_addr, env_string, load_dotenv};
+use rend_playback_auth::{
+    PlaybackAuthError, PlaybackTokenIssuer, SigningKey, current_unix_timestamp,
+};
 use serde::Serialize;
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
@@ -50,6 +53,7 @@ struct ApiConfig {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     playback_base_url: String,
+    playback_token_issuer: PlaybackTokenIssuer,
     media_processing: media::MediaProcessingConfig,
     auto_migrate: bool,
     request_timeout: Duration,
@@ -63,6 +67,13 @@ impl ApiConfig {
         let s3_bucket = env_string("S3_BUCKET", "rend-local");
         let aws_access_key_id = env_string("AWS_ACCESS_KEY_ID", "rend_minio");
         let aws_secret_access_key = env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password");
+        let playback_signing_key_id =
+            env_string("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key");
+        let playback_signing_secret = env_string(
+            "REND_PLAYBACK_SIGNING_SECRET",
+            "local-dev-playback-signing-secret",
+        );
+        let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
 
         for (key, value) in [
             ("REND_DEV_API_KEY", &dev_api_key),
@@ -74,6 +85,14 @@ impl ApiConfig {
         ] {
             anyhow::ensure!(!value.trim().is_empty(), "{key} must not be empty");
         }
+
+        let playback_token_issuer = PlaybackTokenIssuer::new(
+            SigningKey::new(
+                playback_signing_key_id,
+                playback_signing_secret.into_bytes(),
+            )?,
+            playback_token_ttl,
+        )?;
 
         Ok(Self {
             bind_addr: env_socket_addr("REND_API_BIND_ADDR", "127.0.0.1:4000")?,
@@ -90,6 +109,7 @@ impl ApiConfig {
             aws_access_key_id,
             aws_secret_access_key,
             playback_base_url: env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100"),
+            playback_token_issuer,
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
@@ -384,6 +404,15 @@ async fn create_video_inner(
             "asset playable state differed after media processing",
         );
     }
+    let now = current_unix_timestamp().map_err(AppError::internal)?;
+    let playback_url = playback_url(
+        &state.config.playback_base_url,
+        &asset_id,
+        &playable_state,
+        &state.config.playback_token_issuer,
+        now,
+    )
+    .map_err(AppError::internal)?;
 
     Ok(CreateVideoResponse {
         asset_id: asset_id.clone(),
@@ -392,7 +421,7 @@ async fn create_video_inner(
         source_artifact_id,
         source_object_key,
         byte_size,
-        playback_url: playback_url(&state.config.playback_base_url, &asset_id),
+        playback_url,
     })
 }
 
@@ -437,8 +466,28 @@ fn source_object_key(asset_id: &str) -> String {
     format!("videos/{asset_id}/source")
 }
 
-fn playback_url(base_url: &str, asset_id: &str) -> String {
-    format!("{}/v/{asset_id}/source", base_url.trim_end_matches('/'))
+fn playback_url(
+    base_url: &str,
+    asset_id: &str,
+    playable_state: &str,
+    issuer: &PlaybackTokenIssuer,
+    now: u64,
+) -> Result<String, PlaybackAuthError> {
+    let artifact_path = playback_artifact_path(playable_state);
+    let token = issuer.issue_asset_playback_token(asset_id, now)?;
+
+    Ok(format!(
+        "{}/v/{asset_id}/{artifact_path}?token={token}",
+        base_url.trim_end_matches('/')
+    ))
+}
+
+fn playback_artifact_path(playable_state: &str) -> &'static str {
+    match playable_state {
+        "hls_ready" => "hls/master.m3u8",
+        "opener_ready" => "opener.mp4",
+        _ => "opener.mp4",
+    }
 }
 
 async fn mark_asset_failed(state: &AppState, asset_id: &str) {
@@ -644,6 +693,7 @@ impl HttpBody for CountedRequestBody {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use rend_playback_auth::{POLICY_ASSET_PLAYBACK_V1, decode_unverified_claims};
 
     #[test]
     fn bearer_authorization_accepts_matching_dev_key() {
@@ -678,11 +728,28 @@ mod tests {
     }
 
     #[test]
-    fn playback_url_uses_rend_edge_shape() {
-        assert_eq!(
-            playback_url("http://127.0.0.1:4100/", "asset-123"),
-            "http://127.0.0.1:4100/v/asset-123/source".to_owned()
-        );
+    fn playback_url_uses_signed_hls_edge_shape() {
+        let issuer = PlaybackTokenIssuer::new(
+            SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap(),
+            Duration::from_secs(600),
+        )
+        .unwrap();
+        let url = playback_url(
+            "http://127.0.0.1:4100/",
+            "asset-123",
+            "hls_ready",
+            &issuer,
+            1_800_000_000,
+        )
+        .unwrap();
+        let (path, token) = url.split_once("?token=").unwrap();
+        let claims = decode_unverified_claims(token).unwrap();
+
+        assert_eq!(path, "http://127.0.0.1:4100/v/asset-123/hls/master.m3u8");
+        assert_eq!(claims.asset_id, "asset-123");
+        assert_eq!(claims.exp, 1_800_000_600);
+        assert_eq!(claims.kid, "kid-a");
+        assert_eq!(claims.policy, POLICY_ASSET_PLAYBACK_V1);
     }
 
     #[test]
