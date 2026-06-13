@@ -73,10 +73,7 @@ pub fn asset_created_metadata(source_state: &str, playable_state: &str) -> Value
     })
 }
 
-pub fn source_upload_started_metadata(
-    content_type: &str,
-    content_length: Option<i64>,
-) -> Value {
+pub fn source_upload_started_metadata(content_type: &str, content_length: Option<i64>) -> Value {
     json!({
         "content_type": content_type,
         "content_length": content_length,
