@@ -389,6 +389,16 @@
   93% { transform: scaleY(0.1); }
 }
 
+@keyframes grow {
+  0% { transform: scaleY(0); }
+  100% { transform: scaleY(1); }
+}
+
+@keyframes unlock {
+  0%, 100% { transform: rotate(0deg); }
+  22%, 70% { transform: rotate(-32deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -412,8 +422,20 @@
   .anim-swing,
   .anim-blink,
   .anim-beat,
-  .anim-eyes {
+  .anim-eyes,
+  .anim-unlock,
+  .anim-grow {
     animation: none;
     opacity: 1;
+  }
+
+  .anim-grow {
+    transform: none;
+  }
+
+  .cmp-mark path,
+  .cmp-ring path {
+    stroke-dashoffset: 0;
+    animation: none;
   }
 }
