@@ -150,6 +150,7 @@ bun run backend:smoke:async-media
 bun run backend:smoke:media
 bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
+bun run backend:smoke:edge-coalescing
 bun run backend:smoke:asset-events
 bun run backend:smoke:lifecycle-sse
 bun run backend:smoke:delete-purge
@@ -191,6 +192,32 @@ idempotency, confirms new playback bootstrap returns 404, checks durable
 deletion and purge lifecycle events, verifies the cached manifest file was
 removed, and proves the already-issued signed edge URL can still work while the
 token and origin object remain valid.
+
+The edge coalescing smoke uploads and processes a fixture, fetches a signed
+opener URL from playback bootstrap, purges that opener from the edge cache,
+launches concurrent cold requests for the same URL, and verifies one `MISS`, at
+least one `COALESCED`, identical nonempty bodies, and a later `HIT`.
+
+Edge cache behavior:
+
+- `rend-edge` validates signed playback tokens locally before cache lookup,
+  coalescing, origin fetch, or cache file I/O. The playback hot path does not
+  call Postgres or the control plane.
+- `X-Rend-Cache: HIT` means the response was served from an existing local
+  cache file.
+- `X-Rend-Cache: MISS` means this request led the cold fill, fetched from the
+  S3-compatible origin, and wrote the local cache through a temp file followed
+  by rename.
+- `X-Rend-Cache: COALESCED` means this request waited for an in-flight fill for
+  the same validated cache key and then served the filled local cache file.
+- Cold fills are coalesced per playback artifact. Different artifacts fill
+  independently and do not wait behind a single global origin lock.
+- `REND_EDGE_MAX_IN_FLIGHT_FILLS` bounds distinct concurrent cold fills. The
+  default is `64`, the hard max is `1024`, and new distinct fills above the
+  limit fail fast with HTTP 503 while same-artifact waiters may still join the
+  existing fill.
+- Current cold fills still buffer the origin object before writing the cache and
+  serving the response. True stream-while-writing cache fill remains a follow-up.
 
 Manual upload, bootstrap, and local playback:
 
