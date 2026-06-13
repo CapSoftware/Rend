@@ -115,6 +115,9 @@ Playback URLs are signed with `REND_PLAYBACK_SIGNING_KEY_ID`,
 processes must use the same key id and secret. The local player bootstrap
 returns up to `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS` first HLS segment
 hints, defaulting to `2`.
+Set `REND_EDGE_PURGE_URL` to the local edge purge endpoint when you want asset
+deletion to make a best-effort cache purge call, for example
+`http://127.0.0.1:4100/internal/purge`.
 
 ```bash
 cp .env.example .env.local
@@ -149,6 +152,7 @@ bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
 bun run backend:smoke:asset-events
 bun run backend:smoke:lifecycle-sse
+bun run backend:smoke:delete-purge
 ```
 
 The smoke flow starts local dependencies, checks `ffmpeg -version` and
@@ -180,6 +184,13 @@ The lifecycle SSE smoke opens authenticated `GET /v1/events`, uploads a
 fixture, verifies durable lifecycle frames through media processing and edge
 warming, and reconnects with `Last-Event-ID` to prove replay resumes after the
 sequence cursor.
+
+The delete/purge smoke uploads and processes a fixture, fetches the signed edge
+manifest to populate the local cache, deletes the asset, verifies repeat DELETE
+idempotency, confirms new playback bootstrap returns 404, checks durable
+deletion and purge lifecycle events, verifies the cached manifest file was
+removed, and proves the already-issued signed edge URL can still work while the
+token and origin object remain valid.
 
 Manual upload, bootstrap, and local playback:
 
@@ -215,6 +226,16 @@ curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
   -H 'authorization: Bearer dev-api-key' | jq
 
+# Delete is authenticated and idempotent. It marks rend.assets.deleted_at and,
+# when REND_EDGE_PURGE_URL is configured, asks rend-edge to purge local cached
+# playback bytes for the asset.
+curl -s -X DELETE http://127.0.0.1:4000/v1/assets/$asset_id \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+# New bootstrap/token issuance is blocked after deletion.
+curl -i http://127.0.0.1:4000/v1/assets/$asset_id/playback \
+  -H 'authorization: Bearer dev-api-key'
+
 after_sequence=$(
   curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
     -H 'authorization: Bearer dev-api-key' | jq -r '.next_after_sequence // 0'
@@ -245,6 +266,26 @@ curl -N "http://127.0.0.1:4000/v1/events?after_sequence=0" \
   -H 'authorization: Bearer dev-api-key' \
   -H "Last-Event-ID: $after_sequence" \
   -H 'accept: text/event-stream'
+
+# Edge purge is an internal operation protected by x-rend-internal-token. With
+# artifact_paths omitted or empty, rend-edge removes supported local playback
+# cache files under videos/<asset_id>/.
+curl -s -X POST http://127.0.0.1:4100/internal/purge \
+  -H 'x-rend-internal-token: dev-internal-token' \
+  -H 'content-type: application/json' \
+  --data "{\"asset_id\":\"$asset_id\"}" | jq
+
+# To purge a bounded explicit list instead:
+curl -s -X POST http://127.0.0.1:4100/internal/purge \
+  -H 'x-rend-internal-token: dev-internal-token' \
+  -H 'content-type: application/json' \
+  --data "{\"asset_id\":\"$asset_id\",\"artifact_paths\":[\"opener.mp4\",\"hls/master.m3u8\"]}" | jq
+
+# Deletion semantics are intentionally narrow: deletion blocks new bootstrap
+# responses and future token issuance, and purge removes local edge-cache bytes.
+# It does not revoke already-issued signed playback URLs. Those URLs may remain
+# valid until token expiry if the origin objects still exist and no real edge
+# revocation layer has been implemented.
 
 open "http://127.0.0.1:4000/player?asset_id=$asset_id"
 
