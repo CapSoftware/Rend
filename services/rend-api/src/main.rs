@@ -996,6 +996,104 @@ mod tests {
     }
 
     #[test]
+    fn edge_warm_request_is_absent_when_warm_url_is_unconfigured() {
+        let config = EdgeWarmConfig {
+            url: None,
+            internal_token: "internal".to_owned(),
+            max_artifacts: 4,
+        };
+        let generated = vec!["hls/segment_00000.ts".to_owned()];
+
+        assert!(edge_warm_request(&config, "asset-123", "hls_ready", &generated).is_none());
+    }
+
+    #[test]
+    fn edge_warm_artifact_paths_select_opener_manifest_and_first_segments() {
+        let generated = vec![
+            "hls/segment_00002.ts".to_owned(),
+            "hls/segment_00000.ts".to_owned(),
+            "thumbnail.jpg".to_owned(),
+            "hls/segment_00001.ts".to_owned(),
+        ];
+
+        assert_eq!(
+            edge_warm_artifact_paths("hls_ready", &generated, 4),
+            vec![
+                "opener.mp4".to_owned(),
+                "hls/master.m3u8".to_owned(),
+                "hls/segment_00000.ts".to_owned(),
+                "hls/segment_00001.ts".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn edge_warm_artifact_paths_skip_unplayable_states() {
+        assert!(edge_warm_artifact_paths("failed", &[], 4).is_empty());
+        assert!(edge_warm_artifact_paths("not_playable", &[], 4).is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
+        let (url, recorder) = spawn_warm_recorder(StatusCode::OK).await;
+        let config = EdgeWarmConfig {
+            url: Some(url),
+            internal_token: "warm-secret".to_owned(),
+            max_artifacts: 3,
+        };
+        let generated = vec![
+            "hls/segment_00001.ts".to_owned(),
+            "hls/segment_00000.ts".to_owned(),
+        ];
+
+        maybe_warm_edge(
+            &reqwest::Client::new(),
+            &config,
+            "asset-123",
+            "hls_ready",
+            &generated,
+        )
+        .await;
+
+        assert_eq!(recorder.count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            recorder.last_token.lock().unwrap().as_deref(),
+            Some("warm-secret")
+        );
+        let request = recorder.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.asset_id, "asset-123");
+        assert_eq!(
+            request.artifact_paths,
+            vec![
+                "opener.mp4".to_owned(),
+                "hls/master.m3u8".to_owned(),
+                "hls/segment_00000.ts".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_warm_edge_swallows_warm_endpoint_failure() {
+        let (url, recorder) = spawn_warm_recorder(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let config = EdgeWarmConfig {
+            url: Some(url),
+            internal_token: "warm-secret".to_owned(),
+            max_artifacts: 4,
+        };
+
+        maybe_warm_edge(
+            &reqwest::Client::new(),
+            &config,
+            "asset-123",
+            "opener_ready",
+            &["opener.mp4".to_owned()],
+        )
+        .await;
+
+        assert_eq!(recorder.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn content_type_defaults_to_octet_stream() {
         assert_eq!(
             request_content_type(&HeaderMap::new()),
