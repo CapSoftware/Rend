@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     path::PathBuf,
     sync::{
         Arc,
@@ -23,6 +24,7 @@ const DEFAULT_BATCH_SIZE: usize = 100;
 const HARD_BATCH_SIZE: usize = 1000;
 const DEFAULT_SPOOL_MAX_BYTES: usize = 10 * 1024 * 1024;
 const HARD_SPOOL_MAX_BYTES: usize = 1024 * 1024 * 1024;
+const QUARANTINE_FILE_NAME: &str = "playback-events.quarantine.jsonl";
 
 #[derive(Clone)]
 pub(crate) struct TelemetryConfig {
@@ -286,6 +288,10 @@ impl LocalSpool {
         self.dir.join("playback-events.jsonl")
     }
 
+    fn quarantine_path(&self) -> PathBuf {
+        self.dir.join(QUARANTINE_FILE_NAME)
+    }
+
     async fn append_event(&self, event: &PlaybackTelemetryEvent) -> Result<bool> {
         let mut line = serde_json::to_vec(event).context("failed to serialize telemetry event")?;
         line.push(b'\n');
@@ -336,6 +342,147 @@ impl LocalSpool {
             Err(error) => Err(error).context("failed to inspect telemetry spool size"),
         }
     }
+
+    async fn append_quarantine_line_locked(&self, line: &str) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .await
+            .with_context(|| format!("failed to create telemetry spool {}", self.dir.display()))?;
+        let path = self.quarantine_path();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .with_context(|| format!("failed to open telemetry quarantine {}", path.display()))?;
+        file.write_all(line.as_bytes())
+            .await
+            .with_context(|| format!("failed to write telemetry quarantine {}", path.display()))?;
+        if !line.ends_with('\n') {
+            file.write_all(b"\n").await.with_context(|| {
+                format!("failed to write telemetry quarantine {}", path.display())
+            })?;
+        }
+        file.flush()
+            .await
+            .with_context(|| format!("failed to flush telemetry quarantine {}", path.display()))?;
+        Ok(())
+    }
+
+    async fn rewrite_records_locked(&self, records: &[SpoolRecord]) -> Result<()> {
+        let path = self.path();
+        if records.is_empty() {
+            fs::remove_file(&path).await.ok();
+            return Ok(());
+        }
+
+        fs::create_dir_all(&self.dir)
+            .await
+            .with_context(|| format!("failed to create telemetry spool {}", self.dir.display()))?;
+        let temp_path = self.dir.join(format!(
+            "playback-events.jsonl.rewrite.{}.{}.tmp",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to open telemetry spool rewrite {}",
+                    temp_path.display()
+                )
+            })?;
+        for record in records {
+            file.write_all(record.raw_line.as_bytes())
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to write telemetry spool rewrite {}",
+                        temp_path.display()
+                    )
+                })?;
+            if !record.raw_line.ends_with('\n') {
+                file.write_all(b"\n").await.with_context(|| {
+                    format!(
+                        "failed to write telemetry spool rewrite {}",
+                        temp_path.display()
+                    )
+                })?;
+            }
+        }
+        file.flush().await.with_context(|| {
+            format!(
+                "failed to flush telemetry spool rewrite {}",
+                temp_path.display()
+            )
+        })?;
+        fs::rename(&temp_path, &path).await.with_context(|| {
+            format!(
+                "failed to replace telemetry spool {} with {}",
+                path.display(),
+                temp_path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct SpoolRecord {
+    raw_line: String,
+    event: PlaybackTelemetryEvent,
+}
+
+#[derive(Debug)]
+struct TelemetrySendError {
+    status: Option<reqwest::StatusCode>,
+    message: String,
+}
+
+impl TelemetrySendError {
+    fn request(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            message: message.into(),
+        }
+    }
+
+    fn http(status: reqwest::StatusCode, body: String) -> Self {
+        let body = truncate_for_log(body.trim());
+        let suffix = if body.is_empty() {
+            String::new()
+        } else {
+            format!(": {body}")
+        };
+        Self {
+            status: Some(status),
+            message: format!("telemetry ingest returned HTTP {status}{suffix}"),
+        }
+    }
+
+    fn is_permanent_replay_rejection(&self) -> bool {
+        matches!(
+            self.status,
+            Some(reqwest::StatusCode::BAD_REQUEST)
+                | Some(reqwest::StatusCode::PAYLOAD_TOO_LARGE)
+                | Some(reqwest::StatusCode::UNPROCESSABLE_ENTITY)
+        )
+    }
+}
+
+impl fmt::Display for TelemetrySendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TelemetrySendError {}
+
+struct ReplaySplitResult {
+    retry_records: Vec<SpoolRecord>,
+    retry_error: Option<TelemetrySendError>,
 }
 
 pub(crate) fn shape_playback_event(
@@ -471,41 +618,120 @@ async fn flush_spool_once(
         }
     };
 
-    let events = data
-        .lines()
-        .filter_map(|line| match serde_json::from_str::<PlaybackTelemetryEvent>(line) {
-            Ok(event) => Some(event),
+    let mut records = Vec::new();
+    for line in data.lines() {
+        match serde_json::from_str::<PlaybackTelemetryEvent>(line) {
+            Ok(event) => records.push(SpoolRecord {
+                raw_line: line.to_owned(),
+                event,
+            }),
             Err(error) => {
-                tracing::warn!(error = %error, "dropping malformed playback telemetry spool line");
-                None
+                tracing::warn!(error = %error, "quarantining malformed playback telemetry spool line");
+                spool.append_quarantine_line_locked(line).await?;
             }
-        })
-        .collect::<Vec<_>>();
-    if events.is_empty() {
-        fs::remove_file(&path).await.ok();
-        return Ok(());
+        }
     }
 
-    for chunk in events.chunks(config.batch_size) {
-        send_batch(http, config, chunk).await?;
-        sent.fetch_add(u64::try_from(chunk.len()).unwrap_or(0), Ordering::Relaxed);
+    let mut remaining = Vec::new();
+    let mut replay_error = None;
+    let mut index = 0;
+    while index < records.len() {
+        let end = records.len().min(index + config.batch_size);
+        let chunk = &records[index..end];
+        let events = chunk
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>();
+        match send_batch(http, config, &events).await {
+            Ok(()) => {
+                sent.fetch_add(u64::try_from(events.len()).unwrap_or(0), Ordering::Relaxed);
+            }
+            Err(error) if error.is_permanent_replay_rejection() => {
+                tracing::warn!(
+                    error = %error,
+                    count = chunk.len(),
+                    "telemetry spool replay batch was rejected; splitting records",
+                );
+                let split = replay_records_individually(spool, http, config, sent, chunk).await?;
+                if !split.retry_records.is_empty() {
+                    remaining.extend(split.retry_records);
+                }
+                if split.retry_error.is_some() {
+                    remaining.extend(records[end..].iter().cloned());
+                    replay_error = split.retry_error;
+                    break;
+                }
+            }
+            Err(error) => {
+                remaining.extend(records[index..].iter().cloned());
+                replay_error = Some(error);
+                break;
+            }
+        }
+        index = end;
     }
 
-    fs::remove_file(&path)
-        .await
-        .with_context(|| format!("failed to remove telemetry spool {}", path.display()))?;
-    Ok(())
+    spool.rewrite_records_locked(&remaining).await?;
+    if let Some(error) = replay_error {
+        Err(error.into())
+    } else {
+        Ok(())
+    }
+}
+
+async fn replay_records_individually(
+    spool: &LocalSpool,
+    http: &reqwest::Client,
+    config: &TelemetryConfig,
+    sent: &AtomicU64,
+    records: &[SpoolRecord],
+) -> Result<ReplaySplitResult> {
+    let mut retry_records = Vec::new();
+    let mut retry_error = None;
+
+    for record in records {
+        match send_batch(http, config, std::slice::from_ref(&record.event)).await {
+            Ok(()) => {
+                sent.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) if error.is_permanent_replay_rejection() => {
+                if let Err(quarantine_error) =
+                    spool.append_quarantine_line_locked(&record.raw_line).await
+                {
+                    retry_records.push(record.clone());
+                    retry_error = Some(TelemetrySendError::request(format!(
+                        "failed to quarantine rejected telemetry spool record: {quarantine_error}"
+                    )));
+                } else {
+                    tracing::warn!(
+                        error = %error,
+                        event_id = %record.event.event_id,
+                        "quarantined rejected playback telemetry spool record",
+                    );
+                }
+            }
+            Err(error) => {
+                retry_records.push(record.clone());
+                retry_error.get_or_insert(error);
+            }
+        }
+    }
+
+    Ok(ReplaySplitResult {
+        retry_records,
+        retry_error,
+    })
 }
 
 async fn send_batch(
     http: &reqwest::Client,
     config: &TelemetryConfig,
     events: &[PlaybackTelemetryEvent],
-) -> Result<()> {
+) -> std::result::Result<(), TelemetrySendError> {
     let url = config
         .ingest_url
         .as_ref()
-        .context("telemetry ingest URL is not configured")?;
+        .ok_or_else(|| TelemetrySendError::request("telemetry ingest URL is not configured"))?;
     let response = http
         .post(url)
         .timeout(config.request_timeout)
@@ -515,12 +741,25 @@ async fn send_batch(
         })
         .send()
         .await
-        .context("telemetry ingest request failed")?;
-    if !response.status().is_success() {
-        anyhow::bail!("telemetry ingest returned HTTP {}", response.status());
+        .map_err(|error| {
+            TelemetrySendError::request(format!("telemetry ingest request failed: {error}"))
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(TelemetrySendError::http(status, body));
     }
 
     Ok(())
+}
+
+fn truncate_for_log(value: &str) -> String {
+    const LIMIT: usize = 512;
+    if value.len() <= LIMIT {
+        value.to_owned()
+    } else {
+        format!("{}...", &value[..LIMIT])
+    }
 }
 
 fn optional_env_url(key: &str, default: &str) -> Option<String> {
@@ -562,12 +801,39 @@ mod tests {
         StatusCode::ACCEPTED
     }
 
+    async fn reject_invalid_asset_batch(
+        State(recorder): State<Recorder>,
+        Json(batch): Json<PlaybackTelemetryBatch>,
+    ) -> StatusCode {
+        if batch
+            .events
+            .iter()
+            .any(|event| event.asset_id == "not-a-uuid")
+        {
+            return StatusCode::BAD_REQUEST;
+        }
+        recorder.events.lock().unwrap().extend(batch.events);
+        StatusCode::ACCEPTED
+    }
+
     async fn spawn_recorder() -> (String, Recorder) {
+        spawn_recorder_with_handler(record_batch).await
+    }
+
+    async fn spawn_validating_recorder() -> (String, Recorder) {
+        spawn_recorder_with_handler(reject_invalid_asset_batch).await
+    }
+
+    async fn spawn_recorder_with_handler<H, T>(handler: H) -> (String, Recorder)
+    where
+        H: axum::handler::Handler<T, Recorder> + Clone + Send + Sync + 'static,
+        T: 'static,
+    {
         let recorder = Recorder {
             events: Arc::new(StdMutex::new(Vec::new())),
         };
         let app = Router::new()
-            .route("/internal/telemetry/playback", post(record_batch))
+            .route("/internal/telemetry/playback", post(handler))
             .with_state(recorder.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -617,6 +883,12 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
         )
+    }
+
+    fn invalid_semantic_event(event_id: &str) -> PlaybackTelemetryEvent {
+        let mut event = sample_event(event_id);
+        event.asset_id = "not-a-uuid".to_owned();
+        event
     }
 
     #[test]
@@ -714,5 +986,40 @@ mod tests {
         let events = recorder.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, "evt-preserved");
+    }
+
+    #[tokio::test]
+    async fn spool_replay_quarantines_valid_json_rejected_by_ingest() {
+        let (url, recorder) = spawn_validating_recorder().await;
+        let spool_dir = std::env::temp_dir().join(format!(
+            "rend-edge-telemetry-quarantine-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut config = config(spool_dir.clone());
+        config.ingest_url = Some(url);
+        let spool = LocalSpool::new(spool_dir.clone(), config.spool_max_bytes);
+        spool
+            .append_event(&sample_event("evt-valid"))
+            .await
+            .unwrap();
+        spool
+            .append_event(&invalid_semantic_event("evt-invalid"))
+            .await
+            .unwrap();
+        let sent = AtomicU64::new(0);
+
+        flush_spool_once(&spool, &reqwest::Client::new(), &config, &sent)
+            .await
+            .unwrap();
+
+        assert_eq!(sent.load(Ordering::Relaxed), 1);
+        assert!(!spool.path().exists());
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, "evt-valid");
+
+        let quarantine = fs::read_to_string(spool.quarantine_path()).await.unwrap();
+        assert!(quarantine.contains("evt-invalid"));
+        assert!(!quarantine.contains("evt-valid"));
     }
 }

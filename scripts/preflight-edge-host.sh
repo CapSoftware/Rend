@@ -7,13 +7,14 @@ source "$root_dir/scripts/operator-common.sh"
 manifest="${REND_RELEASE_MANIFEST:-}"
 edge_env="${REND_EDGE_ENV_FILE:-/etc/rend/rend-edge.env}"
 compose_file="${REND_EDGE_COMPOSE_FILE:-/opt/rend/edge.compose.yml}"
-publish_addr="${REND_EDGE_PUBLISH_ADDR:-0.0.0.0}"
+publish_addr="${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}"
 publish_port="${REND_EDGE_PUBLISH_PORT:-4100}"
 cache_dir="${REND_EDGE_CACHE_VOLUME:-}"
 spool_dir="${REND_EDGE_TELEMETRY_SPOOL_VOLUME:-}"
 allow_dev_defaults=false
 allow_placeholders=false
 allow_local_image_refs=false
+allow_direct_edge_exposure=false
 dry_run=false
 skip_connectivity=false
 skip_bind_port_check=false
@@ -31,7 +32,7 @@ Options:
   --compose-file FILE         Compose file. Default: /opt/rend/edge.compose.yml.
   --cache-dir DIR             Host cache dir. Defaults to REND_EDGE_CACHE_VOLUME or env REND_EDGE_CACHE_DIR.
   --spool-dir DIR             Host telemetry spool dir. Defaults to REND_EDGE_TELEMETRY_SPOOL_VOLUME or env REND_EDGE_TELEMETRY_SPOOL_DIR.
-  --publish-addr ADDR         Host publish address to probe. Default: 0.0.0.0.
+  --publish-addr ADDR         Host publish address to probe. Default: 127.0.0.1.
   --publish-port PORT         Host publish port to probe. Default: 4100.
   --dry-run                   Skip mutating/network and host write probes; validate local inputs only.
   --skip-connectivity         Skip object-store, control-plane, and telemetry probes.
@@ -40,6 +41,8 @@ Options:
   --allow-dev-defaults        Permit local Docker/dev defaults.
   --allow-placeholders        Permit placeholder example values.
   --allow-local-image-refs    Permit manifest image_tag fallback when image_digest is absent.
+  --allow-direct-edge-exposure
+                              Permit a public or wildcard direct :4100 bind for short trial debugging.
   -h, --help                  Show this help.
 
 Local example dry-run:
@@ -107,6 +110,10 @@ while [[ $# -gt 0 ]]; do
       allow_local_image_refs=true
       shift
       ;;
+    --allow-direct-edge-exposure)
+      allow_direct_edge_exposure=true
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -134,6 +141,14 @@ operator_validate_edge_env "$edge_env" "$allow_dev_defaults" "$allow_placeholder
 
 operator_info "validating release manifest image ref"
 operator_validate_manifest_services "$manifest" "$allow_local_image_refs" rend-edge
+operator_check_edge_publish_addr_policy "$publish_addr" "$allow_direct_edge_exposure"
+
+if [[ "$dry_run" == "true" ]]; then
+  operator_warn "skipping manifest image pull readiness check"
+else
+  operator_info "checking manifest image pull readiness"
+  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" rend-edge
+fi
 
 cache_dir="${cache_dir:-$(operator_env_value "$edge_env" REND_EDGE_CACHE_DIR 2>/dev/null || true)}"
 spool_dir="${spool_dir:-$(operator_env_value "$edge_env" REND_EDGE_TELEMETRY_SPOOL_DIR 2>/dev/null || true)}"

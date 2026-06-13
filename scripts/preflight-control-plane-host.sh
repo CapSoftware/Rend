@@ -125,6 +125,13 @@ operator_validate_worker_env "$worker_env" "$allow_dev_defaults" "$allow_placeho
 operator_info "validating release manifest image refs"
 operator_validate_manifest_services "$manifest" "$allow_local_image_refs" rend-api rend-media-worker
 
+if [[ "$dry_run" == "true" ]]; then
+  operator_warn "skipping manifest image pull readiness check"
+else
+  operator_info "checking manifest image pull readiness"
+  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" rend-api rend-media-worker
+fi
+
 if [[ "$dry_run" == "true" || "$skip_bind_port_check" == "true" ]]; then
   operator_warn "skipping bind-port check"
 else

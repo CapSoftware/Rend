@@ -5,7 +5,8 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$root_dir/scripts/operator-common.sh"
 
 api_base="${REND_API_BASE_URL:-http://127.0.0.1:4000}"
-edge_base="${REND_EDGE_BASE_URL:-http://127.0.0.1:4100}"
+edge_base_default="${REND_EDGE_BASE_URL:-http://127.0.0.1:4100}"
+edge_internal_base_default="${REND_EDGE_INTERNAL_BASE:-${EDGE_INTERNAL_BASE:-}}"
 asset_id="${ASSET_ID:-}"
 dev_api_key="${REND_DEV_API_KEY:-}"
 database_url="${DATABASE_URL:-}"
@@ -19,10 +20,18 @@ clickhouse_user="${CLICKHOUSE_USER:-}"
 clickhouse_password="${CLICKHOUSE_PASSWORD:-}"
 api_env=""
 edge_env=""
+edge_bases=()
+edge_internal_bases=()
+edge_base_explicit=false
+edge_internal_base_explicit=false
 skip_registration=false
+skip_public_deny=false
 skip_playback=false
 skip_analytics=false
 rewrite_playback_base=false
+edge_labels=()
+edge_public_bases=()
+edge_private_bases=()
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -38,7 +47,8 @@ Run first-host post-deploy verification.
 
 Options:
   --api-base URL              API base URL. Default: http://127.0.0.1:4000.
-  --edge-base URL             Edge base URL. Default: http://127.0.0.1:4100.
+  --edge-base URL             Public edge base URL. May be repeated. Defaults to REND_EXPECTED_EDGES when set, else http://127.0.0.1:4100.
+  --edge-internal-base URL    Private edge base URL for readyz, warm, and metrics. May be repeated in the same order as --edge-base.
   --asset-id ID               Existing hls_ready asset id for signed playback smoke.
   --dev-api-key KEY           API bearer key for asset and analytics endpoints.
   --database-url URL          Optional Postgres URL for edge registry visibility.
@@ -54,6 +64,7 @@ Options:
   --edge-env FILE             Read edge id/token/control-plane/base URL defaults from file.
   --rewrite-playback-base     Rewrite API playback URL host to --edge-base before fetching.
   --skip-registration         Skip edge registration visibility check.
+  --skip-public-deny          Skip public deny-surface checks for local direct-edge verification.
   --skip-playback             Skip signed playback and analytics checks.
   --skip-analytics            Skip analytics increase check after playback.
   -h, --help                  Show this help.
@@ -75,7 +86,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --edge-base)
-      edge_base="${2:?missing value for $1}"
+      edge_bases+=("${2:?missing value for $1}")
+      edge_base_explicit=true
+      shift 2
+      ;;
+    --edge-internal-base)
+      edge_internal_bases+=("${2:?missing value for $1}")
+      edge_internal_base_explicit=true
       shift 2
       ;;
     --asset-id)
@@ -138,6 +155,10 @@ while [[ $# -gt 0 ]]; do
       skip_registration=true
       shift
       ;;
+    --skip-public-deny)
+      skip_public_deny=true
+      shift
+      ;;
     --skip-playback)
       skip_playback=true
       shift
@@ -178,14 +199,86 @@ if [[ -n "$edge_env" ]]; then
   expected_edges="${expected_edges:-$(operator_env_value "$edge_env" REND_EXPECTED_EDGES 2>/dev/null || true)}"
   edge_internal_token="${edge_internal_token:-$(operator_env_value "$edge_env" REND_EDGE_INTERNAL_TOKEN 2>/dev/null || true)}"
   control_plane_url="${control_plane_url:-$(operator_env_value "$edge_env" REND_CONTROL_PLANE_URL 2>/dev/null || true)}"
-  if [[ -z "${REND_EDGE_BASE_URL:-}" && "$edge_base" == "http://127.0.0.1:4100" ]]; then
-    edge_base="$(operator_env_value "$edge_env" REND_EDGE_BASE_URL 2>/dev/null || printf '%s' "$edge_base")"
+  if [[ "$edge_base_explicit" != "true" && -z "${REND_EDGE_BASE_URL:-}" && "$edge_base_default" == "http://127.0.0.1:4100" ]]; then
+    edge_base_default="$(operator_env_value "$edge_env" REND_EDGE_BASE_URL 2>/dev/null || printf '%s' "$edge_base_default")"
   fi
 fi
 
 api_base="${api_base%/}"
-edge_base="${edge_base%/}"
 control_plane_url="${control_plane_url%/}"
+
+expected_edge_rows() {
+  python3 - "$1" <<'PY'
+import sys
+
+for raw in sys.argv[1].split(","):
+    parts = raw.strip().split("=", 2)
+    if len(parts) != 3:
+        continue
+    edge_id, _region, base_url = [part.strip() for part in parts]
+    if edge_id and base_url:
+        print(f"{edge_id}\t{base_url.rstrip('/')}")
+PY
+}
+
+append_edge_target() {
+  local label="$1"
+  local public_base="$2"
+  local private_base="$3"
+  edge_labels+=("$label")
+  edge_public_bases+=("${public_base%/}")
+  edge_private_bases+=("${private_base%/}")
+}
+
+initialize_edge_targets() {
+  local row label public_base private_base index
+
+  if [[ ${#edge_bases[@]} -eq 0 && -n "$expected_edges" ]]; then
+    while IFS=$'\t' read -r label public_base; do
+      [[ -n "$label" && -n "$public_base" ]] || continue
+      edge_bases+=("$public_base")
+      edge_labels+=("$label")
+    done < <(expected_edge_rows "$expected_edges")
+  fi
+
+  if [[ ${#edge_bases[@]} -eq 0 ]]; then
+    edge_bases+=("$edge_base_default")
+    edge_labels+=("${edge_id:-edge}")
+  elif [[ ${#edge_labels[@]} -ne ${#edge_bases[@]} ]]; then
+    edge_labels=()
+    for index in "${!edge_bases[@]}"; do
+      edge_labels+=("edge-$((index + 1))")
+    done
+  fi
+
+  if [[ ${#edge_internal_bases[@]} -eq 0 && -n "$edge_internal_base_default" ]]; then
+    if [[ ${#edge_bases[@]} -eq 1 ]]; then
+      edge_internal_bases+=("$edge_internal_base_default")
+    else
+      operator_warn "REND_EDGE_INTERNAL_BASE/EDGE_INTERNAL_BASE applies to one edge; pass repeated --edge-internal-base values for multi-edge verification"
+    fi
+  fi
+
+  local selected_edge_labels=("${edge_labels[@]}")
+  edge_labels=()
+  edge_public_bases=()
+  edge_private_bases=()
+  for index in "${!edge_bases[@]}"; do
+    public_base="${edge_bases[$index]}"
+    if [[ ${#edge_internal_bases[@]} -gt "$index" ]]; then
+      private_base="${edge_internal_bases[$index]}"
+    else
+      private_base="$public_base"
+    fi
+    append_edge_target "${selected_edge_labels[$index]}" "$public_base" "$private_base"
+  done
+
+  if [[ "$edge_internal_base_explicit" == "true" && ${#edge_internal_bases[@]} -ne ${#edge_bases[@]} ]]; then
+    operator_fail "--edge-internal-base must be repeated once per --edge-base/expected edge"
+  fi
+}
+
+initialize_edge_targets
 
 check_readyz() {
   local label="$1"
@@ -285,7 +378,7 @@ check_registration() {
   fi
 
   if [[ -n "$expected_edges" ]]; then
-    if [[ -z "$database_url" || ! command -v psql >/dev/null 2>&1 ]]; then
+    if [[ -z "$database_url" ]] || ! command -v psql >/dev/null 2>&1; then
       operator_fail "expected edge registry check requires --database-url/--api-env and psql"
       return 0
     fi
@@ -439,6 +532,110 @@ raise SystemExit(0)
 PY
 }
 
+expect_public_denied() {
+  local edge_label="$1"
+  local base_url="$2"
+  local method="$3"
+  local path="$4"
+  local body_file="$tmp_dir/public-deny-${edge_label//[^A-Za-z0-9_.-]/_}-${method}-${path//[^A-Za-z0-9_.-]/_}.body"
+  local status_code
+  status_code="$(
+    curl -sS --max-time 10 -o "$body_file" -w "%{http_code}" \
+      -X "$method" "$base_url$path" || true
+  )"
+  if [[ "$status_code" == "404" ]]; then
+    operator_ok "$edge_label public $method $path returned 404"
+  else
+    operator_fail "$edge_label public $method $path expected 404, got HTTP $status_code"
+  fi
+}
+
+check_public_deny_surface() {
+  if [[ "$skip_public_deny" == "true" ]]; then
+    operator_warn "skipping public edge deny-surface checks"
+    return 0
+  fi
+
+  local index edge_label public_base
+  for index in "${!edge_public_bases[@]}"; do
+    edge_label="${edge_labels[$index]}"
+    public_base="${edge_public_bases[$index]}"
+    expect_public_denied "$edge_label" "$public_base" "POST" "/internal/warm"
+    expect_public_denied "$edge_label" "$public_base" "POST" "/internal/purge"
+    expect_public_denied "$edge_label" "$public_base" "GET" "/metrics"
+    expect_public_denied "$edge_label" "$public_base" "GET" "/v/probe"
+    expect_public_denied "$edge_label" "$public_base" "GET" "/v/not-a-uuid/hls/master.m3u8?token=invalid"
+  done
+}
+
+artifact_path_from_playback_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+path = urlsplit(sys.argv[1]).path.strip("/")
+parts = path.split("/")
+if len(parts) < 3 or parts[0] != "v":
+    raise SystemExit("playback_url did not use /v/<asset_id>/<artifact_path>")
+print("/".join(parts[2:]))
+PY
+}
+
+warm_payload() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+asset_id, artifact_path = sys.argv[1:3]
+print(json.dumps({"asset_id": asset_id, "artifact_paths": [artifact_path]}, separators=(",", ":")))
+PY
+}
+
+metric_value() {
+  local metrics_file="$1"
+  local metric_name="$2"
+  local required_label="${3:-}"
+  python3 - "$metrics_file" "$metric_name" "$required_label" <<'PY'
+import re
+import sys
+
+path, metric, required = sys.argv[1:4]
+pattern = re.compile(rf"^{re.escape(metric)}(?:\{{([^}}]*)\}})?\s+([-+]?[0-9]+(?:\.[0-9]+)?)$")
+try:
+    lines = open(path, "r", encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    print("-1")
+    raise SystemExit(0)
+for line in lines:
+    match = pattern.match(line.strip())
+    if not match:
+        continue
+    labels = match.group(1) or ""
+    if required and required not in labels:
+        continue
+    print(match.group(2))
+    raise SystemExit(0)
+print("-1")
+PY
+}
+
+fetch_edge_metrics() {
+  local edge_label="$1"
+  local private_base="$2"
+  local output_file="$3"
+  local status_code
+  status_code="$(
+    curl -sS --max-time 10 -o "$output_file" -w "%{http_code}" \
+      "$private_base/metrics" \
+      -H "x-rend-internal-token: $edge_internal_token" || true
+  )"
+  if [[ "$status_code" == "200" ]]; then
+    return 0
+  fi
+  operator_fail "$edge_label private metrics check failed with HTTP $status_code"
+  return 1
+}
+
 check_playback_and_analytics() {
   if [[ "$skip_playback" == "true" ]]; then
     operator_warn "skipping signed playback and analytics checks"
@@ -452,8 +649,14 @@ check_playback_and_analytics() {
     operator_fail "signed playback smoke requires --dev-api-key or --api-env"
     return 0
   fi
+  if [[ -z "$edge_internal_token" ]]; then
+    operator_fail "warmed playback smoke requires --edge-internal-token or --edge-env"
+    return 0
+  fi
 
-  local before_count bootstrap_file status_code playback_url headers_file body_file cache_header after_count analytics_file
+  local before_count bootstrap_file status_code playback_url artifact_path analytics_file
+  local index edge_label public_base private_base payload body_file headers_file cache_header playback_target
+  local successes expected_count after_count metrics_file dropped_before dropped_after spool_bytes
   analytics_file="$tmp_dir/analytics-before.json"
   before_count="$(analytics_count "$asset_id" "$analytics_file")"
 
@@ -469,23 +672,108 @@ check_playback_and_analytics() {
   fi
 
   playback_url="$(playback_url_from_bootstrap "$bootstrap_file")"
-  if [[ "$rewrite_playback_base" == "true" ]]; then
-    playback_url="$(rewrite_playback_url "$playback_url" "$edge_base")"
+  if ! artifact_path="$(artifact_path_from_playback_url "$playback_url" 2>/tmp/rend-playback-url-error.$$)"; then
+    operator_fail "$(cat /tmp/rend-playback-url-error.$$)"
+    rm -f /tmp/rend-playback-url-error.$$
+    return 0
   fi
+  rm -f /tmp/rend-playback-url-error.$$
 
-  headers_file="$tmp_dir/playback.headers"
-  body_file="$tmp_dir/playback.body"
-  status_code="$(curl -sS --max-time 20 -D "$headers_file" -o "$body_file" -w "%{http_code}" "$playback_url")"
-  if [[ "$status_code" != "200" ]]; then
-    operator_fail "signed playback fetch failed with HTTP $status_code"
-    return 0
+  successes=0
+  for index in "${!edge_public_bases[@]}"; do
+    edge_label="${edge_labels[$index]}"
+    public_base="${edge_public_bases[$index]}"
+    private_base="${edge_private_bases[$index]}"
+
+    metrics_file="$tmp_dir/metrics-before-$index.txt"
+    if fetch_edge_metrics "$edge_label" "$private_base" "$metrics_file"; then
+      dropped_before="$(metric_value "$metrics_file" "rend_edge_telemetry_events_total" 'state="dropped"')"
+    else
+      dropped_before="-1"
+    fi
+
+    payload="$(warm_payload "$asset_id" "$artifact_path")"
+    body_file="$tmp_dir/warm-$index.json"
+    status_code="$(
+      curl -sS --max-time 20 -o "$body_file" -w "%{http_code}" \
+        -X POST "$private_base/internal/warm" \
+        -H "x-rend-internal-token: $edge_internal_token" \
+        -H "content-type: application/json" \
+        --data "$payload" || true
+    )"
+    if [[ "$status_code" != 2* ]]; then
+      operator_fail "$edge_label warm probe failed with HTTP $status_code: $(cat "$body_file" 2>/dev/null || true)"
+      continue
+    fi
+
+    playback_target="$playback_url"
+    if [[ "$rewrite_playback_base" == "true" || ${#edge_public_bases[@]} -gt 1 ]]; then
+      playback_target="$(rewrite_playback_url "$playback_url" "$public_base")"
+    fi
+
+    headers_file="$tmp_dir/playback-$index.headers"
+    body_file="$tmp_dir/playback-$index.body"
+    status_code="$(curl -sS --max-time 20 -D "$headers_file" -o "$body_file" -w "%{http_code}" "$playback_target" || true)"
+    if [[ "$status_code" != "200" ]]; then
+      operator_fail "$edge_label signed playback fetch failed with HTTP $status_code"
+      continue
+    fi
+    if [[ ! -s "$body_file" ]]; then
+      operator_fail "$edge_label signed playback response body was empty"
+      continue
+    fi
+    cache_header="$(header_value "$headers_file" "x-rend-cache")"
+    if [[ "$cache_header" != "HIT" ]]; then
+      operator_fail "$edge_label warmed playback expected X-Rend-Cache=HIT, got ${cache_header:-missing}"
+      continue
+    fi
+    operator_ok "$edge_label warmed signed playback HIT passed"
+    successes=$((successes + 1))
+
+    for _ in $(seq 1 90); do
+      metrics_file="$tmp_dir/metrics-after-$index.txt"
+      if ! fetch_edge_metrics "$edge_label" "$private_base" "$metrics_file"; then
+        break
+      fi
+      dropped_after="$(metric_value "$metrics_file" "rend_edge_telemetry_events_total" 'state="dropped"')"
+      spool_bytes="$(metric_value "$metrics_file" "rend_edge_telemetry_spool_bytes")"
+      if [[ "$spool_bytes" == "0" ]]; then
+        if [[ "$dropped_before" =~ ^-?[0-9]+(\.[0-9]+)?$ && "$dropped_after" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+          if python3 - "$dropped_before" "$dropped_after" <<'PY'
+import sys
+before, after = map(float, sys.argv[1:3])
+raise SystemExit(0 if after <= before else 1)
+PY
+          then
+            operator_ok "$edge_label telemetry spool returned to 0 bytes with no dropped-event increase"
+            break
+          fi
+        fi
+      fi
+      sleep 1
+    done
+
+    metrics_file="$tmp_dir/metrics-after-$index.txt"
+    dropped_after="$(metric_value "$metrics_file" "rend_edge_telemetry_events_total" 'state="dropped"')"
+    spool_bytes="$(metric_value "$metrics_file" "rend_edge_telemetry_spool_bytes")"
+    if [[ "$spool_bytes" != "0" ]]; then
+      operator_fail "$edge_label telemetry spool did not return to 0 bytes; last value: $spool_bytes"
+    fi
+    if [[ "$dropped_before" =~ ^-?[0-9]+(\.[0-9]+)?$ && "$dropped_after" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+      if ! python3 - "$dropped_before" "$dropped_after" <<'PY'
+import sys
+before, after = map(float, sys.argv[1:3])
+raise SystemExit(0 if after <= before else 1)
+PY
+      then
+        operator_fail "$edge_label telemetry dropped counter increased from $dropped_before to $dropped_after"
+      fi
+    fi
+  done
+
+  if [[ "$successes" -ne "${#edge_public_bases[@]}" ]]; then
+    operator_fail "warmed playback passed on $successes/${#edge_public_bases[@]} edge(s)"
   fi
-  if [[ ! -s "$body_file" ]]; then
-    operator_fail "signed playback response body was empty"
-    return 0
-  fi
-  cache_header="$(header_value "$headers_file" "x-rend-cache")"
-  operator_ok "signed playback smoke passed${cache_header:+ with X-Rend-Cache=$cache_header}"
 
   if [[ "$skip_analytics" == "true" ]]; then
     operator_warn "skipping telemetry analytics smoke"
@@ -493,14 +781,15 @@ check_playback_and_analytics() {
   fi
 
   analytics_file="$tmp_dir/analytics-after.json"
+  expected_count="$successes"
   for _ in $(seq 1 90); do
     after_count="$(analytics_count "$asset_id" "$analytics_file")"
     if [[ "$after_count" =~ ^-?[0-9]+$ ]]; then
-      if [[ "$before_count" -lt 0 && "$after_count" -ge 1 ]]; then
+      if [[ "$before_count" -lt 0 && "$after_count" -ge "$expected_count" ]]; then
         operator_ok "telemetry analytics smoke passed with request_count=$after_count"
         return 0
       fi
-      if [[ "$before_count" -ge 0 && "$after_count" -gt "$before_count" ]]; then
+      if [[ "$before_count" -ge 0 && "$after_count" -ge $((before_count + expected_count)) ]]; then
         operator_ok "telemetry analytics smoke passed; request_count increased from $before_count to $after_count"
         return 0
       fi
@@ -511,9 +800,12 @@ check_playback_and_analytics() {
 }
 
 check_readyz "api" "$api_base"
-check_readyz "edge" "$edge_base"
+for index in "${!edge_private_bases[@]}"; do
+  check_readyz "edge ${edge_labels[$index]}" "${edge_private_bases[$index]}"
+done
 check_registration
 check_clickhouse_telemetry
+check_public_deny_surface
 check_playback_and_analytics
 
 operator_finish

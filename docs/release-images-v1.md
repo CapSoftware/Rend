@@ -46,6 +46,15 @@ bun run release:images -- \
   --push
 ```
 
+For GHCR, authenticate as the Unix user that will pull images on each host.
+Docker CLI credentials are stored per user, so a host that sometimes runs
+operator commands as `ubuntu` and sometimes with `sudo` needs both contexts:
+
+```sh
+docker login ghcr.io
+sudo docker login ghcr.io
+```
+
 Each image is tagged with the full git SHA. When `--tag` is provided, the same
 image also receives the human release tag, for example `trial-001`.
 
@@ -127,6 +136,11 @@ print(service["image_digest"] or service["image_tag"])
 PY
 }
 ```
+
+Before deploy or rollback, run the relevant host preflight without `--dry-run`.
+It validates the manifest and pulls each `image_digest` ref, which proves the
+host user and Docker daemon context can read the registry before Compose
+touches running services.
 
 Control-plane deploy:
 

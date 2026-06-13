@@ -98,14 +98,17 @@ This section covers public playback, private/internal endpoints, metrics, and
 outbound origin/API telemetry.
 
 All endpoints currently share the edge service port inside the container
-(`4100`). For production-style exposure, put a reverse proxy or host firewall in
-front of the container. Direct public `4100` exposure is acceptable only for
-short trials with known test clients.
+(`4100`). For production-style exposure, bind the Docker publish address to
+loopback or a private interface and put Caddy or an equivalent reverse proxy in
+front of the container. Direct public `4100` exposure is disabled by default and
+requires an explicit `REND_EDGE_PUBLISH_ADDR` override plus
+`scripts/preflight-edge-host.sh --allow-direct-edge-exposure`; use that only for
+short trial debugging with known test client IPs.
 
 | Direction | Port | Source | Destination | Purpose |
 | --- | --- | --- | --- | --- |
 | Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. |
-| Inbound trial-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while no proxy exists. Do not leave open broadly. |
+| Inbound trial-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while debugging only. Requires the explicit direct-exposure preflight override. |
 | Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
 | Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
 | Outbound origin | TCP `443` | `rend-edge` | S3-compatible endpoint | Artifact fills and origin readiness checks. |
@@ -127,43 +130,30 @@ Control-plane host exposure:
   templates.
 
 For the first Latitude trial shape, bind Rend services to loopback and let Caddy
-own public TLS. The control-plane proxy should allow only edge host source IPs
-to `/internal/*` and return `404` for the rest of the API surface:
+own public TLS. Checked Caddy templates live in:
 
-```caddyfile
-api-internal.play.rend.so {
-	@allowed_internal {
-		path /internal/*
-		remote_ip 152.236.8.67 206.223.236.177 127.0.0.1 ::1
-	}
-	handle @allowed_internal {
-		reverse_proxy 127.0.0.1:4000
-	}
-	handle {
-		respond 404
-	}
-}
-```
+- `docs/templates/control-plane.Caddyfile`
+- `docs/templates/edge-host.Caddyfile`
 
-Edge hosts should expose signed playback paths only. Public `/internal/*` and
-`/metrics` should be blocked at the proxy, and direct `4100` access should stay
-closed:
+The control-plane template allows only configured edge source IPs to
+`/internal/*` and returns `404` for every other path on that internal hostname.
+The edge template has a public hostname that blocks `/internal/*` and
+`/metrics`, proxies only canonical lowercase UUID playback paths, and returns
+`404` for `/v/probe`, non-UUID `/v/*`, and every other path. It also has a
+private hostname for `/internal/*`, `/metrics`, `/healthz`, and `/readyz`
+restricted by source IP.
 
-```caddyfile
-ash-1.play.rend.so {
-	@blocked_private {
-		path /internal/* /metrics
-	}
-	handle @blocked_private {
-		respond 404
-	}
-	handle /v/* {
-		reverse_proxy 127.0.0.1:4100
-	}
-	handle {
-		respond 404
-	}
-}
+Set Caddy environment with space-separated source IP lists before reloading:
+
+```sh
+export REND_CONTROL_PLANE_HOSTNAME=api-internal.play.rend.so
+export REND_CONTROL_PLANE_ALLOWED_EDGE_IPS="152.236.8.67 206.223.236.177 127.0.0.1 ::1"
+export REND_EDGE_PUBLIC_HOSTNAME=ash-1.play.rend.so
+export REND_EDGE_PRIVATE_HOSTNAME=ash-1-private.play.rend.so
+export REND_EDGE_ALLOWED_PRIVATE_IPS="152.236.8.67 10.0.0.0/8 127.0.0.1 ::1"
+sudo caddy fmt --overwrite /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
 ```
 
 Use the edge hostname for each region, for example `ams-1.play.rend.so` on the
@@ -279,6 +269,8 @@ Production-style templates are checked in under `docs/templates/`:
 
 - `docs/templates/control-plane.compose.yml`
 - `docs/templates/edge-host.compose.yml`
+- `docs/templates/control-plane.Caddyfile`
+- `docs/templates/edge-host.Caddyfile`
 
 Build trial images from a clean git worktree before bootstrapping or deploy:
 
@@ -300,11 +292,27 @@ Before copying the manifest to hosts, verify release image metadata locally:
 scripts/check-docker-image-versions.sh --tag trial-001 --registry registry.example.com/rend --strict
 ```
 
+For GHCR or another authenticated registry, log in as the same Unix user that
+will run the operator commands. Docker CLI credentials are per user. If deploys
+or preflights run with `sudo`, root also needs credentials:
+
+```sh
+docker login ghcr.io
+sudo docker login ghcr.io
+```
+
+On the hosted trial hosts, both `ubuntu` and `root` needed GHCR pull readiness
+because operators used both non-root and `sudo` Docker commands. Run the
+preflight without `--dry-run` before deploy or rollback; it now pulls each
+manifest `image_digest` ref so credential or registry-scope problems fail
+before Compose changes running containers.
+
 Control-plane host bootstrap:
 
 ```sh
 sudo mkdir -p /opt/rend /etc/rend
 sudo cp docs/templates/control-plane.compose.yml /opt/rend/control-plane.compose.yml
+sudo cp docs/templates/control-plane.Caddyfile /etc/caddy/Caddyfile
 sudo cp docs/env/rend-api.env.example /etc/rend/rend-api.env
 sudo cp docs/env/rend-media-worker.env.example /etc/rend/rend-media-worker.env
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
@@ -321,6 +329,7 @@ Edge host bootstrap:
 sudo mkdir -p /opt/rend /etc/rend /var/lib/rend/edge-cache /var/spool/rend/edge-telemetry
 sudo chown -R 10001:10001 /var/lib/rend /var/spool/rend
 sudo cp docs/templates/edge-host.compose.yml /opt/rend/edge.compose.yml
+sudo cp docs/templates/edge-host.Caddyfile /etc/caddy/Caddyfile
 sudo cp docs/env/rend-edge-us-east.env.example /etc/rend/rend-edge.env
 sudoedit /etc/rend/rend-edge.env
 
@@ -345,25 +354,32 @@ should use a private address or VPN path when available.
 
 ```sh
 API_BASE=https://api.example.com
-EDGE_BASE=https://edge-us-east.example.com
-EDGE_INTERNAL_BASE=http://10.0.10.12:4100
+EDGE_BASE_US_EAST=https://edge-us-east.example.com
+EDGE_BASE_LONDON=https://edge-london.example.com
+EDGE_INTERNAL_US_EAST=http://10.0.10.12:4100
+EDGE_INTERNAL_LONDON=http://10.0.20.12:4100
 REND_DEV_API_KEY=replace-me
 REND_EDGE_INTERNAL_TOKEN=replace-me
 ASSET_ID=00000000-0000-0000-0000-000000000000
 ```
 
-Run the combined verifier first. It checks API `/readyz`, edge `/readyz`, edge
-registration visibility through Postgres or the internal heartbeat endpoint,
-signed playback for the provided asset, and telemetry analytics increasing
-after the playback request.
+Run the combined verifier first. It checks API `/readyz`, private edge
+`/readyz`, all expected edge registrations, public deny surfaces on each edge,
+warmed `HIT` signed playback through every public edge, telemetry analytics
+increasing, no telemetry dropped-counter increase, and spool bytes returning to
+`0`.
 
 ```sh
 scripts/verify-first-host-deploy.sh \
   --api-base "$API_BASE" \
-  --edge-base "$EDGE_BASE" \
+  --edge-base "$EDGE_BASE_US_EAST" \
+  --edge-internal-base "$EDGE_INTERNAL_US_EAST" \
+  --edge-base "$EDGE_BASE_LONDON" \
+  --edge-internal-base "$EDGE_INTERNAL_LONDON" \
   --api-env /etc/rend/rend-api.env \
   --edge-env /etc/rend/rend-edge.env \
-  --asset-id "$ASSET_ID"
+  --asset-id "$ASSET_ID" \
+  --rewrite-playback-base
 ```
 
 Use the manual checks below when the combined verifier identifies a failing
@@ -470,6 +486,21 @@ ssh edge-us-east 'docker compose -f /opt/rend/edge.compose.yml exec -T rend-edge
 ```
 
 The spool file may be absent when telemetry has flushed successfully.
+
+If a single malformed or semantically invalid JSONL line is blocking replay,
+quarantine only that line and preserve the rest:
+
+```sh
+ssh edge-us-east 'sudo scripts/quarantine-telemetry-spool-lines.sh \
+  --spool /var/spool/rend/edge-telemetry/playback-events.jsonl \
+  --lines 17'
+```
+
+Use `--dry-run` first when identifying line numbers. The script writes a backup
+next to the spool and appends quarantined raw records to
+`playback-events.quarantine.jsonl`. New edge builds also quarantine malformed or
+permanently rejected replay records automatically while preserving valid
+records.
 
 ## Deploy Steps
 

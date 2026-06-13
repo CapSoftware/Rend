@@ -799,6 +799,65 @@ operator_validate_manifest_services() {
   done
 }
 
+operator_check_manifest_image_pulls() {
+  local manifest="$1"
+  local allow_local="$2"
+  shift 2
+  local service ref
+  for service in "$@"; do
+    if ! ref="$(operator_manifest_image_ref "$manifest" "$service" "$allow_local" 2>/tmp/rend-manifest-pull-error.$$)"; then
+      operator_fail "$(cat /tmp/rend-manifest-pull-error.$$)"
+      rm -f /tmp/rend-manifest-pull-error.$$
+      continue
+    fi
+    rm -f /tmp/rend-manifest-pull-error.$$
+    if [[ "$ref" != *@sha256:* ]]; then
+      operator_warn "skipping $service image pull readiness check for local tag ref: $ref"
+      continue
+    fi
+    if docker image pull "$ref" >/dev/null; then
+      operator_ok "$service manifest image is pullable: $ref"
+    else
+      operator_fail "$service manifest image could not be pulled: $ref"
+    fi
+  done
+}
+
+operator_check_edge_publish_addr_policy() {
+  local publish_addr="$1"
+  local allow_direct_exposure="$2"
+  if python3 - "$publish_addr" <<'PY'
+import ipaddress
+import sys
+
+value = sys.argv[1].strip().strip("[]")
+if value in {"", "0.0.0.0", "::"}:
+    print("wildcard")
+    raise SystemExit(1)
+if value.lower() == "localhost":
+    raise SystemExit(0)
+try:
+    ip = ipaddress.ip_address(value)
+except ValueError:
+    print("unclassified")
+    raise SystemExit(1)
+if ip.is_loopback or ip.is_private or ip.is_link_local:
+    raise SystemExit(0)
+print("public")
+raise SystemExit(1)
+PY
+  then
+    operator_ok "edge publish address is private by default: $publish_addr"
+    return 0
+  fi
+
+  if [[ "$allow_direct_exposure" == "true" ]]; then
+    operator_warn "edge publish address $publish_addr is directly exposed; use only for short trial debugging"
+  else
+    operator_fail "edge publish address $publish_addr is directly exposed; use 127.0.0.1/private IP or pass --allow-direct-edge-exposure for short trial debugging"
+  fi
+}
+
 operator_check_docker_compose() {
   if command -v docker >/dev/null 2>&1; then
     operator_ok "docker CLI is available"

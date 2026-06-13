@@ -9,7 +9,9 @@ services:
     env_file:
       - /etc/rend/rend-edge.env
     ports:
-      - "${REND_EDGE_PUBLISH_ADDR:-0.0.0.0}:${REND_EDGE_PUBLISH_PORT:-4100}:4100"
+      # Keep direct :4100 private by default. Public playback should be exposed
+      # through docs/templates/edge-host.Caddyfile.
+      - "${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}:${REND_EDGE_PUBLISH_PORT:-4100}:4100"
     volumes:
       - ${REND_EDGE_CACHE_VOLUME:-/var/lib/rend/edge-cache}:/var/lib/rend/edge-cache
       - ${REND_EDGE_TELEMETRY_SPOOL_VOLUME:-/var/spool/rend/edge-telemetry}:/var/spool/rend/edge-telemetry

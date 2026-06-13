@@ -260,11 +260,12 @@ scripts/preflight-edge-host.sh \
 ```
 
 The control-plane preflight checks Docker/Compose, compose/env files, manifest
-digest refs, managed dependency connectivity where local tools allow it, and
-host bind ports. The edge preflight checks Docker/Compose, edge env, manifest
-digest ref, uid/gid `10001` cache and spool writeability, object-store health,
-control-plane register/heartbeat reachability, telemetry ingest reachability,
-and host bind ports.
+digest refs, manifest image pull readiness, managed dependency connectivity
+where local tools allow it, and host bind ports. The edge preflight checks
+Docker/Compose, edge env, manifest digest ref, manifest image pull readiness,
+private-by-default direct port publishing, uid/gid `10001` cache and spool
+writeability, object-store health, control-plane register/heartbeat
+reachability, telemetry ingest reachability, and host bind ports.
 
 Use deploy helpers in dry-run mode first to print the exact Compose commands
 with manifest image refs:
@@ -285,14 +286,19 @@ After deploy, verify the first-host path:
 scripts/verify-first-host-deploy.sh \
   --api-base https://api.example.com \
   --edge-base https://edge-us-east.example.com \
+  --edge-internal-base http://10.0.10.12:4100 \
+  --edge-base https://edge-london.example.com \
+  --edge-internal-base http://10.0.20.12:4100 \
   --api-env /etc/rend/rend-api.env \
   --edge-env /etc/rend/rend-edge.env \
-  --asset-id 00000000-0000-0000-0000-000000000000
+  --asset-id 00000000-0000-0000-0000-000000000000 \
+  --rewrite-playback-base
 ```
 
-The verifier checks API `/readyz`, edge `/readyz`, edge registration visibility
-via Postgres or the internal heartbeat endpoint, signed playback for the
-provided asset, and playback analytics increasing after the smoke request.
+The verifier checks API `/readyz`, private edge `/readyz`, all expected edge
+registrations, the public deny surface, warmed `HIT` signed playback on each
+edge, playback analytics increasing after the smoke requests, no
+dropped-telemetry increase, and telemetry spool bytes returning to `0`.
 
 ## Deploy Order
 

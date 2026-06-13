@@ -174,6 +174,8 @@ require_file .env.docker.example
 require_file docs/deployment-v1.md
 require_file docs/edge-host-runbook-v1.md
 require_file docs/release-images-v1.md
+require_file docs/templates/control-plane.Caddyfile
+require_file docs/templates/edge-host.Caddyfile
 require_file docs/templates/control-plane.compose.yml
 require_file docs/templates/edge-host.compose.yml
 require_file scripts/operator-common.sh
@@ -182,6 +184,7 @@ require_file scripts/preflight-control-plane-host.sh
 require_file scripts/preflight-edge-host.sh
 require_file scripts/deploy-control-plane-host.sh
 require_file scripts/deploy-edge-host.sh
+require_file scripts/quarantine-telemetry-spool-lines.sh
 require_file scripts/verify-first-host-deploy.sh
 
 require_compose_service compose.yml rend-api
@@ -224,10 +227,40 @@ require_contains docs/templates/edge-host.compose.yml "/etc/rend/rend-edge.env"
 require_contains docs/templates/edge-host.compose.yml "/var/lib/rend/edge-cache"
 require_contains docs/templates/edge-host.compose.yml "/var/spool/rend/edge-telemetry"
 require_contains docs/templates/edge-host.compose.yml "http://127.0.0.1:4100/readyz"
+require_contains docs/templates/edge-host.compose.yml '${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}'
+
+require_contains docs/templates/control-plane.Caddyfile 'remote_ip {$REND_CONTROL_PLANE_ALLOWED_EDGE_IPS}'
+require_contains docs/templates/control-plane.Caddyfile "path /internal/*"
+require_contains docs/templates/control-plane.Caddyfile "reverse_proxy 127.0.0.1:4000"
+require_contains docs/templates/control-plane.Caddyfile "respond 404"
+
+require_contains docs/templates/edge-host.Caddyfile "path /internal/* /metrics"
+require_contains docs/templates/edge-host.Caddyfile "path_regexp canonical_playback ^/v/[0-9a-f]{8}"
+require_contains docs/templates/edge-host.Caddyfile "opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts"
+require_contains docs/templates/edge-host.Caddyfile "reverse_proxy 127.0.0.1:4100"
+require_contains docs/templates/edge-host.Caddyfile 'remote_ip {$REND_EDGE_ALLOWED_PRIVATE_IPS}'
+require_contains docs/templates/edge-host.Caddyfile 'REND_EDGE_PRIVATE_HOSTNAME'
+
+require_contains scripts/operator-common.sh "operator_check_manifest_image_pulls"
+require_contains scripts/operator-common.sh "docker image pull"
+require_contains scripts/operator-common.sh "operator_check_edge_publish_addr_policy"
+require_contains scripts/preflight-control-plane-host.sh "operator_check_manifest_image_pulls"
+require_contains scripts/preflight-edge-host.sh "operator_check_manifest_image_pulls"
+require_contains scripts/preflight-edge-host.sh "--allow-direct-edge-exposure"
+require_contains scripts/preflight-edge-host.sh 'publish_addr="${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}"'
+require_contains scripts/quarantine-telemetry-spool-lines.sh "playback-events.quarantine.jsonl"
+require_contains scripts/verify-first-host-deploy.sh "--edge-internal-base"
+require_contains scripts/verify-first-host-deploy.sh "/v/not-a-uuid/hls/master.m3u8"
+require_contains scripts/verify-first-host-deploy.sh "rend_edge_telemetry_spool_bytes"
 
 require_contains docs/edge-host-runbook-v1.md "public playback"
 require_contains docs/edge-host-runbook-v1.md "private/internal"
 require_contains docs/edge-host-runbook-v1.md "metrics"
+require_contains docs/edge-host-runbook-v1.md "docs/templates/edge-host.Caddyfile"
+require_contains docs/edge-host-runbook-v1.md "docs/templates/control-plane.Caddyfile"
+require_contains docs/edge-host-runbook-v1.md "quarantine-telemetry-spool-lines.sh"
+require_contains docs/edge-host-runbook-v1.md "docker login ghcr.io"
+require_contains docs/edge-host-runbook-v1.md "--edge-internal-base"
 require_contains docs/edge-host-runbook-v1.md "REND_EXPECTED_EDGES"
 require_contains docs/edge-host-runbook-v1.md "rend_edge_cache_requests_total"
 require_contains docs/edge-host-runbook-v1.md "stream-while-write"
@@ -250,9 +283,11 @@ require_contains docs/deployment-v1.md "scripts/validate-production-env.sh"
 require_contains docs/deployment-v1.md "scripts/preflight-control-plane-host.sh"
 require_contains docs/deployment-v1.md "scripts/preflight-edge-host.sh"
 require_contains docs/deployment-v1.md "scripts/verify-first-host-deploy.sh"
+require_contains docs/deployment-v1.md "manifest image pull readiness"
 require_contains docs/release-images-v1.md "Canonical Images"
 require_contains docs/release-images-v1.md "Production Gates"
 require_contains docs/release-images-v1.md "image_digest"
+require_contains docs/release-images-v1.md "docker login ghcr.io"
 require_contains docs/release-images-v1.md "--allow-dirty"
 require_contains docs/release-images-v1.md '`--push` requires'
 require_contains docs/release-images-v1.md "scripts/check-docker-image-versions.sh --running"

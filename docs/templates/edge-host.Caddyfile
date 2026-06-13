@@ -1,0 +1,42 @@
+{
+	admin off
+}
+
+# Public edge ingress. Only canonical signed playback paths reach rend-edge.
+# Every other public path, including /internal/*, /metrics, probes, and
+# non-canonical /v/* paths, returns 404.
+{$REND_EDGE_PUBLIC_HOSTNAME} {
+	@blocked_private {
+		path /internal/* /metrics
+	}
+	handle @blocked_private {
+		respond 404
+	}
+
+	@canonical_playback {
+		path_regexp canonical_playback ^/v/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(opener\.mp4|hls/master\.m3u8|hls/segment_[0-9]+\.ts)$
+	}
+	handle @canonical_playback {
+		reverse_proxy 127.0.0.1:4100
+	}
+
+	handle {
+		respond 404
+	}
+}
+
+# Private edge ingress for control-plane warm/purge, operator readiness, and
+# metrics. Keep this hostname or listener on a private path and restrict source
+# IPs to the control plane, monitoring, and operator bastion/VPN ranges.
+{$REND_EDGE_PRIVATE_HOSTNAME} {
+	@allowed_private {
+		path /internal/* /metrics /healthz /readyz
+		remote_ip {$REND_EDGE_ALLOWED_PRIVATE_IPS}
+	}
+	handle @allowed_private {
+		reverse_proxy 127.0.0.1:4100
+	}
+	handle {
+		respond 404
+	}
+}
