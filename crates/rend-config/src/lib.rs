@@ -38,3 +38,8 @@ pub fn env_duration_secs(key: &str, default_secs: u64) -> Result<Duration> {
         u64::from_str(&value).with_context(|| format!("{key} must be a number of seconds"))?;
     Ok(Duration::from_secs(secs))
 }
+
+pub fn env_usize(key: &str, default: usize) -> Result<usize> {
+    let value = env_string(key, &default.to_string());
+    usize::from_str(&value).with_context(|| format!("{key} must be a positive integer"))
+}
