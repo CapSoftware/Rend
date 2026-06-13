@@ -71,7 +71,26 @@ approved accounts while delivery economics are measured.
 
 ## In this repo
 
-- [`site/`](./site) — the landing page at Rend.so, Next.js and Tailwind v4
+- [`apps/site/`](./apps/site) — the landing page at Rend.so, Next.js and Tailwind v4
+- [`packages/`](./packages) — shared packages for future apps and services
+
+## Develop
+
+This repo uses Bun workspaces and Turborepo.
+
+```bash
+bun install
+bun dev
+```
+
+Use `bun run build` for production builds and `bun typecheck` for TypeScript.
+`bun build` is Bun's native bundler command, so it does not run the package
+script.
+
+Root `.env*` files are loaded into app scripts through `scripts/with-root-env.mjs`.
+Copy `.env.example` to `.env.local` for local secrets. App-specific `.env*` files
+inside `apps/*` can override shared root values when a service needs its own
+configuration.
 
 ## License
 
