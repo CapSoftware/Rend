@@ -1,6 +1,7 @@
 docs/*
 !docs/deployment-v1.md
 !docs/edge-host-runbook-v1.md
+!docs/release-images-v1.md
 !docs/env/
 !docs/env/*.env.example
 !docs/templates/
