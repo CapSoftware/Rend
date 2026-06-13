@@ -18,7 +18,7 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -50,6 +50,8 @@ const HARD_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const EDGE_WARM_LOG_BODY_LIMIT_BYTES: usize = 1024;
 const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
+const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
+const MAX_ASSET_EVENTS_LIMIT: usize = 100;
 const PLAYER_HARNESS_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -733,6 +735,53 @@ struct CreateVideoResponse {
 }
 
 #[derive(Serialize)]
+struct AssetCurrentResponse {
+    asset_id: String,
+    source_state: String,
+    playable_state: String,
+    created_at: String,
+    updated_at: String,
+    artifacts: Vec<AssetArtifactSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct AssetArtifactSummary {
+    kind: String,
+    content_type: String,
+    byte_size: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AssetEventsResponse {
+    asset_id: String,
+    events: Vec<AssetEventResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_after_sequence: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct AssetEventResponse {
+    id: String,
+    asset_id: String,
+    sequence: i64,
+    event_type: String,
+    created_at: String,
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetEventsQuery {
+    after_sequence: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NormalizedAssetEventsQuery {
+    after_sequence: i64,
+    limit: usize,
+}
+
+#[derive(Serialize)]
 struct PlaybackBootstrapResponse {
     asset_id: String,
     source_state: String,
@@ -880,6 +929,8 @@ async fn main() -> Result<()> {
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
+        .route("/v1/assets/{asset_id}", get(get_asset_current))
+        .route("/v1/assets/{asset_id}/events", get(get_asset_events))
         .route("/v1/assets/{asset_id}/playback", get(get_asset_playback))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -980,6 +1031,57 @@ async fn create_video(
     }
 }
 
+async fn get_asset_current(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+) -> Response {
+    match get_asset_current_inner(state, asset_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_asset_current_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+) -> Result<AssetCurrentResponse, AppError> {
+    let asset = fetch_asset_state_record(&state.db, &asset_id).await?;
+    let artifacts = if asset.is_some() {
+        fetch_asset_artifact_summaries(&state.db, &asset_id).await?
+    } else {
+        Vec::new()
+    };
+
+    asset_current_response(asset, artifacts)
+}
+
+async fn get_asset_events(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+    Query(query): Query<AssetEventsQuery>,
+) -> Response {
+    match get_asset_events_inner(state, asset_id, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_asset_events_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+    query: AssetEventsQuery,
+) -> Result<AssetEventsResponse, AppError> {
+    let asset_exists = asset_exists(&state.db, &asset_id).await?;
+    let query = normalize_asset_events_query(query);
+    let events = if asset_exists {
+        fetch_asset_events(&state.db, &asset_id, query.after_sequence, query.limit).await?
+    } else {
+        Vec::new()
+    };
+
+    asset_events_response(asset_exists, asset_id, events)
+}
+
 async fn get_asset_playback(
     State(state): State<Arc<AppState>>,
     AxumPath(asset_id): AxumPath<String>,
@@ -1010,6 +1112,128 @@ async fn get_asset_playback_inner(
         state.config.playback_bootstrap_prefetch_segments,
         now,
     )
+}
+
+async fn fetch_asset_state_record(
+    db: &PgPool,
+    asset_id: &str,
+) -> Result<Option<AssetStateRecord>, AppError> {
+    let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+        "
+        SELECT id::text,
+               source_state,
+               playable_state,
+               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+        FROM rend.assets
+        WHERE id::text = $1
+          AND deleted_at IS NULL
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(row.map(
+        |(asset_id, source_state, playable_state, created_at, updated_at)| AssetStateRecord {
+            asset_id,
+            source_state,
+            playable_state,
+            created_at,
+            updated_at,
+        },
+    ))
+}
+
+async fn fetch_asset_artifact_summaries(
+    db: &PgPool,
+    asset_id: &str,
+) -> Result<Vec<AssetArtifactSummary>, AppError> {
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "
+        SELECT kind, content_type, byte_size
+        FROM rend.artifacts
+        WHERE asset_id::text = $1
+        ORDER BY kind, object_key
+        ",
+    )
+    .bind(asset_id)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(kind, content_type, byte_size)| AssetArtifactSummary {
+            kind,
+            content_type,
+            byte_size,
+        })
+        .collect())
+}
+
+async fn asset_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
+    let exists: bool = sqlx::query_scalar(
+        "
+        SELECT EXISTS (
+          SELECT 1
+          FROM rend.assets
+          WHERE id::text = $1
+            AND deleted_at IS NULL
+        )
+        ",
+    )
+    .bind(asset_id)
+    .fetch_one(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(exists)
+}
+
+async fn fetch_asset_events(
+    db: &PgPool,
+    asset_id: &str,
+    after_sequence: i64,
+    limit: usize,
+) -> Result<Vec<AssetEventRecord>, AppError> {
+    let limit = i64::try_from(limit).map_err(AppError::internal)?;
+    let rows: Vec<(String, String, i64, String, String, String)> = sqlx::query_as(
+        "
+        SELECT id::text,
+               asset_id::text,
+               sequence,
+               event_type,
+               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               metadata::text
+        FROM rend.asset_events
+        WHERE asset_id::text = $1
+          AND sequence > $2
+        ORDER BY sequence
+        LIMIT $3
+        ",
+    )
+    .bind(asset_id)
+    .bind(after_sequence)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, asset_id, sequence, event_type, created_at, metadata_json)| AssetEventRecord {
+                id,
+                asset_id,
+                sequence,
+                event_type,
+                created_at,
+                metadata_json,
+            },
+        )
+        .collect())
 }
 
 async fn fetch_asset_playback_record(
@@ -1064,6 +1288,63 @@ async fn fetch_playback_artifacts(
             content_type,
         })
         .collect())
+}
+
+fn asset_current_response(
+    asset: Option<AssetStateRecord>,
+    artifacts: Vec<AssetArtifactSummary>,
+) -> Result<AssetCurrentResponse, AppError> {
+    let asset = asset.ok_or_else(|| AppError::not_found("asset not found"))?;
+
+    Ok(AssetCurrentResponse {
+        asset_id: asset.asset_id,
+        source_state: asset.source_state,
+        playable_state: asset.playable_state,
+        created_at: asset.created_at,
+        updated_at: asset.updated_at,
+        artifacts,
+    })
+}
+
+fn normalize_asset_events_query(query: AssetEventsQuery) -> NormalizedAssetEventsQuery {
+    NormalizedAssetEventsQuery {
+        after_sequence: query.after_sequence.unwrap_or(0).max(0),
+        limit: query
+            .limit
+            .unwrap_or(DEFAULT_ASSET_EVENTS_LIMIT)
+            .clamp(1, MAX_ASSET_EVENTS_LIMIT),
+    }
+}
+
+fn asset_events_response(
+    asset_exists: bool,
+    asset_id: String,
+    mut records: Vec<AssetEventRecord>,
+) -> Result<AssetEventsResponse, AppError> {
+    if !asset_exists {
+        return Err(AppError::not_found("asset not found"));
+    }
+
+    records.sort_by_key(|record| record.sequence);
+    let mut events = Vec::with_capacity(records.len());
+    for record in records {
+        let metadata = serde_json::from_str(&record.metadata_json).map_err(AppError::internal)?;
+        events.push(AssetEventResponse {
+            id: record.id,
+            asset_id: record.asset_id,
+            sequence: record.sequence,
+            event_type: record.event_type,
+            created_at: record.created_at,
+            metadata,
+        });
+    }
+    let next_after_sequence = events.last().map(|event| event.sequence);
+
+    Ok(AssetEventsResponse {
+        asset_id,
+        events,
+        next_after_sequence,
+    })
 }
 
 fn playback_bootstrap_response(
@@ -2025,6 +2306,16 @@ mod tests {
         }
     }
 
+    fn asset_state_record(playable_state: &str) -> AssetStateRecord {
+        AssetStateRecord {
+            asset_id: "asset-123".to_owned(),
+            source_state: "uploaded".to_owned(),
+            playable_state: playable_state.to_owned(),
+            created_at: "2026-06-13T12:00:00.000Z".to_owned(),
+            updated_at: "2026-06-13T12:01:00.000Z".to_owned(),
+        }
+    }
+
     fn artifact_record(
         kind: impl Into<String>,
         object_key: impl Into<String>,
@@ -2034,6 +2325,17 @@ mod tests {
             kind: kind.into(),
             object_key: object_key.into(),
             content_type: content_type.into(),
+        }
+    }
+
+    fn event_record(sequence: i64, event_type: &str) -> AssetEventRecord {
+        AssetEventRecord {
+            id: format!("event-{sequence}"),
+            asset_id: "asset-123".to_owned(),
+            sequence,
+            event_type: event_type.to_owned(),
+            created_at: "2026-06-13T12:00:00.000Z".to_owned(),
+            metadata_json: r#"{"ok":true}"#.to_owned(),
         }
     }
 
