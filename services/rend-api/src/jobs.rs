@@ -48,22 +48,25 @@ pub async fn claim_next_media_job(
     let row: Option<(String, String, i32, i32)> = sqlx::query_as(
         "
         WITH next_job AS (
-          SELECT id
-          FROM rend.media_jobs
-          WHERE job_type = $1
+          SELECT job.id
+          FROM rend.media_jobs job
+          JOIN rend.assets asset
+            ON asset.id = job.asset_id
+           AND asset.deleted_at IS NULL
+          WHERE job.job_type = $1
             AND (
-              (status = $2 AND run_after <= now())
+              (job.status = $2 AND job.run_after <= now())
               OR (
-                status = $3
-                AND locked_at IS NOT NULL
-                AND locked_at < now() - ($5::bigint * interval '1 second')
+                job.status = $3
+                AND job.locked_at IS NOT NULL
+                AND job.locked_at < now() - ($5::bigint * interval '1 second')
               )
             )
           ORDER BY
-            CASE WHEN status = $2 THEN 0 ELSE 1 END,
-            run_after,
-            created_at,
-            id
+            CASE WHEN job.status = $2 THEN 0 ELSE 1 END,
+            job.run_after,
+            job.created_at,
+            job.id
           FOR UPDATE SKIP LOCKED
           LIMIT 1
         )
