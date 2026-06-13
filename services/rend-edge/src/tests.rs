@@ -206,6 +206,7 @@ fn test_state_with_max_in_flight_and_telemetry(
         playback_keyring: test_auth().0,
         warm_max_artifacts: 4,
         max_in_flight_fills,
+        control_plane: None,
         request_timeout: Duration::from_secs(10),
     };
     let s3 = build_s3_client(&config);
