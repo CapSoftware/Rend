@@ -1,0 +1,17 @@
+.git
+.github
+.rend
+.turbo
+apps/*/.next
+apps/*/out
+build
+coverage
+dist
+node_modules
+target
+*.log
+.env
+.env.*
+!.env.example
+!.env.docker.example
+fixtures/media/*.mp4
