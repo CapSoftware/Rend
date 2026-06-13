@@ -1,0 +1,10 @@
+[package]
+name = "rend-config"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dotenvy.workspace = true
