@@ -2126,6 +2126,7 @@ name = "rend-edge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
  "axum",
  "rend-config",
  "reqwest",
