@@ -1,5 +1,10 @@
 docs/*
 !docs/deployment-v1.md
+!docs/edge-host-runbook-v1.md
+!docs/env/
+!docs/env/*.env.example
+!docs/templates/
+!docs/templates/*.yml
 
 # rust
 target/
