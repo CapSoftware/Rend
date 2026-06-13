@@ -3,6 +3,9 @@
 This document defines the V1 production shape and the local Docker topology. It
 does not provision cloud resources.
 
+For first real us-east and london edge host trials, use the operational runbook
+and production-style examples in [`docs/edge-host-runbook-v1.md`](edge-host-runbook-v1.md).
+
 ## Service Topology
 
 - `rend-api`: Rust API and control plane. It owns upload ingest, asset state,
