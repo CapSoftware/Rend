@@ -168,7 +168,7 @@ services:
     volumes:
       - rend-minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
       timeout: 3s
       retries: 20
