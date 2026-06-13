@@ -157,6 +157,30 @@ print(response["asset_id"])
 PY
 )"
 
+playback_url="$(
+  python3 - "$upload_response" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    response = json.load(f)
+playback_url = response.get("playback_url", "")
+if not playback_url:
+    raise SystemExit("response missing playback_url")
+print(playback_url)
+PY
+)"
+
+expected_playback_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
+if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
+  echo "expected signed HLS playback_url for asset $asset_id at the edge manifest path" >&2
+  exit 1
+fi
+
+token="${playback_url#*\?token=}"
+if [[ "$token" == "$playback_url" || -z "$token" ]]; then
+  echo "playback_url did not include a token query parameter" >&2
+  exit 1
+fi
+
 header_value() {
   python3 - "$1" "$2" <<'PY'
 import sys
