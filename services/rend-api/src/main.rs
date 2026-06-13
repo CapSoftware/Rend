@@ -651,6 +651,7 @@ struct EventStreamBody {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_rustls_crypto_provider();
     load_dotenv();
     init_tracing();
     let command = std::env::args().skip(1).collect::<Vec<_>>();
@@ -698,6 +699,12 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("rend-api server failed")
+}
+
+fn install_rustls_crypto_provider() {
+    // Redis TLS does not select a provider when both ring and aws-lc-rs are
+    // enabled transitively through the workspace dependency graph.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 async fn run_media_worker(state: Arc<AppState>) -> Result<()> {

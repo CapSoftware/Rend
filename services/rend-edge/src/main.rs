@@ -542,6 +542,7 @@ enum PurgeRequestError {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_rustls_crypto_provider();
     load_dotenv();
     init_tracing();
 
@@ -583,6 +584,12 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("rend-edge server failed")
+}
+
+fn install_rustls_crypto_provider() {
+    // Keep rustls provider selection deterministic when transitive dependencies
+    // enable both ring and aws-lc-rs.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn build_s3_client(config: &EdgeConfig) -> S3Client {

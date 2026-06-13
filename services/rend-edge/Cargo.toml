@@ -14,6 +14,7 @@ fs2.workspace = true
 rend-config.workspace = true
 rend-playback-auth.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

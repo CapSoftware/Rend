@@ -28,6 +28,7 @@ redis = { version = "0.32.7", default-features = false, features = ["tokio-rustl
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls"] }
 rend-config = { path = "crates/rend-config" }
 rend-playback-auth = { path = "crates/rend-playback-auth" }
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
