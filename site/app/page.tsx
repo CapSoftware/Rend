@@ -135,8 +135,8 @@ export default function Home() {
       </header>
 
       <main>
-        <section className="mx-auto max-w-[760px] px-6 pb-20 pt-[92px] text-center">
-          <h1 className="mb-7 text-[clamp(40px,7vw,62px)]">
+        <section className="mx-auto max-w-[760px] px-6 pb-16 pt-[64px] text-center sm:pb-20 sm:pt-[92px]">
+          <h1 className="mb-7 text-[clamp(33px,8.5vw,62px)]">
             Video infrastructure, built for{" "}
             <span className="relative inline-block whitespace-nowrap">
               speed
@@ -154,7 +154,7 @@ export default function Home() {
         </section>
 
         <section
-          className="mx-auto grid max-w-[1080px] grid-cols-1 gap-4 px-6 pb-[110px] md:grid-cols-2 lg:grid-cols-3"
+          className="mx-auto grid max-w-[1080px] grid-cols-1 gap-4 px-6 pb-20 md:grid-cols-2 md:pb-[110px] lg:grid-cols-3"
           aria-label="What Rend does"
         >
           <article className="card reveal md:col-span-2">
@@ -262,8 +262,8 @@ export default function Home() {
           </article>
         </section>
 
-        <section className="reveal mx-auto max-w-[880px] px-6 pb-[110px] text-center">
-          <h2 className="mb-[18px] text-[clamp(30px,5vw,42px)]">Why it&apos;s fast</h2>
+        <section className="reveal mx-auto max-w-[880px] px-6 pb-20 text-center md:pb-[110px]">
+          <h2 className="mb-[18px] text-[clamp(27px,6vw,42px)]">Why it&apos;s fast</h2>
           <p className="mx-auto mb-14 max-w-[620px] text-[17px] text-muted">
             When a video feels slow, the server is rarely the problem. Almost all of the wait
             is messages crossing the internet, back and forth, before the first frame can show.
