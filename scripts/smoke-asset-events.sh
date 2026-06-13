@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
+source "$root_dir/scripts/smoke-common.sh"
 
 api_base="${REND_API_BASE_URL:-http://127.0.0.1:4000}"
 edge_base="${REND_EDGE_BASE_URL:-http://127.0.0.1:4100}"
@@ -14,9 +15,12 @@ api_started=0
 api_pid=""
 edge_started=0
 edge_pid=""
+worker_started=0
+worker_pid=""
 
 cleanup() {
   rm -rf "$tmp_dir"
+  stop_media_worker
   if [[ "$edge_started" == "1" && -n "$edge_pid" ]]; then
     kill "$edge_pid" >/dev/null 2>&1 || true
     wait "$edge_pid" >/dev/null 2>&1 || true
@@ -64,6 +68,10 @@ export REND_PLAYBACK_TOKEN_TTL_SECS="${REND_PLAYBACK_TOKEN_TTL_SECS:-900}"
 export REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS="${REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS:-2}"
 export REND_HTTP_TIMEOUT_SECS="${REND_HTTP_TIMEOUT_SECS:-120}"
 export REND_MEDIA_PROCESS_TIMEOUT_SECS="${REND_MEDIA_PROCESS_TIMEOUT_SECS:-60}"
+export REND_API_INLINE_MEDIA_PROCESSING="${REND_API_INLINE_MEDIA_PROCESSING:-false}"
+export REND_MEDIA_JOB_MAX_ATTEMPTS="${REND_MEDIA_JOB_MAX_ATTEMPTS:-3}"
+export REND_MEDIA_WORKER_POLL_INTERVAL_SECS="${REND_MEDIA_WORKER_POLL_INTERVAL_SECS:-1}"
+export REND_MEDIA_JOB_LOCK_TIMEOUT_SECS="${REND_MEDIA_JOB_LOCK_TIMEOUT_SECS:-300}"
 export REND_FFMPEG_PATH="${REND_FFMPEG_PATH:-ffmpeg}"
 export REND_FFPROBE_PATH="${REND_FFPROBE_PATH:-ffprobe}"
 export REND_EDGE_BIND_ADDR="${REND_EDGE_BIND_ADDR:-127.0.0.1:4100}"
@@ -129,6 +137,7 @@ for _ in $(seq 1 120); do
 done
 
 curl -fsS "$edge_base/readyz" >/dev/null
+start_media_worker "rend-api-media-worker-asset-events-smoke"
 
 upload_response="$tmp_dir/upload.json"
 status_code="$(
@@ -146,20 +155,7 @@ if [[ "$status_code" != "201" ]]; then
 fi
 
 asset_id="$(
-  python3 - "$upload_response" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    response = json.load(f)
-required = ["asset_id", "source_state", "playable_state", "playback_url"]
-missing = [key for key in required if key not in response]
-if missing:
-    raise SystemExit(f"upload response missing fields: {', '.join(missing)}")
-if response["source_state"] != "uploaded":
-    raise SystemExit(f"expected source_state uploaded, got {response['source_state']}")
-if response["playable_state"] != "hls_ready":
-    raise SystemExit(f"expected playable_state hls_ready, got {response['playable_state']}")
-print(response["asset_id"])
-PY
+  assert_async_upload_response "$upload_response"
 )"
 
 expect_http() {
@@ -187,6 +183,8 @@ expect_http "unknown-events" "404" \
   -H "authorization: Bearer $REND_DEV_API_KEY"
 
 asset_response="$tmp_dir/asset.json"
+poll_asset_until_hls_ready "$asset_id" "$asset_response"
+
 status_code="$(
   curl -sS -o "$asset_response" -w "%{http_code}" \
     "$api_base/v1/assets/$asset_id" \
@@ -288,6 +286,8 @@ def first(name):
 asset_created = first("asset.created")
 source_started = first("source.upload_started")
 source_uploaded = first("source.uploaded")
+media_queued = first("media.processing_queued")
+response_ready = first("upload.response_ready")
 media_started = first("media.processing_started")
 artifact_indexes = [idx for idx, name in enumerate(types) if name == "artifact.generated"]
 if not artifact_indexes:
@@ -297,21 +297,25 @@ warm_attempted = first("edge.warming_attempted")
 warm_results = [idx for idx, name in enumerate(types) if name in {"edge.warming_succeeded", "edge.warming_failed"}]
 if not warm_results:
     raise SystemExit("missing edge warming result event")
-response_ready = first("upload.response_ready")
 
 ordered = [
     asset_created,
     source_started,
     source_uploaded,
+    media_queued,
+    response_ready,
     media_started,
     min(artifact_indexes),
     state_changed,
     warm_attempted,
     min(warm_results),
-    response_ready,
 ]
 if ordered != sorted(ordered):
     raise SystemExit(f"lifecycle events were out of expected order: {types}")
+
+response_ready_event = events[response_ready]
+if response_ready_event["metadata"].get("playable_state") != "not_playable":
+    raise SystemExit(f"upload.response_ready should describe the initial async state: {response_ready_event}")
 
 segment_events = [
     event for event in events
