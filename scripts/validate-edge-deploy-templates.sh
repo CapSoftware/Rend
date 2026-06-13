@@ -43,6 +43,7 @@ require_compose_service() {
 }
 
 api_vars=(
+  REND_ENV
   DATABASE_URL
   REND_REDIS_URL
   CLICKHOUSE_URL
@@ -60,7 +61,10 @@ api_vars=(
   REND_API_INLINE_MEDIA_PROCESSING
   REND_DEV_API_KEY
   REND_PLAYBACK_BASE_URL
+  REND_MAX_UPLOAD_BYTES
   REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS
+  REND_EXPECTED_EDGES
+  REND_ALLOW_INSECURE_EDGE_URLS
   REND_EDGE_WARM_URL
   REND_EDGE_PURGE_URL
   REND_EDGE_INTERNAL_TOKEN
@@ -84,6 +88,7 @@ api_vars=(
 )
 
 worker_vars=(
+  REND_ENV
   DATABASE_URL
   REND_REDIS_URL
   CLICKHOUSE_URL
@@ -100,7 +105,10 @@ worker_vars=(
   REND_API_INLINE_MEDIA_PROCESSING
   REND_DEV_API_KEY
   REND_PLAYBACK_BASE_URL
+  REND_MAX_UPLOAD_BYTES
   REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS
+  REND_EXPECTED_EDGES
+  REND_ALLOW_INSECURE_EDGE_URLS
   REND_EDGE_WARM_URL
   REND_EDGE_PURGE_URL
   REND_EDGE_INTERNAL_TOKEN
@@ -125,6 +133,7 @@ worker_vars=(
 )
 
 edge_vars=(
+  REND_ENV
   S3_ENDPOINT
   S3_REGION
   S3_BUCKET
@@ -134,14 +143,18 @@ edge_vars=(
   REND_EDGE_ID
   REND_EDGE_REGION
   REND_EDGE_BASE_URL
+  REND_EXPECTED_EDGES
+  REND_ALLOW_INSECURE_EDGE_URLS
   REND_CONTROL_PLANE_URL
   REND_EDGE_HEARTBEAT_INTERVAL_SECS
   REND_EDGE_CACHE_MAX_BYTES
+  REND_EDGE_CACHE_MIN_FREE_BYTES
   REND_EDGE_CACHE_DIR
   REND_EDGE_ORIGIN_HEALTH_URL
   REND_EDGE_INTERNAL_TOKEN
   REND_EDGE_WARM_MAX_ARTIFACTS
   REND_EDGE_MAX_IN_FLIGHT_FILLS
+  REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
   REND_EDGE_TELEMETRY_ENABLED
   REND_EDGE_TELEMETRY_INGEST_URL
   REND_INTERNAL_TELEMETRY_TOKEN
@@ -215,6 +228,9 @@ require_contains docs/templates/edge-host.compose.yml "http://127.0.0.1:4100/rea
 require_contains docs/edge-host-runbook-v1.md "public playback"
 require_contains docs/edge-host-runbook-v1.md "private/internal"
 require_contains docs/edge-host-runbook-v1.md "metrics"
+require_contains docs/edge-host-runbook-v1.md "REND_EXPECTED_EDGES"
+require_contains docs/edge-host-runbook-v1.md "rend_edge_cache_requests_total"
+require_contains docs/edge-host-runbook-v1.md "stream-while-write"
 require_contains docs/edge-host-runbook-v1.md "/var/lib/rend/edge-cache"
 require_contains docs/edge-host-runbook-v1.md "/var/spool/rend/edge-telemetry"
 require_contains docs/edge-host-runbook-v1.md "x-rend-internal-token"
@@ -226,6 +242,9 @@ require_contains docs/edge-host-runbook-v1.md "scripts/deploy-control-plane-host
 require_contains docs/edge-host-runbook-v1.md "scripts/deploy-edge-host.sh"
 require_contains docs/edge-host-runbook-v1.md "scripts/verify-first-host-deploy.sh"
 require_contains docs/deployment-v1.md "docs/edge-host-runbook-v1.md"
+require_contains docs/deployment-v1.md "REND_ENV=local|trial|production"
+require_contains docs/deployment-v1.md "REND_EXPECTED_EDGES"
+require_contains docs/deployment-v1.md "Full cache LRU eviction"
 require_contains docs/deployment-v1.md "docs/release-images-v1.md"
 require_contains docs/deployment-v1.md "scripts/validate-production-env.sh"
 require_contains docs/deployment-v1.md "scripts/preflight-control-plane-host.sh"
@@ -237,6 +256,18 @@ require_contains docs/release-images-v1.md "image_digest"
 require_contains docs/release-images-v1.md "--allow-dirty"
 require_contains docs/release-images-v1.md '`--push` requires'
 require_contains docs/release-images-v1.md "scripts/check-docker-image-versions.sh --running"
+
+scripts/validate-production-env.sh \
+  --role all \
+  --allow-placeholders \
+  --api-env docs/env/rend-api.env.example \
+  --worker-env docs/env/rend-media-worker.env.example \
+  --edge-env docs/env/rend-edge-us-east.env.example
+
+scripts/validate-production-env.sh \
+  --role edge-host \
+  --allow-placeholders \
+  --edge-env docs/env/rend-edge-london.env.example
 
 if [[ "$failures" != "0" ]]; then
   exit 1
