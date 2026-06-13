@@ -31,6 +31,8 @@ use tokio::{fs, io::AsyncWriteExt, net::TcpListener, sync::Notify};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod telemetry;
+
 const DEFAULT_WARM_MAX_ARTIFACTS: usize = 4;
 const HARD_WARM_MAX_ARTIFACTS: usize = 16;
 const DEFAULT_MAX_IN_FLIGHT_FILLS: usize = 64;
@@ -51,6 +53,7 @@ struct EdgeConfig {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     internal_token: String,
+    playback_telemetry: telemetry::TelemetryConfig,
     playback_keyring: SingleKeyring,
     warm_max_artifacts: usize,
     max_in_flight_fills: usize,
@@ -82,6 +85,9 @@ impl EdgeConfig {
             "REND_EDGE_MAX_IN_FLIGHT_FILLS must be between 1 and {HARD_MAX_IN_FLIGHT_FILLS}"
         );
 
+        let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
+        let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
+
         Ok(Self {
             bind_addr: env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?,
             edge_id: env_string("REND_EDGE_ID", "local-edge-001"),
@@ -96,7 +102,8 @@ impl EdgeConfig {
             s3_bucket: env_string("S3_BUCKET", "rend-local"),
             aws_access_key_id: env_string("AWS_ACCESS_KEY_ID", "rend_minio"),
             aws_secret_access_key: env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password"),
-            internal_token: env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token"),
+            internal_token: edge_internal_token,
+            playback_telemetry,
             playback_keyring,
             warm_max_artifacts,
             max_in_flight_fills,
@@ -111,6 +118,7 @@ struct AppState {
     http: reqwest::Client,
     s3: S3Client,
     in_flight_fills: Arc<FillRegistry>,
+    telemetry: telemetry::TelemetryHandle,
     started_at: Instant,
 }
 
@@ -407,11 +415,15 @@ async fn main() -> Result<()> {
 
     let request_timeout = config.request_timeout;
     let s3 = build_s3_client(&config);
+    let http = reqwest::Client::new();
+    let telemetry =
+        telemetry::TelemetryHandle::start(config.playback_telemetry.clone(), http.clone());
     let state = Arc::new(AppState {
         config,
-        http: reqwest::Client::new(),
+        http,
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        telemetry,
         started_at: Instant::now(),
     });
     let app = build_app(state.clone(), request_timeout);
@@ -547,10 +559,27 @@ async fn playback(
     AxumPath(path): AxumPath<PlaybackPath>,
     Query(query): Query<PlaybackQuery>,
 ) -> Response {
-    match playback_inner(state, path, query.token.as_deref()).await {
-        Ok(response) => response,
-        Err(error) => error.into_response(),
-    }
+    let started = Instant::now();
+    let asset_id = path.asset_id.clone();
+    let artifact_path = path.artifact_path.clone();
+    let result = playback_inner(state.clone(), path, query.token.as_deref()).await;
+    let (response, error_code) = match result {
+        Ok(response) => (response, None),
+        Err(error) => {
+            let error_code = error.telemetry_error_code();
+            (error.into_response(), Some(error_code))
+        }
+    };
+
+    record_playback_telemetry(
+        &state,
+        &asset_id,
+        &artifact_path,
+        &response,
+        started.elapsed(),
+        error_code,
+    );
+    response
 }
 
 async fn playback_inner(
@@ -596,6 +625,48 @@ async fn playback_inner(
             Ok(artifact_bytes_response(&artifact, "COALESCED", bytes))
         }
     }
+}
+
+fn record_playback_telemetry(
+    state: &AppState,
+    asset_id: &str,
+    artifact_path: &str,
+    response: &Response,
+    elapsed: Duration,
+    error_code: Option<&'static str>,
+) {
+    let cache_status = response
+        .headers()
+        .get("x-rend-cache")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("ERROR");
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json");
+    let bytes_served = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let duration_ms = u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX);
+
+    state
+        .telemetry
+        .record_playback(telemetry::PlaybackTelemetryInput {
+            asset_id,
+            artifact_path,
+            edge_id: &state.config.edge_id,
+            region: &state.config.region,
+            cache_status,
+            status_code: response.status().as_u16(),
+            bytes_served,
+            content_type,
+            duration_ms,
+            error_code,
+        });
 }
 
 async fn read_cache_file(path: &FsPath) -> std::result::Result<Option<Vec<u8>>, PlaybackError> {
@@ -1377,14 +1448,25 @@ impl IntoResponse for PlaybackError {
 }
 
 impl PlaybackError {
-    fn log_message(self) -> String {
+    fn log_message(&self) -> String {
         match self {
             PlaybackError::Unauthorized => "unauthorized playback token".to_owned(),
             PlaybackError::NotFound(message)
             | PlaybackError::OriginNotFound(message)
             | PlaybackError::Origin(message)
             | PlaybackError::Io(message)
-            | PlaybackError::Overloaded(message) => message,
+            | PlaybackError::Overloaded(message) => message.to_owned(),
+        }
+    }
+
+    fn telemetry_error_code(&self) -> &'static str {
+        match self {
+            PlaybackError::Unauthorized => "unauthorized",
+            PlaybackError::NotFound(_) => "not_found",
+            PlaybackError::OriginNotFound(_) => "origin_not_found",
+            PlaybackError::Origin(_) => "origin",
+            PlaybackError::Io(_) => "cache_io",
+            PlaybackError::Overloaded(_) => "overloaded",
         }
     }
 }
