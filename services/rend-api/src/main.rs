@@ -34,11 +34,13 @@ use rend_playback_auth::{
     is_valid_hls_segment_name,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod events;
 mod media;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -815,6 +817,13 @@ struct EdgeWarmRequest {
     artifact_paths: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EdgeWarmFailure {
+    reason: &'static str,
+    status: Option<u16>,
+    detail: String,
+}
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -1247,6 +1256,7 @@ async fn create_video_inner(
 ) -> Result<CreateVideoResponse, AppError> {
     let content_type = request_content_type(&headers);
     let content_length = request_content_length(&headers)?;
+    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
     let asset_id: String = sqlx::query_scalar(
         "
         INSERT INTO rend.assets (source_state, playable_state)
@@ -1254,9 +1264,26 @@ async fn create_video_inner(
         RETURNING id::text
         ",
     )
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+    events::insert_asset_event(
+        &mut tx,
+        &asset_id,
+        events::EVENT_ASSET_CREATED,
+        events::asset_created_metadata("uploading", "not_playable"),
+    )
+    .await
+    .map_err(AppError::internal)?;
+    events::insert_asset_event(
+        &mut tx,
+        &asset_id,
+        events::EVENT_SOURCE_UPLOAD_STARTED,
+        events::source_upload_started_metadata(&content_type, content_length),
+    )
+    .await
+    .map_err(AppError::internal)?;
+    tx.commit().await.map_err(AppError::internal)?;
 
     let source_object_key = source_object_key(&asset_id);
     let byte_count = Arc::new(AtomicU64::new(0));
@@ -1299,6 +1326,15 @@ async fn create_video_inner(
     .await
     .map_err(AppError::internal)?;
 
+    events::insert_asset_event(
+        &mut tx,
+        &asset_id,
+        events::EVENT_SOURCE_UPLOADED,
+        events::source_uploaded_metadata(&content_type, byte_size),
+    )
+    .await
+    .map_err(AppError::internal)?;
+
     sqlx::query(
         "
         UPDATE rend.assets
@@ -1311,6 +1347,15 @@ async fn create_video_inner(
     .await
     .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
+
+    events::insert_asset_event_pool(
+        &state.db,
+        &asset_id,
+        events::EVENT_MEDIA_PROCESSING_STARTED,
+        events::media_processing_started_metadata("uploaded", "not_playable"),
+    )
+    .await
+    .map_err(AppError::internal)?;
 
     let media_outcome = media::process_uploaded_source(media::ProcessMediaRequest {
         asset_id: asset_id.clone(),
@@ -1345,6 +1390,7 @@ async fn create_video_inner(
     }
 
     maybe_warm_edge(
+        Some(&state.db),
         &state.http,
         &state.config.edge_warm,
         &asset_id,
@@ -1361,6 +1407,15 @@ async fn create_video_inner(
         &state.config.playback_token_issuer,
         now,
     )
+    .map_err(AppError::internal)?;
+
+    events::insert_asset_event_pool(
+        &state.db,
+        &asset_id,
+        events::EVENT_UPLOAD_RESPONSE_READY,
+        events::upload_response_ready_metadata(&source_state, &playable_state, byte_size),
+    )
+    .await
     .map_err(AppError::internal)?;
 
     Ok(CreateVideoResponse {
@@ -1442,6 +1497,7 @@ fn playback_artifact_path(playable_state: &str) -> &'static str {
 }
 
 async fn maybe_warm_edge(
+    db: Option<&PgPool>,
     http: &reqwest::Client,
     config: &EdgeWarmConfig,
     asset_id: &str,
@@ -1454,11 +1510,58 @@ async fn maybe_warm_edge(
         return;
     };
 
-    if let Err(error) = send_edge_warm_request(http, config, &request).await {
+    if let Some(db) = db {
+        record_edge_warm_event(
+            db,
+            asset_id,
+            events::EVENT_EDGE_WARMING_ATTEMPTED,
+            events::edge_warming_metadata(&request.artifact_paths),
+        )
+        .await;
+    }
+
+    match send_edge_warm_request(http, config, &request).await {
+        Ok(()) => {
+            if let Some(db) = db {
+                record_edge_warm_event(
+                    db,
+                    asset_id,
+                    events::EVENT_EDGE_WARMING_SUCCEEDED,
+                    events::edge_warming_metadata(&request.artifact_paths),
+                )
+                .await;
+            }
+        }
+        Err(error) => {
+            if let Some(db) = db {
+                record_edge_warm_event(
+                    db,
+                    asset_id,
+                    events::EVENT_EDGE_WARMING_FAILED,
+                    events::edge_warming_failed_metadata(
+                        &request.artifact_paths,
+                        error.reason,
+                        error.status,
+                    ),
+                )
+                .await;
+            }
+            tracing::warn!(
+                asset_id,
+                error = %error,
+                "edge warm request failed; upload remains playable",
+            );
+        }
+    }
+}
+
+async fn record_edge_warm_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
+    if let Err(error) = events::insert_asset_event_pool(db, asset_id, event_type, metadata).await {
         tracing::warn!(
             asset_id,
+            event_type,
             error = %error,
-            "edge warm request failed; upload remains playable",
+            "failed to record edge warm lifecycle event",
         );
     }
 }
@@ -1534,7 +1637,7 @@ async fn send_edge_warm_request(
     http: &reqwest::Client,
     config: &EdgeWarmConfig,
     request: &EdgeWarmRequest,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), EdgeWarmFailure> {
     let Some(url) = config.url.as_deref() else {
         return Ok(());
     };
@@ -1545,7 +1648,7 @@ async fn send_edge_warm_request(
         .json(request)
         .send()
         .await
-        .map_err(|error| format!("failed to call {url}: {error}"))?;
+        .map_err(|error| EdgeWarmFailure::request(error.to_string()))?;
     let status = response.status();
     if status.is_success() {
         return Ok(());
@@ -1556,9 +1659,12 @@ async fn send_edge_warm_request(
         .await
         .unwrap_or_else(|error| format!("failed to read warm response body: {error}"));
 
-    Err(format!(
-        "edge warm endpoint returned {status}: {}",
-        limit_log_body(&body)
+    Err(EdgeWarmFailure::status(
+        status.as_u16(),
+        format!(
+            "edge warm endpoint returned {status}: {}",
+            limit_log_body(&body)
+        ),
     ))
 }
 
@@ -1733,6 +1839,30 @@ impl AppError {
             status: StatusCode::BAD_GATEWAY,
             message: "failed to store source object".to_owned(),
         }
+    }
+}
+
+impl EdgeWarmFailure {
+    fn request(detail: String) -> Self {
+        Self {
+            reason: "request_failed",
+            status: None,
+            detail,
+        }
+    }
+
+    fn status(status: u16, detail: String) -> Self {
+        Self {
+            reason: "status_error",
+            status: Some(status),
+            detail,
+        }
+    }
+}
+
+impl std::fmt::Display for EdgeWarmFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.detail.fmt(formatter)
     }
 }
 
@@ -1984,6 +2114,180 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn current_asset_endpoint_requires_dev_api_key() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+
+        let response = route_response(app.clone(), "/v1/assets/asset-123", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response =
+            route_response(app, "/v1/assets/asset-123", Some("Bearer wrong-secret")).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn asset_events_endpoint_requires_dev_api_key() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+
+        let response = route_response(app.clone(), "/v1/assets/asset-123/events", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(
+            app,
+            "/v1/assets/asset-123/events",
+            Some("Bearer wrong-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn current_asset_unknown_asset_returns_404() {
+        let Err(error) = asset_current_response(None, Vec::new()) else {
+            panic!("unknown asset unexpectedly returned current state JSON");
+        };
+
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "asset not found");
+    }
+
+    #[test]
+    fn current_asset_returns_artifact_summary() {
+        let response = asset_current_response(
+            Some(asset_state_record("hls_ready")),
+            vec![
+                AssetArtifactSummary {
+                    kind: "opener".to_owned(),
+                    content_type: "video/mp4".to_owned(),
+                    byte_size: Some(123),
+                },
+                AssetArtifactSummary {
+                    kind: "manifest".to_owned(),
+                    content_type: "application/vnd.apple.mpegurl".to_owned(),
+                    byte_size: Some(456),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(response.asset_id, "asset-123");
+        assert_eq!(response.source_state, "uploaded");
+        assert_eq!(response.playable_state, "hls_ready");
+        assert_eq!(response.artifacts.len(), 2);
+        assert_eq!(response.artifacts[0].kind, "opener");
+        assert_eq!(response.artifacts[0].content_type, "video/mp4");
+        assert_eq!(response.artifacts[0].byte_size, Some(123));
+    }
+
+    #[test]
+    fn asset_events_unknown_asset_returns_404() {
+        let Err(error) = asset_events_response(false, "asset-123".to_owned(), Vec::new()) else {
+            panic!("unknown asset unexpectedly returned lifecycle events");
+        };
+
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "asset not found");
+    }
+
+    #[test]
+    fn asset_events_response_orders_by_sequence() {
+        let response = asset_events_response(
+            true,
+            "asset-123".to_owned(),
+            vec![
+                event_record(3, events::EVENT_SOURCE_UPLOADED),
+                event_record(1, events::EVENT_ASSET_CREATED),
+                event_record(2, events::EVENT_SOURCE_UPLOAD_STARTED),
+            ],
+        )
+        .unwrap();
+
+        let sequences = response
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![1, 2, 3]);
+        assert_eq!(response.next_after_sequence, Some(3));
+    }
+
+    #[test]
+    fn asset_events_query_clamps_after_sequence_and_limit() {
+        assert_eq!(
+            normalize_asset_events_query(AssetEventsQuery {
+                after_sequence: Some(-10),
+                limit: Some(0),
+            }),
+            NormalizedAssetEventsQuery {
+                after_sequence: 0,
+                limit: 1,
+            }
+        );
+        assert_eq!(
+            normalize_asset_events_query(AssetEventsQuery {
+                after_sequence: Some(12),
+                limit: Some(MAX_ASSET_EVENTS_LIMIT + 500),
+            }),
+            NormalizedAssetEventsQuery {
+                after_sequence: 12,
+                limit: MAX_ASSET_EVENTS_LIMIT,
+            }
+        );
+    }
+
+    #[test]
+    fn upload_media_flow_records_required_lifecycle_event_types() {
+        let artifacts = vec![
+            events::ArtifactEventInput {
+                kind: "opener",
+                object_key: "videos/asset-123/opener.mp4",
+                content_type: "video/mp4",
+                byte_size: 100,
+            },
+            events::ArtifactEventInput {
+                kind: "manifest",
+                object_key: "videos/asset-123/hls/master.m3u8",
+                content_type: "application/vnd.apple.mpegurl",
+                byte_size: 50,
+            },
+            events::ArtifactEventInput {
+                kind: "segment",
+                object_key: "videos/asset-123/hls/segment_00000.ts",
+                content_type: "video/mp2t",
+                byte_size: 25,
+            },
+        ];
+        let artifact_events = events::artifact_generated_events("asset-123", &artifacts);
+        let mut event_types = vec![
+            events::EVENT_ASSET_CREATED,
+            events::EVENT_SOURCE_UPLOAD_STARTED,
+            events::EVENT_SOURCE_UPLOADED,
+            events::EVENT_MEDIA_PROCESSING_STARTED,
+        ];
+        event_types.extend(artifact_events.iter().map(|event| event.event_type));
+        event_types.extend([
+            events::EVENT_PLAYABLE_STATE_CHANGED,
+            events::EVENT_EDGE_WARMING_ATTEMPTED,
+            events::EVENT_EDGE_WARMING_SUCCEEDED,
+            events::EVENT_UPLOAD_RESPONSE_READY,
+        ]);
+
+        for required in [
+            events::EVENT_ASSET_CREATED,
+            events::EVENT_SOURCE_UPLOAD_STARTED,
+            events::EVENT_SOURCE_UPLOADED,
+            events::EVENT_MEDIA_PROCESSING_STARTED,
+            events::EVENT_ARTIFACT_GENERATED,
+            events::EVENT_PLAYABLE_STATE_CHANGED,
+            events::EVENT_EDGE_WARMING_ATTEMPTED,
+            events::EVENT_EDGE_WARMING_SUCCEEDED,
+            events::EVENT_UPLOAD_RESPONSE_READY,
+        ] {
+            assert!(event_types.contains(&required), "{required}");
+        }
+    }
+
     #[test]
     fn playback_bootstrap_unknown_asset_returns_404() {
         let result =
@@ -2187,6 +2491,7 @@ mod tests {
         ];
 
         maybe_warm_edge(
+            None,
             &reqwest::Client::new(),
             &config,
             "asset-123",
@@ -2222,6 +2527,7 @@ mod tests {
         };
 
         maybe_warm_edge(
+            None,
             &reqwest::Client::new(),
             &config,
             "asset-123",
