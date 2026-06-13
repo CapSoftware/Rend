@@ -72,6 +72,11 @@ approved accounts while delivery economics are measured.
 ## In this repo
 
 - [`apps/site/`](./apps/site) — the landing page at Rend.so, Next.js and Tailwind v4
+- [`services/rend-api/`](./services/rend-api) — Rust control-plane API skeleton
+- [`services/rend-edge/`](./services/rend-edge) — Rust playback edge skeleton
+- [`crates/`](./crates) — shared Rust crates
+- [`migrations/`](./migrations) — Postgres migrations for Rend-owned metadata
+- [`compose.yml`](./compose.yml) — local Postgres, MinIO, and Redis
 - [`packages/`](./packages) — shared packages for future apps and services
 
 ## Develop
@@ -91,6 +96,78 @@ Root `.env*` files are loaded into app scripts through `scripts/with-root-env.mj
 Copy `.env.example` to `.env.local` for local secrets. App-specific `.env*` files
 inside `apps/*` can override shared root values when a service needs its own
 configuration.
+
+### Local backend foundation
+
+This starts the V1 foundation: Postgres, MinIO, Redis, migrations,
+health-checking API/edge skeletons, and the raw source upload storage path.
+Playback and media processing are intentionally not implemented yet.
+
+```bash
+cp .env.example .env.local
+bun run backend:up
+cargo check --workspace
+```
+
+Run the services in separate terminals:
+
+```bash
+bun run backend:api
+bun run backend:edge
+```
+
+Verify health and readiness:
+
+```bash
+curl http://127.0.0.1:4000/healthz
+curl http://127.0.0.1:4000/readyz
+curl http://127.0.0.1:4100/healthz
+curl http://127.0.0.1:4100/readyz
+curl -H 'x-rend-internal-token: dev-internal-token' http://127.0.0.1:4100/metrics
+```
+
+Smoke-test a raw source upload:
+
+```bash
+# Use a local video file if you have one; the API stores raw bytes and does not
+# inspect or process media in this slice.
+fixture=/path/to/local/video.mp4
+
+curl -i -X POST http://127.0.0.1:4000/v1/videos \
+  -H 'content-type: video/mp4' \
+  --data-binary @"$fixture"
+
+response=$(
+  curl -s -X POST http://127.0.0.1:4000/v1/videos \
+    -H 'authorization: Bearer dev-api-key' \
+    -H 'content-type: video/mp4' \
+    --data-binary @"$fixture"
+)
+echo "$response"
+
+asset_id=$(printf '%s' "$response" | jq -r .asset_id)
+object_key=$(printf '%s' "$response" | jq -r .source_object_key)
+
+docker compose exec postgres psql -U rend -d rend -c "
+select a.id, a.source_state, a.playable_state, ar.id as source_artifact_id,
+       ar.object_key, ar.content_type, ar.byte_size
+from rend.assets a
+join rend.artifacts ar on ar.asset_id = a.id
+where a.id = '$asset_id'::uuid and ar.kind = 'source';
+"
+
+docker compose run --rm --entrypoint /bin/sh minio-init -c "
+  mc alias set local http://minio:9000 rend_minio rend_minio_password >/dev/null &&
+  mc stat local/rend-local/$object_key
+"
+```
+
+Useful maintenance commands:
+
+```bash
+docker compose ps
+bun run backend:down
+```
 
 ## License
 
