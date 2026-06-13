@@ -13,6 +13,7 @@ bytes.workspace = true
 http-body.workspace = true
 redis.workspace = true
 rend-config.workspace = true
+rend-playback-auth.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 sqlx.workspace = true
