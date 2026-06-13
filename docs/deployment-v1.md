@@ -9,15 +9,17 @@ and production-style examples in [`docs/edge-host-runbook-v1.md`](edge-host-runb
 ## Service Topology
 
 - `rend-api`: Rust API and control plane. It owns upload ingest, asset state,
-  Postgres migrations, playback bootstrap, edge warm/purge calls, and telemetry
-  ingestion into ClickHouse.
+  Postgres migrations, playback bootstrap, the `rend.edge_nodes` registry,
+  best-effort edge warm/purge fanout, and telemetry ingestion into ClickHouse.
 - `rend-media-worker`: the same repo runtime, started as `rend-api worker media`.
   It claims queued media jobs, uses `ffmpeg` and `ffprobe`, writes artifacts to
-  S3-compatible storage, and asks the edge to warm playback artifacts.
+  S3-compatible storage, and asks healthy registered edges to warm playback
+  artifacts.
 - `rend-edge`: Rust playback edge. It validates signed playback URLs locally,
   serves playback artifacts, fills and coalesces local cache misses from object
-  storage, exposes internal warm/purge endpoints, and spools playback telemetry
-  locally before sending it to `rend-api`.
+  storage, exposes internal warm/purge endpoints, registers and heartbeats with
+  `rend-api` when configured, and spools playback telemetry locally before
+  sending it to `rend-api`.
 
 Production dependencies are external managed services: Postgres, Redis,
 S3-compatible object storage, and ClickHouse.
@@ -37,7 +39,10 @@ S3-compatible object storage, and ClickHouse.
 
 Container-to-container URLs use Docker service names: `postgres`, `redis`,
 `minio`, `clickhouse`, `rend-api`, and `rend-edge`. `REND_PLAYBACK_BASE_URL`
-is the local client-facing URL and defaults to `http://127.0.0.1:4100`.
+is the local client-facing URL and defaults to `http://127.0.0.1:4100`. Edge
+containers register API-reachable `REND_EDGE_BASE_URL` values in
+`rend.edge_nodes`; API and worker fan out warm/purge calls to all healthy edges
+with fresh heartbeats.
 
 Run the default single-edge stack:
 
@@ -85,13 +90,15 @@ API:
 - `REND_API_AUTO_MIGRATE`
 - `REND_DEV_API_KEY`
 - `REND_PLAYBACK_BASE_URL`
-- `REND_EDGE_WARM_URL`
-- `REND_EDGE_PURGE_URL`
+- `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`
 - `REND_EDGE_INTERNAL_TOKEN`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
 - `REND_PLAYBACK_SIGNING_KEY_ID`
 - `REND_PLAYBACK_SIGNING_SECRET`
 - `REND_PLAYBACK_TOKEN_TTL_SECS`
+
+`REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional single-edge
+fallbacks for local/dev environments when no healthy registry entries exist.
 
 Worker:
 
@@ -110,6 +117,9 @@ Edge:
 - `REND_EDGE_BIND_ADDR`
 - `REND_EDGE_ID`
 - `REND_EDGE_REGION`
+- `REND_EDGE_BASE_URL`
+- `REND_CONTROL_PLANE_URL`
+- `REND_EDGE_HEARTBEAT_INTERVAL_SECS`
 - `REND_EDGE_CACHE_DIR`
 - `REND_EDGE_ORIGIN_HEALTH_URL`
 - `S3_ENDPOINT`
@@ -188,9 +198,10 @@ service. Production object storage should be provisioned outside this repo.
 3. Deploy `rend-api` with `REND_API_AUTO_MIGRATE=true` for the migration step.
 4. Start `rend-api` serving traffic after `/readyz` passes.
 5. Start `rend-edge` nodes with unique `REND_EDGE_ID`, `REND_EDGE_REGION`,
-   cache volume, and telemetry spool volume.
+   API-reachable `REND_EDGE_BASE_URL`, cache volume, and telemetry spool volume.
 6. Start `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
-7. Run upload/playback/telemetry smoke checks.
+7. Confirm edges are healthy in `rend.edge_nodes`, then run
+   upload/playback/telemetry smoke checks.
 
 ## Rollback Basics
 
@@ -210,6 +221,7 @@ US East and London edge nodes differ only by environment and attached volumes:
 
 - `REND_EDGE_ID`
 - `REND_EDGE_REGION`
+- `REND_EDGE_BASE_URL`
 - host port or load balancer target
 - local cache volume
 - local telemetry spool volume
