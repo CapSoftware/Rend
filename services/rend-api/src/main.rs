@@ -2403,9 +2403,18 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
         return Ok(());
     }
 
-    mark_asset_media_processing_started(&state.db, &job.asset_id)
+    if !mark_asset_media_processing_started(&state.db, &job.asset_id)
         .await
-        .context("failed to mark asset media processing started")?;
+        .context("failed to mark asset media processing started")?
+    {
+        tracing::info!(
+            job_id = %job.id,
+            asset_id = %job.asset_id,
+            "media job skipped because asset was deleted before processing started",
+        );
+        return Ok(());
+    }
+
     let source_object_key = fetch_source_object_key(&state.db, &job.asset_id)
         .await
         .context("failed to fetch source artifact for media job")?;
@@ -2507,6 +2516,21 @@ async fn asset_is_already_playable(db: &PgPool, asset_id: &str) -> Result<bool> 
         playable_state.as_deref(),
         Some("opener_ready" | "hls_ready")
     ))
+}
+
+async fn asset_is_deleted_or_missing(db: &PgPool, asset_id: &str) -> Result<bool> {
+    let deleted: Option<bool> = sqlx::query_scalar(
+        "
+        SELECT deleted_at IS NOT NULL
+        FROM rend.assets
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(deleted.unwrap_or(true))
 }
 
 async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> {
@@ -2997,6 +3021,7 @@ async fn mark_asset_failed(state: &AppState, asset_id: &str) {
         UPDATE rend.assets
         SET source_state = 'failed', playable_state = 'not_playable'
         WHERE id = $1::uuid
+          AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
