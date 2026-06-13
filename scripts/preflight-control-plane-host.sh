@@ -167,12 +167,23 @@ probe_clickhouse() {
   local database="$2"
   local user="$3"
   local password="$4"
+  local exists
   url="${url%/}"
   if curl -fsS --max-time 10 -u "$user:$password" \
     "$url/?database=$database&query=SELECT%201" >/dev/null; then
     operator_ok "ClickHouse connectivity probe passed"
   else
     operator_fail "ClickHouse connectivity probe failed"
+    return 0
+  fi
+  exists="$(
+    curl -fsS --max-time 10 -u "$user:$password" \
+      "$url/?database=$database&query=EXISTS%20TABLE%20playback_events" || true
+  )"
+  if [[ "$exists" == "1" ]]; then
+    operator_ok "ClickHouse playback telemetry table probe passed"
+  else
+    operator_fail "ClickHouse playback_events table is missing or not queryable"
   fi
 }
 
