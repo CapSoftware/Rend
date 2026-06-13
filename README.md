@@ -8,10 +8,10 @@
 
 ### Video infrastructure, built for speed
 
-One API call to upload. One URL that plays instantly, anywhere in the world.
-And we're open source.
+One API call to upload. One Rend playback URL. First bytes warmed on
+Rend's bare-metal edge. And we're open source.
 
-[**rend.so**](https://rend.so)
+[**Rend.so**](https://rend.so)
 
 ![Status](https://img.shields.io/badge/status-under_construction-E8590C)
 ![Server](https://img.shields.io/badge/server-AGPL--3.0-2F6FED)
@@ -22,54 +22,60 @@ And we're open source.
 ---
 
 > [!NOTE]
-> Rend is under construction. Nothing below should be considered shipped until it is linked from [rend.so](https://rend.so). We're building it in public, right here.
+> Rend is being built in public. Features become official as they are linked from [Rend.so](https://rend.so).
 
 ## What is Rend?
 
 Rend is the video platform for developers. POST a video, get back a playback URL. Upload, encoding, storage, delivery, signed playback, analytics, player and SDKs, one coherent surface instead of five services taped together.
 
-Our thesis is simple: latency is round trips, not server time. So Rend deletes round trips, places bytes physically near viewers before they ask, and owns the network path from disk to viewer. The same code runs as a single self-hostable binary or as Rend Cloud on our anycast network.
+Our thesis is simple: latency is round trips, not server time. So Rend deletes round trips, places bytes physically near viewers before they ask, and owns the playback path from cache to viewer.
 
 ## The infrastructure
 
-One Rust service, two shapes. Everything below is the target for v1.
+Rend Cloud serves video through bare-metal playback edge nodes backed by durable
+storage. Rend controls the playback URL and pre-places the opening seconds of
+each video on edge-local RAM and NVMe/SSD.
 
-| Concern | Self-hosted node | Rend Cloud |
-|---|---|---|
-| State | SQLite, embedded | Postgres |
-| Events | In-process | NATS JetStream |
-| Analytics | DuckDB over Parquet | ClickHouse |
-| Storage | Local disk or any S3 API | Object storage origin |
-| Routing | One address | Anycast BGP |
-| TLS | Built-in ACME | Built-in ACME |
+Cloud shape:
 
-The cloud runs on bare metal we own, not rented cloud compute. First bytes are served from RAM and NVMe at the edge, with HTTP/3, 0-RTT resumption, kTLS and BBR underneath. Every video gets a tiny instant-start clip replicated to every point of presence, so even the coldest video starts in one round trip. Renditions are encoded just in time, on the machine that will serve them, and encoding is included in the price.
-
-And we measure it in public. The cloud doesn't launch without [rend.so/speed](https://rend.so), a live benchmark against named competitors, including the regions where we're not the fastest yet.
+| Concern | Rend Cloud v1 |
+|---|---|
+| API and state | Rust control plane with Postgres metadata |
+| Uploads | One-call upload path |
+| Origin | S3-compatible object storage, Tigris by default |
+| Encoding | ffmpeg workers generate opener, thumbnail, and HLS playback |
+| Edge | Bare-metal `rend-edge` nodes in US East and London with local RAM/NVMe/SSD cache |
+| Routing | Rend playback URLs routed by GeoDNS, latency DNS, or regional routing |
+| Authorization | Signed playback URLs or tokens validated locally at the edge |
+| Analytics | Playback analytics for views, watch time, startup, region, and cache state |
+| Resilience | Origin or CDN backup path without exposing provider URLs |
 
 ## v1
 
-Video on demand, done excellently. Currently under construction:
+Video on demand, built around fast startup:
 
 - [ ] **Upload API**: POST a video, receive a playback URL. One call deep.
-- [ ] **Instant start**: first frame in one round trip, even for cold assets
-- [ ] **Just-in-time encoding**: x264 on the fast path, SVT-AV1 where it earns it
+- [ ] **Fast opener path**: generate a playable opener early in the upload pipeline
+- [ ] **Rend edge playback**: warm openers and first segments to US East and London
+- [ ] **Origin-backed cache**: stream cache misses from durable object storage
+- [ ] **HLS playback**: opener first, adaptive renditions after that
 - [ ] **Drop-in player** with page-load prefetch
-- [ ] **Signed playback**: Ed25519 tokens validated at the edge
-- [ ] **Analytics**, queryable out of the box
+- [ ] **Signed playback**: tokens validated locally at the edge
+- [ ] **Playback analytics**: views, watch minutes, startup success, region, cache state
 - [ ] **SDKs and an MCP server**, generated from one OpenAPI spec
-- [ ] **Self-hosting**: `docker run rend` gives you the complete product, free forever
-- [ ] **Public benchmark** at rend.so/speed
+- [ ] **Measured speed**: baseline upload-to-playable and first-frame metrics
 
-No live streaming in v1, no DRM suite, and we are not a budget per-gigabyte CDN. Two meters only: delivery and storage, priced per minute, encoding included.
+Rend Cloud v1 is video on demand. Pricing uses two minute-based meters:
+delivery and storage. Encoding is included. 4K starts in supported regions or
+approved accounts while delivery economics are measured.
 
 ## In this repo
 
-- [`site/`](./site) — the landing page at rend.so, Next.js and Tailwind v4
+- [`site/`](./site) — the landing page at Rend.so, Next.js and Tailwind v4
 
 ## License
 
-The server will be AGPL-3.0. The player and SDKs will be MIT. If we disappeared tomorrow, Rend keeps running, self-hosted, forever.
+The server will be AGPL-3.0. The player and SDKs will be MIT.
 
 ---
 
@@ -77,6 +83,6 @@ The server will be AGPL-3.0. The player and SDKs will be MIT. If we disappeared 
 
 Built by [Cap Software](https://cap.so), the company behind Cap, the open source screen recorder.
 
-**rend.so** · **rend.sh** · **rend.video**
+**Rend.so** · **Rend.sh** · **Rend.video**
 
 </div>
