@@ -478,9 +478,9 @@ Control-plane deploy:
 ```sh
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
 scripts/validate-production-env.sh --role control-plane
-scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-002.json
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-002.json --dry-run
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-002.json
+scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-004.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-004.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-004.json
 curl -fsS http://127.0.0.1:4000/readyz
 docker compose -f /opt/rend/control-plane.compose.yml ps
 ```
@@ -490,9 +490,9 @@ Edge deploy:
 ```sh
 sudoedit /etc/rend/rend-edge.env
 scripts/validate-production-env.sh --role edge-host
-scripts/preflight-edge-host.sh --manifest .rend/releases/trial-002.json
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-002.json --dry-run
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-002.json
+scripts/preflight-edge-host.sh --manifest .rend/releases/trial-004.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-004.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-004.json
 curl -fsS http://127.0.0.1:4100/readyz
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
 ```
