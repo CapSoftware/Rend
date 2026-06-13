@@ -247,8 +247,32 @@ fetch_twice() {
   fetch_once "$label-second" "$url" "HIT" "$expected_content_type" "$second_body"
 }
 
-opener_url="$edge_base/v/$asset_id/opener.mp4"
-manifest_url="$edge_base/v/$asset_id/hls/master.m3u8"
+expect_rejected() {
+  local label="$1"
+  local url="$2"
+  local body_file="$tmp_dir/$label-rejected.body"
+
+  local http_code
+  http_code="$(curl -sS -o "$body_file" -w "%{http_code}" "$url")"
+  if [[ "$http_code" != "401" ]]; then
+    echo "$label expected HTTP 401, got $http_code" >&2
+    cat "$body_file" >&2 || true
+    exit 1
+  fi
+}
+
+tamper_token() {
+  local value="$1"
+  local last="${value: -1}"
+  local replacement="A"
+  if [[ "$last" == "A" ]]; then
+    replacement="B"
+  fi
+  printf '%s%s' "${value:0:${#value}-1}" "$replacement"
+}
+
+opener_url="$edge_base/v/$asset_id/opener.mp4?token=$token"
+manifest_url="$playback_url"
 manifest_body="$tmp_dir/manifest-first.body"
 
 fetch_twice "opener" "$opener_url" "video/mp4"
@@ -270,7 +294,13 @@ raise SystemExit("manifest did not contain a local .ts segment")
 PY
 )"
 
-segment_url="$edge_base/v/$asset_id/hls/$segment_name"
+segment_url="$edge_base/v/$asset_id/hls/$segment_name?token=$token"
 fetch_twice "segment" "$segment_url" "video/mp2t"
 
-echo "edge cache smoke passed for asset $asset_id with segment $segment_name"
+unsigned_manifest_url="$edge_base/v/$asset_id/hls/master.m3u8"
+tampered_token="$(tamper_token "$token")"
+expect_rejected "missing-token" "$unsigned_manifest_url"
+expect_rejected "tampered-token" "$unsigned_manifest_url?token=$tampered_token"
+expect_rejected "wrong-asset-token" "$edge_base/v/00000000-0000-0000-0000-000000000000/hls/master.m3u8?token=$token"
+
+echo "signed playback edge cache smoke passed for asset $asset_id with segment $segment_name"
