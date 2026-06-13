@@ -107,6 +107,9 @@ Local media processing requires `ffmpeg` and `ffprobe` on `PATH`, or explicit
 binary paths in `REND_FFMPEG_PATH` and `REND_FFPROBE_PATH`. Inline processing is
 bounded by `REND_MEDIA_PROCESS_TIMEOUT_SECS`; keep `REND_HTTP_TIMEOUT_SECS`
 larger than the media timeout when using synchronous local uploads.
+Playback URLs are signed with `REND_PLAYBACK_SIGNING_KEY_ID`,
+`REND_PLAYBACK_SIGNING_SECRET`, and `REND_PLAYBACK_TOKEN_TTL_SECS`; API and edge
+processes must use the same key id and secret.
 
 ```bash
 cp .env.example .env.local
@@ -135,6 +138,7 @@ Smoke-test local media artifact generation:
 
 ```bash
 bun run backend:smoke:media
+bun run backend:smoke:signed-playback
 ```
 
 The smoke flow starts local dependencies, checks `ffmpeg -version` and
