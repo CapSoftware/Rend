@@ -222,7 +222,15 @@ async fn main() -> Result<()> {
         .route("/v1/healthz", get(healthz))
         .route("/v1/readyz", get(readyz))
         .merge(upload_routes)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                tracing::info_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             request_timeout,
