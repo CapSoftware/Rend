@@ -2104,6 +2104,7 @@ dependencies = [
  "http-body 1.0.1",
  "redis",
  "rend-config",
+ "rend-playback-auth",
  "reqwest",
  "serde",
  "sqlx",
@@ -2129,6 +2130,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "rend-config",
+ "rend-playback-auth",
  "reqwest",
  "serde",
  "serde_json",
@@ -2136,6 +2138,17 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rend-playback-auth"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
