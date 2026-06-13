@@ -1,6 +1,131 @@
-use std::{env, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap, env, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration,
+};
 
 use anyhow::{Context, Result};
+use url::Url;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendEnv {
+    Local,
+    Trial,
+    Production,
+}
+
+impl RendEnv {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "trial" => Ok(Self::Trial),
+            "production" | "prod" => Ok(Self::Production),
+            _ => anyhow::bail!("REND_ENV must be one of: local, trial, production"),
+        }
+    }
+
+    pub fn from_env() -> Result<Self> {
+        Self::parse(&env_string("REND_ENV", "local"))
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Trial => "trial",
+            Self::Production => "production",
+        }
+    }
+
+    pub fn is_strict(self) -> bool {
+        matches!(self, Self::Trial | Self::Production)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpectedEdges {
+    edges: BTreeMap<String, ExpectedEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedEdge {
+    pub edge_id: String,
+    pub region: String,
+    pub base_url: String,
+}
+
+impl ExpectedEdges {
+    pub fn parse(value: &str, rend_env: RendEnv, allow_insecure_edge_urls: bool) -> Result<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            anyhow::ensure!(
+                !rend_env.is_strict(),
+                "REND_EXPECTED_EDGES must list expected edge_id=region=base_url entries in {} mode",
+                rend_env.as_str()
+            );
+            return Ok(Self::default());
+        }
+
+        let mut edges = BTreeMap::new();
+        for raw_entry in value.split(',') {
+            let raw_entry = raw_entry.trim();
+            if raw_entry.is_empty() {
+                continue;
+            }
+            let mut parts = raw_entry.splitn(3, '=');
+            let edge_id = parts.next().unwrap_or_default().trim();
+            let region = parts.next().unwrap_or_default().trim();
+            let base_url = parts.next().unwrap_or_default().trim();
+            anyhow::ensure!(
+                !edge_id.is_empty() && !region.is_empty() && !base_url.is_empty(),
+                "REND_EXPECTED_EDGES entries must use edge_id=region=base_url"
+            );
+            ensure_safe_edge_name("edge_id", edge_id)?;
+            ensure_safe_edge_name("region", region)?;
+            let base_url = normalize_edge_base_url(base_url, rend_env, allow_insecure_edge_urls)?;
+            let previous = edges.insert(
+                edge_id.to_owned(),
+                ExpectedEdge {
+                    edge_id: edge_id.to_owned(),
+                    region: region.to_owned(),
+                    base_url,
+                },
+            );
+            anyhow::ensure!(
+                previous.is_none(),
+                "REND_EXPECTED_EDGES contains duplicate edge_id {edge_id}"
+            );
+        }
+
+        anyhow::ensure!(
+            !rend_env.is_strict() || !edges.is_empty(),
+            "REND_EXPECTED_EDGES must not be empty in {} mode",
+            rend_env.as_str()
+        );
+
+        Ok(Self { edges })
+    }
+
+    pub fn from_env(key: &str, rend_env: RendEnv, allow_insecure_edge_urls: bool) -> Result<Self> {
+        Self::parse(&env_string(key, ""), rend_env, allow_insecure_edge_urls)
+            .with_context(|| format!("{key} is invalid"))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    pub fn get(&self, edge_id: &str) -> Option<&ExpectedEdge> {
+        self.edges.get(edge_id)
+    }
+
+    pub fn contains_match(&self, edge_id: &str, region: &str, base_url: &str) -> bool {
+        self.get(edge_id).is_some_and(|expected| {
+            expected.region == region && expected.base_url == base_url.trim_end_matches('/')
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ExpectedEdge> {
+        self.edges.values()
+    }
+}
 
 pub fn load_dotenv() {
     let _ = dotenvy::from_filename(".env.local");
@@ -42,4 +167,248 @@ pub fn env_duration_secs(key: &str, default_secs: u64) -> Result<Duration> {
 pub fn env_usize(key: &str, default: usize) -> Result<usize> {
     let value = env_string(key, &default.to_string());
     usize::from_str(&value).with_context(|| format!("{key} must be a positive integer"))
+}
+
+pub fn env_u64(key: &str, default: u64) -> Result<u64> {
+    let value = env_string(key, &default.to_string());
+    u64::from_str(&value).with_context(|| format!("{key} must be a non-negative integer"))
+}
+
+pub fn optional_env_url(key: &str) -> Option<String> {
+    let value = env_string(key, "");
+    let value = value.trim().trim_end_matches('/').to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+pub fn validate_required_secret(rend_env: RendEnv, key: &str, value: &str) -> Result<()> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "{key} must not be empty");
+    if rend_env.is_strict() {
+        anyhow::ensure!(
+            !is_known_dev_default(key, value),
+            "{key} must not use a known local/dev default in {} mode",
+            rend_env.as_str()
+        );
+        anyhow::ensure!(
+            !is_placeholder(value),
+            "{key} must not use a placeholder value in {} mode",
+            rend_env.as_str()
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_required_url(rend_env: RendEnv, key: &str, value: &str) -> Result<()> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "{key} must not be empty");
+    ensure_absolute_http_url(key, value)?;
+    if rend_env.is_strict() {
+        anyhow::ensure!(
+            !is_local_service_url(value),
+            "{key} must not point at localhost or a local service name in {} mode",
+            rend_env.as_str()
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_required_service_url(rend_env: RendEnv, key: &str, value: &str) -> Result<()> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "{key} must not be empty");
+    let parsed = Url::parse(value).with_context(|| format!("{key} must be an absolute URL"))?;
+    anyhow::ensure!(parsed.host_str().is_some(), "{key} must include a host");
+    if rend_env.is_strict() {
+        anyhow::ensure!(
+            !is_local_url(&parsed),
+            "{key} must not point at localhost or a local service name in {} mode",
+            rend_env.as_str()
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_optional_url(rend_env: RendEnv, key: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_required_url(rend_env, key, value)
+}
+
+pub fn normalize_edge_base_url(
+    base_url: &str,
+    rend_env: RendEnv,
+    allow_insecure_edge_urls: bool,
+) -> Result<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    anyhow::ensure!(!base_url.is_empty(), "base_url must not be empty");
+    let parsed = ensure_absolute_http_url("base_url", base_url)?;
+    if rend_env.is_strict() && !allow_insecure_edge_urls {
+        anyhow::ensure!(
+            parsed.scheme() == "https",
+            "base_url must use https in {} mode",
+            rend_env.as_str()
+        );
+        anyhow::ensure!(
+            !is_local_url(&parsed),
+            "base_url must not point at localhost or a local service name in {} mode",
+            rend_env.as_str()
+        );
+    }
+
+    Ok(base_url.to_owned())
+}
+
+pub fn validate_edge_base_url(
+    rend_env: RendEnv,
+    key: &str,
+    value: &str,
+    allow_insecure_edge_urls: bool,
+) -> Result<()> {
+    normalize_edge_base_url(value, rend_env, allow_insecure_edge_urls)
+        .map(|_| ())
+        .with_context(|| format!("{key} is invalid"))
+}
+
+fn ensure_absolute_http_url(label: &str, value: &str) -> Result<Url> {
+    let parsed =
+        Url::parse(value).with_context(|| format!("{label} must be an absolute http(s) URL"))?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+        "{label} must be an absolute http(s) URL"
+    );
+    anyhow::ensure!(
+        parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "{label} must not include credentials, query, or fragment"
+    );
+    Ok(parsed)
+}
+
+fn ensure_safe_edge_name(field: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "{field} must be 1-128 characters and contain only letters, numbers, '-', '_', or '.'"
+    );
+    Ok(())
+}
+
+fn is_known_dev_default(key: &str, value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    matches!(
+        (key, value.as_str()),
+        ("REND_DEV_API_KEY", "dev-api-key")
+            | ("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token")
+            | ("REND_INTERNAL_TELEMETRY_TOKEN", "dev-internal-token")
+            | ("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key")
+            | (
+                "REND_PLAYBACK_SIGNING_SECRET",
+                "local-dev-playback-signing-secret"
+            )
+    )
+}
+
+fn is_placeholder(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.contains("replace-me")
+        || value.contains("changeme")
+        || value.contains("change-me")
+        || value.contains("placeholder")
+        || value.starts_with('<') && value.ends_with('>')
+}
+
+pub fn is_local_service_url(value: &str) -> bool {
+    Url::parse(value).ok().is_some_and(|url| is_local_url(&url))
+}
+
+fn is_local_url(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost"
+        || host == "0.0.0.0"
+        || host == "::"
+        || host == "::1"
+        || host.starts_with("127.")
+        || host.ends_with(".local")
+        || matches!(
+            host.as_str(),
+            "postgres"
+                | "redis"
+                | "minio"
+                | "clickhouse"
+                | "rend-api"
+                | "rend-edge"
+                | "rend-edge-us-east"
+                | "rend-edge-london"
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rend_env_parses_supported_modes() {
+        assert_eq!(RendEnv::parse("local").unwrap(), RendEnv::Local);
+        assert_eq!(RendEnv::parse("trial").unwrap(), RendEnv::Trial);
+        assert_eq!(RendEnv::parse("prod").unwrap(), RendEnv::Production);
+        assert!(RendEnv::parse("staging").is_err());
+    }
+
+    #[test]
+    fn strict_secret_validation_rejects_dev_defaults_and_placeholders() {
+        assert!(
+            validate_required_secret(RendEnv::Trial, "REND_DEV_API_KEY", "dev-api-key").is_err()
+        );
+        assert!(
+            validate_required_secret(
+                RendEnv::Production,
+                "REND_EDGE_INTERNAL_TOKEN",
+                "replace-me"
+            )
+            .is_err()
+        );
+        validate_required_secret(RendEnv::Local, "REND_DEV_API_KEY", "dev-api-key").unwrap();
+        validate_required_secret(RendEnv::Trial, "REND_DEV_API_KEY", "real-secret").unwrap();
+    }
+
+    #[test]
+    fn strict_url_validation_rejects_local_service_urls() {
+        assert!(validate_required_url(RendEnv::Trial, "S3_ENDPOINT", "http://minio:9000").is_err());
+        assert!(
+            validate_required_url(RendEnv::Production, "S3_ENDPOINT", "http://127.0.0.1:9100")
+                .is_err()
+        );
+        validate_required_url(RendEnv::Trial, "S3_ENDPOINT", "https://objects.example.com")
+            .unwrap();
+    }
+
+    #[test]
+    fn expected_edges_parse_and_require_https_in_strict_mode() {
+        let edges = ExpectedEdges::parse(
+            "edge-a=us-east=https://edge-a.example.com,edge-b=london=https://edge-b.example.com/",
+            RendEnv::Trial,
+            false,
+        )
+        .unwrap();
+
+        assert!(edges.contains_match("edge-a", "us-east", "https://edge-a.example.com"));
+        assert!(!edges.contains_match("edge-a", "us-east", "https://changed.example.com"));
+        assert!(
+            ExpectedEdges::parse(
+                "edge-a=us-east=http://edge-a.example.com",
+                RendEnv::Trial,
+                false
+            )
+            .is_err()
+        );
+        ExpectedEdges::parse("edge-a=us-east=http://edge-a", RendEnv::Trial, true).unwrap();
+    }
 }
