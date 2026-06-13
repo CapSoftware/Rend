@@ -2100,9 +2100,12 @@ dependencies = [
  "num-bigint",
  "percent-encoding",
  "pin-project-lite",
+ "rustls 0.23.40",
+ "rustls-native-certs",
  "ryu",
  "socket2 0.6.4",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "url",
 ]

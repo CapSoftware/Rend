@@ -24,7 +24,7 @@ dotenvy = "0.15.7"
 hmac = "0.12.1"
 http-body = "1.0.1"
 fs2 = "0.4.3"
-redis = { version = "0.32.7", default-features = false, features = ["tokio-comp"] }
+redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp"] }
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls"] }
 rend-config = { path = "crates/rend-config" }
 rend-playback-auth = { path = "crates/rend-playback-auth" }

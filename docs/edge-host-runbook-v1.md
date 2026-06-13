@@ -81,6 +81,17 @@ sudo mkdir -p /opt/rend /etc/rend /var/lib/rend/edge-cache /var/spool/rend/edge-
 sudo chown -R 10001:10001 /var/lib/rend /var/spool/rend
 ```
 
+If production env files are installed root-only under `/etc/rend`, run the
+operator validators and preflights with `sudo` rather than weakening secret
+file permissions. When `psql` runs as root against a Postgres URL that requires
+CA verification, libpq may require a root trust reference:
+
+```sh
+sudo mkdir -p /root/.postgresql
+sudo ln -sf /etc/ssl/certs/ca-certificates.crt /root/.postgresql/root.crt
+sudo chmod 700 /root/.postgresql
+```
+
 ## Firewall And Network Ports
 
 This section covers public playback, private/internal endpoints, metrics, and
@@ -114,6 +125,61 @@ Control-plane host exposure:
 - Postgres, Redis, ClickHouse, and object storage are external dependencies for
   production trials and are not included in the production-style compose
   templates.
+
+For the first Latitude trial shape, bind Rend services to loopback and let Caddy
+own public TLS. The control-plane proxy should allow only edge host source IPs
+to `/internal/*` and return `404` for the rest of the API surface:
+
+```caddyfile
+api-internal.play.rend.so {
+	@allowed_internal {
+		path /internal/*
+		remote_ip 152.236.8.67 206.223.236.177 127.0.0.1 ::1
+	}
+	handle @allowed_internal {
+		reverse_proxy 127.0.0.1:4000
+	}
+	handle {
+		respond 404
+	}
+}
+```
+
+Edge hosts should expose signed playback paths only. Public `/internal/*` and
+`/metrics` should be blocked at the proxy, and direct `4100` access should stay
+closed:
+
+```caddyfile
+ash-1.play.rend.so {
+	@blocked_private {
+		path /internal/* /metrics
+	}
+	handle @blocked_private {
+		respond 404
+	}
+	handle /v/* {
+		reverse_proxy 127.0.0.1:4100
+	}
+	handle {
+		respond 404
+	}
+}
+```
+
+Use the edge hostname for each region, for example `ams-1.play.rend.so` on the
+Amsterdam host. Keep host firewalls closed by default and allow only SSH, HTTP,
+and HTTPS inbound:
+
+```sh
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw deny 4000/tcp
+sudo ufw deny 4100/tcp
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw --force enable
+```
 
 ## Volume Paths
 
@@ -263,6 +329,8 @@ scripts/preflight-edge-host.sh --manifest .rend/releases/trial-001.json
 scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json --dry-run
 scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json
 ```
+
+Use `sudo` for these commands when `/etc/rend/*.env` is root-only.
 
 For london, use `docs/env/rend-edge-london.env.example` and keep the same edge
 compose template. The live edge preflight performs idempotent
