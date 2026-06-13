@@ -31,6 +31,28 @@ services:
       timeout: 3s
       retries: 20
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_DB: rend
+      CLICKHOUSE_USER: rend
+      CLICKHOUSE_PASSWORD: rend
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    volumes:
+      - rend-clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   minio:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
@@ -65,4 +87,5 @@ services:
 volumes:
   rend-postgres-data:
   rend-redis-data:
+  rend-clickhouse-data:
   rend-minio-data:
