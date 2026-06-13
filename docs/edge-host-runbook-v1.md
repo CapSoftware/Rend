@@ -209,6 +209,26 @@ Production-style templates are checked in under `docs/templates/`:
 - `docs/templates/control-plane.compose.yml`
 - `docs/templates/edge-host.compose.yml`
 
+Build trial images from a clean git worktree before bootstrapping or deploy:
+
+```sh
+bun run release:images -- \
+  --tag trial-001 \
+  --registry registry.example.com/rend \
+  --manifest .rend/releases/trial-001.json \
+  --push
+```
+
+Use the manifest `image_digest` values for compose image variables. They are
+immutable deploy and rollback refs. The human `trial-*` tag is only an operator
+label for finding the release.
+
+Before copying the manifest to hosts, verify release image metadata locally:
+
+```sh
+scripts/check-docker-image-versions.sh --tag trial-001 --registry registry.example.com/rend --strict
+```
+
 Control-plane host bootstrap:
 
 ```sh
@@ -218,10 +238,10 @@ sudo cp docs/env/rend-api.env.example /etc/rend/rend-api.env
 sudo cp docs/env/rend-media-worker.env.example /etc/rend/rend-media-worker.env
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
 
-export REND_API_IMAGE=registry.example.com/rend-api:trial-001
-export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-001
-docker compose -f /opt/rend/control-plane.compose.yml pull
-docker compose -f /opt/rend/control-plane.compose.yml up -d
+scripts/validate-production-env.sh --role control-plane
+scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-001.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json
 ```
 
 Edge host bootstrap:
@@ -233,13 +253,17 @@ sudo cp docs/templates/edge-host.compose.yml /opt/rend/edge.compose.yml
 sudo cp docs/env/rend-edge-us-east.env.example /etc/rend/rend-edge.env
 sudoedit /etc/rend/rend-edge.env
 
-export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-001
-docker compose -f /opt/rend/edge.compose.yml pull
-docker compose -f /opt/rend/edge.compose.yml up -d
+scripts/validate-production-env.sh --role edge-host
+scripts/preflight-edge-host.sh --manifest .rend/releases/trial-001.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json
 ```
 
 For london, use `docs/env/rend-edge-london.env.example` and keep the same edge
-compose template.
+compose template. The live edge preflight performs idempotent
+`/internal/edges/register` and `/internal/edges/heartbeat` calls with the
+configured edge id so it can prove the control-plane contract before the
+container starts. Use `--dry-run` to skip those mutating probes.
 
 ## Remote Edge Health And Smoke Commands
 
@@ -255,11 +279,40 @@ REND_EDGE_INTERNAL_TOKEN=replace-me
 ASSET_ID=00000000-0000-0000-0000-000000000000
 ```
 
+Run the combined verifier first. It checks API `/readyz`, edge `/readyz`, edge
+registration visibility through Postgres or the internal heartbeat endpoint,
+signed playback for the provided asset, and telemetry analytics increasing
+after the playback request.
+
+```sh
+scripts/verify-first-host-deploy.sh \
+  --api-base "$API_BASE" \
+  --edge-base "$EDGE_BASE" \
+  --api-env /etc/rend/rend-api.env \
+  --edge-env /etc/rend/rend-edge.env \
+  --asset-id "$ASSET_ID"
+```
+
+Use the manual checks below when the combined verifier identifies a failing
+step or when running from a laptop that cannot read the host env files.
+
 Health and readiness:
 
 ```sh
 curl -fsS "$EDGE_BASE/healthz"
 curl -fsS "$EDGE_BASE/readyz"
+```
+
+`/healthz` on API and edge includes `service`, `version`,
+`package_version`, `git_sha`, and `build_time`. Compare those values with the
+release manifest after deploy.
+
+If the repo checkout is available on the host, inspect running container image
+metadata:
+
+```sh
+scripts/inspect-docker-release.sh --all
+scripts/check-docker-image-versions.sh --running
 ```
 
 Metrics auth check. The first command should return `401`; the second should
@@ -348,25 +401,23 @@ The spool file may be absent when telemetry has flushed successfully.
 Control-plane deploy:
 
 ```sh
-export REND_API_IMAGE=registry.example.com/rend-api:trial-002
-export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-002
-
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
-docker compose -f /opt/rend/control-plane.compose.yml pull
-docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-api
+scripts/validate-production-env.sh --role control-plane
+scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-002.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-002.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-002.json
 curl -fsS http://127.0.0.1:4000/readyz
-docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-media-worker
 docker compose -f /opt/rend/control-plane.compose.yml ps
 ```
 
 Edge deploy:
 
 ```sh
-export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-002
-
 sudoedit /etc/rend/rend-edge.env
-docker compose -f /opt/rend/edge.compose.yml pull
-docker compose -f /opt/rend/edge.compose.yml up -d --no-deps rend-edge
+scripts/validate-production-env.sh --role edge-host
+scripts/preflight-edge-host.sh --manifest .rend/releases/trial-002.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-002.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-002.json
 curl -fsS http://127.0.0.1:4100/readyz
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
 ```
@@ -381,21 +432,17 @@ warm lifecycle event includes every healthy edge, each edge can serve a warmed
 Edge rollback:
 
 ```sh
-export REND_EDGE_IMAGE=registry.example.com/rend-edge:trial-001
-docker compose -f /opt/rend/edge.compose.yml pull rend-edge
-docker compose -f /opt/rend/edge.compose.yml up -d --no-deps rend-edge
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json
 curl -fsS http://127.0.0.1:4100/readyz
 ```
 
 Control-plane rollback:
 
 ```sh
-export REND_API_IMAGE=registry.example.com/rend-api:trial-001
-export REND_MEDIA_WORKER_IMAGE=registry.example.com/rend-media-worker:trial-001
-docker compose -f /opt/rend/control-plane.compose.yml pull
-docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-api
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json
 curl -fsS http://127.0.0.1:4000/readyz
-docker compose -f /opt/rend/control-plane.compose.yml up -d --no-deps rend-media-worker
 ```
 
 Rollback order:
@@ -463,6 +510,29 @@ Run the checked-in validator before using the examples:
 
 ```sh
 scripts/validate-edge-deploy-templates.sh
+```
+
+Exercise the operator harness against the local Docker env example without
+touching managed dependencies or host ports:
+
+```sh
+scripts/validate-production-env.sh --role all --allow-dev-defaults \
+  --api-env .env.docker.example \
+  --worker-env .env.docker.example \
+  --edge-env .env.docker.example
+
+scripts/preflight-control-plane-host.sh --dry-run --allow-dev-defaults \
+  --allow-local-image-refs \
+  --manifest .rend/releases/trial-001.json \
+  --api-env .env.docker.example \
+  --worker-env .env.docker.example \
+  --compose-file docs/templates/control-plane.compose.yml
+
+scripts/preflight-edge-host.sh --dry-run --allow-dev-defaults \
+  --allow-local-image-refs \
+  --manifest .rend/releases/trial-001.json \
+  --edge-env .env.docker.example \
+  --compose-file docs/templates/edge-host.compose.yml
 ```
 
 Then run the local Docker smoke:
