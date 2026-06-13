@@ -101,12 +101,15 @@ configuration.
 
 This starts the V1 foundation: Postgres, MinIO, Redis, migrations,
 health-checking API/edge skeletons, the raw source upload storage path, and
-local media artifact generation for uploaded sources.
+local async media artifact generation for uploaded sources.
 
 Local media processing requires `ffmpeg` and `ffprobe` on `PATH`, or explicit
-binary paths in `REND_FFMPEG_PATH` and `REND_FFPROBE_PATH`. Inline processing is
-bounded by `REND_MEDIA_PROCESS_TIMEOUT_SECS`; keep `REND_HTTP_TIMEOUT_SECS`
-larger than the media timeout when using synchronous local uploads.
+binary paths in `REND_FFMPEG_PATH` and `REND_FFPROBE_PATH`. Uploads enqueue
+Postgres-backed media jobs by default; run the media worker locally with
+`cargo run -p rend-api -- worker media` or `bun run backend:media-worker`.
+Set `REND_API_INLINE_MEDIA_PROCESSING=true` only when you explicitly want the
+old synchronous dev behavior. Worker ffmpeg runs are bounded by
+`REND_MEDIA_PROCESS_TIMEOUT_SECS`.
 Playback URLs are signed with `REND_PLAYBACK_SIGNING_KEY_ID`,
 `REND_PLAYBACK_SIGNING_SECRET`, and `REND_PLAYBACK_TOKEN_TTL_SECS`; API and edge
 processes must use the same key id and secret. The local player bootstrap
@@ -123,6 +126,7 @@ Run the services in separate terminals:
 
 ```bash
 bun run backend:api
+bun run backend:media-worker
 bun run backend:edge
 ```
 
@@ -139,6 +143,7 @@ curl -H 'x-rend-internal-token: dev-internal-token' http://127.0.0.1:4100/metric
 Smoke-test local media artifact generation:
 
 ```bash
+bun run backend:smoke:async-media
 bun run backend:smoke:media
 bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
@@ -150,14 +155,17 @@ The smoke flow starts local dependencies, checks `ffmpeg -version` and
 needed, uploads the fixture with `Authorization: Bearer <REND_DEV_API_KEY>`, and
 verifies:
 
-- the API response includes the existing upload fields with `source_state =
-  uploaded` and `playable_state = hls_ready`
+- the API upload response is honest with `source_state = uploaded`,
+  `playable_state = not_playable`, and no signed playback URL
+- a queued `rend.media_jobs` row is claimed by the local media worker
 - Postgres has source, opener, thumbnail, manifest, and segment artifact rows
+- the media job ends in `succeeded` after artifact generation
 - generated MinIO objects exist with nonzero byte sizes
 
-The playback bootstrap smoke also starts `rend-edge` if needed, calls
-`GET /v1/assets/<asset_id>/playback` with the dev API key, checks unauthenticated
-and unknown asset responses, verifies the signed primary, opener, manifest, and
+The async media smoke also proves queued work survives a worker restart before
+processing starts. The playback bootstrap smoke starts `rend-edge` if needed,
+checks that `GET /v1/assets/<asset_id>/playback` returns 404 until the worker
+marks the asset playable, verifies the signed primary, opener, manifest, and
 first segment hint URLs through `rend-edge`, and confirms the local player
 harness is served.
 
@@ -188,13 +196,17 @@ echo "$response"
 asset_id=$(printf '%s' "$response" | jq -r .asset_id)
 object_key=$(printf '%s' "$response" | jq -r .source_object_key)
 
-curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
+curl -s http://127.0.0.1:4000/v1/assets/$asset_id \
   -H 'authorization: Bearer dev-api-key' | jq
 
+# Repeat until playable_state is hls_ready.
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id \
   -H 'authorization: Bearer dev-api-key' | jq
 
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
   -H 'authorization: Bearer dev-api-key' | jq
 
 after_sequence=$(
