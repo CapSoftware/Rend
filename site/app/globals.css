@@ -180,6 +180,162 @@
   .anim-eyes.e2 {
     animation-delay: 1.7s;
   }
+
+  .anim-unlock {
+    animation: unlock 4.2s ease-in-out infinite;
+    transform-box: view-box;
+    transform-origin: 100px 65px;
+  }
+
+  .anim-grow {
+    transform-box: fill-box;
+    transform-origin: bottom;
+    transform: scaleY(0);
+  }
+
+  .reveal.in-view .anim-grow {
+    animation: grow 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+
+  .reveal.in-view .anim-grow.g2 {
+    animation-delay: 0.12s;
+  }
+
+  .reveal.in-view .anim-grow.g3 {
+    animation-delay: 0.24s;
+  }
+
+  .reveal.in-view .anim-grow.g4 {
+    animation-delay: 0.36s;
+  }
+
+  .cmp-table {
+    font-size: 15px;
+  }
+
+  .cmp-corner,
+  .cmp-head {
+    padding: 0 16px 14px;
+    border-bottom: 1.5px solid var(--color-ink);
+  }
+
+  .cmp-head {
+    font-family: var(--font-head);
+    font-weight: 400;
+    font-size: 18px;
+    color: var(--color-muted);
+    text-align: center;
+    vertical-align: bottom;
+  }
+
+  .cmp-head-rend {
+    color: var(--color-ink);
+    background: rgba(22, 21, 19, 0.045);
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    padding-top: 14px;
+  }
+
+  .cmp-feature {
+    padding: 15px 18px 15px 4px;
+    font-weight: 500;
+    color: var(--color-ink);
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px dashed var(--color-line);
+  }
+
+  .cmp-cell {
+    padding: 15px 16px;
+    text-align: center;
+    color: var(--color-muted);
+    border-bottom: 1px dashed var(--color-line);
+  }
+
+  .cmp-cell-rend {
+    color: var(--color-ink);
+    font-weight: 500;
+    background: rgba(22, 21, 19, 0.045);
+  }
+
+  .cmp-table tbody tr:last-child .cmp-feature,
+  .cmp-table tbody tr:last-child .cmp-cell {
+    border-bottom: none;
+  }
+
+  .cmp-table tbody tr:last-child .cmp-cell-rend {
+    border-bottom-left-radius: 12px;
+    border-bottom-right-radius: 12px;
+  }
+
+  .cmp-mark {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    overflow: visible;
+    vertical-align: middle;
+  }
+
+  .cmp-mark path {
+    fill: none;
+    stroke-width: 2.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+  }
+
+  .cmp-yes path {
+    stroke: var(--color-ink);
+  }
+
+  .cmp-no path {
+    stroke: #cbc5b8;
+  }
+
+  .cmp-mid path {
+    stroke: #b09a55;
+  }
+
+  .reveal.in-view .cmp-mark path {
+    animation: draw 0.55s cubic-bezier(0.45, 0, 0.2, 1) forwards;
+  }
+
+  .reveal.in-view tbody td:nth-child(3) .cmp-mark path {
+    animation-delay: 0.07s;
+  }
+
+  .reveal.in-view tbody td:nth-child(4) .cmp-mark path {
+    animation-delay: 0.14s;
+  }
+
+  .reveal.in-view tbody td:nth-child(5) .cmp-mark path {
+    animation-delay: 0.21s;
+  }
+
+  .cmp-ring {
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    width: 150%;
+    height: 240%;
+    transform: translate(-50%, -50%);
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .cmp-ring path {
+    fill: none;
+    stroke: var(--color-ink);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+  }
+
+  .reveal.in-view .cmp-ring path {
+    animation: draw 0.9s cubic-bezier(0.45, 0, 0.2, 1) 0.35s forwards;
+  }
 }
 
 @keyframes draw {
