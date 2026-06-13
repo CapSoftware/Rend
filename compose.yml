@@ -187,8 +187,116 @@ services:
         mc anonymous set none local/rend-local
     restart: "no"
 
+  rend-api:
+    image: rend-api:local
+    build: *rend-build-api
+    restart: unless-stopped
+    depends_on: *rend-service-deps
+    environment:
+      <<: *rend-common-env
+      REND_API_BIND_ADDR: 0.0.0.0:4000
+      REND_API_AUTO_MIGRATE: "true"
+      REND_API_INLINE_MEDIA_PROCESSING: "false"
+      REND_PLAYBACK_BASE_URL: ${REND_PLAYBACK_BASE_URL:-http://127.0.0.1:4100}
+      REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: "2"
+      REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
+      REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 18
+      start_period: 20s
+
+  rend-media-worker:
+    image: rend-media-worker:local
+    build: *rend-build-worker
+    restart: unless-stopped
+    depends_on:
+      rend-api:
+        condition: service_healthy
+    environment:
+      <<: *rend-common-env
+      REND_API_AUTO_MIGRATE: "false"
+      REND_API_INLINE_MEDIA_PROCESSING: "false"
+      REND_MEDIA_WORKER_ID: docker-media-worker-001
+      REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
+      REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
+      REND_PLAYBACK_BASE_URL: ${REND_PLAYBACK_BASE_URL:-http://127.0.0.1:4100}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "tr '\\0' ' ' </proc/1/cmdline | grep -q 'rend-api worker media'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  rend-edge:
+    <<: *edge-service
+    environment:
+      <<: *rend-common-env
+      REND_EDGE_BIND_ADDR: 0.0.0.0:4100
+      REND_EDGE_ID: local-edge-001
+      REND_EDGE_REGION: local
+      REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
+      REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
+      REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
+      REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
+    ports:
+      - "4100:4100"
+    volumes:
+      - rend-edge-cache:/var/lib/rend/edge-cache
+      - rend-edge-telemetry-spool:/var/spool/rend/edge-telemetry
+
+  rend-edge-us-east:
+    <<: *edge-service
+    profiles: ["two-edge"]
+    environment:
+      <<: *rend-common-env
+      REND_EDGE_BIND_ADDR: 0.0.0.0:4100
+      REND_EDGE_ID: rend-edge-us-east
+      REND_EDGE_REGION: us-east
+      REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
+      REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
+      REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
+      REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
+    ports:
+      - "4101:4100"
+    volumes:
+      - rend-edge-us-east-cache:/var/lib/rend/edge-cache
+      - rend-edge-us-east-telemetry-spool:/var/spool/rend/edge-telemetry
+
+  rend-edge-london:
+    <<: *edge-service
+    profiles: ["two-edge"]
+    environment:
+      <<: *rend-common-env
+      REND_EDGE_BIND_ADDR: 0.0.0.0:4100
+      REND_EDGE_ID: rend-edge-london
+      REND_EDGE_REGION: london
+      REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
+      REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
+      REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
+      REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
+    ports:
+      - "4102:4100"
+    volumes:
+      - rend-edge-london-cache:/var/lib/rend/edge-cache
+      - rend-edge-london-telemetry-spool:/var/spool/rend/edge-telemetry
+
 volumes:
   rend-postgres-data:
   rend-redis-data:
   rend-clickhouse-data:
   rend-minio-data:
+  rend-edge-cache:
+  rend-edge-telemetry-spool:
+  rend-edge-us-east-cache:
+  rend-edge-us-east-telemetry-spool:
+  rend-edge-london-cache:
+  rend-edge-london-telemetry-spool:
