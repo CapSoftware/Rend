@@ -1,0 +1,45 @@
+name: rend-control-plane
+
+services:
+  rend-api:
+    image: ${REND_API_IMAGE:?set REND_API_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/rend/rend-api.env
+    ports:
+      - "${REND_API_PUBLISH_ADDR:-127.0.0.1}:${REND_API_PUBLISH_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 18
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  rend-media-worker:
+    image: ${REND_MEDIA_WORKER_IMAGE:?set REND_MEDIA_WORKER_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/rend/rend-media-worker.env
+    depends_on:
+      rend-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "tr '\\0' ' ' </proc/1/cmdline | grep -q 'rend-api worker media'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
