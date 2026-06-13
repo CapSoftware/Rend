@@ -142,6 +142,7 @@ Smoke-test local media artifact generation:
 bun run backend:smoke:media
 bun run backend:smoke:signed-playback
 bun run backend:smoke:playback-bootstrap
+bun run backend:smoke:asset-events
 ```
 
 The smoke flow starts local dependencies, checks `ffmpeg -version` and
@@ -159,6 +160,12 @@ The playback bootstrap smoke also starts `rend-edge` if needed, calls
 and unknown asset responses, verifies the signed primary, opener, manifest, and
 first segment hint URLs through `rend-edge`, and confirms the local player
 harness is served.
+
+The asset events smoke starts `rend-api` and `rend-edge` if needed, uploads a
+fixture, checks `GET /v1/assets/<asset_id>`, checks
+`GET /v1/assets/<asset_id>/events`, verifies ordered lifecycle events and
+`after_sequence` polling, and confirms unauthenticated and unknown-asset
+requests are rejected.
 
 Manual upload, bootstrap, and local playback:
 
@@ -182,6 +189,20 @@ asset_id=$(printf '%s' "$response" | jq -r .asset_id)
 object_key=$(printf '%s' "$response" | jq -r .source_object_key)
 
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+curl -s http://127.0.0.1:4000/v1/assets/$asset_id \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
+  -H 'authorization: Bearer dev-api-key' | jq
+
+after_sequence=$(
+  curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
+    -H 'authorization: Bearer dev-api-key' | jq -r '.next_after_sequence // 0'
+)
+
+curl -s "http://127.0.0.1:4000/v1/assets/$asset_id/events?after_sequence=$after_sequence&limit=25" \
   -H 'authorization: Bearer dev-api-key' | jq
 
 open "http://127.0.0.1:4000/player?asset_id=$asset_id"
