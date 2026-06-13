@@ -48,7 +48,7 @@ struct CommandOutput {
 }
 
 pub async fn process_uploaded_source(request: ProcessMediaRequest) -> Result<ProcessMediaOutcome> {
-    match process_uploaded_source_inner(&request).await {
+    match try_process_uploaded_source(&request).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             tracing::warn!(
@@ -65,7 +65,7 @@ pub async fn process_uploaded_source(request: ProcessMediaRequest) -> Result<Pro
     }
 }
 
-async fn process_uploaded_source_inner(
+pub async fn try_process_uploaded_source(
     request: &ProcessMediaRequest,
 ) -> Result<ProcessMediaOutcome> {
     let processing_dir = create_processing_dir(&request.asset_id).await?;
@@ -196,6 +196,10 @@ async fn download_source_object(request: &ProcessMediaRequest, destination: &Pat
         .await
         .with_context(|| format!("failed to sync source file {}", destination.display()))?;
     Ok(())
+}
+
+pub async fn set_asset_media_failed(db: &PgPool, asset_id: &str) -> Result<()> {
+    set_failed_playable_state(db, asset_id).await
 }
 
 async fn probe_video_stream(config: &MediaProcessingConfig, source_path: &Path) -> Result<()> {
