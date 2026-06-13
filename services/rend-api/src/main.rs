@@ -41,6 +41,7 @@ use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 mod events;
+mod jobs;
 mod media;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -52,6 +53,9 @@ const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
 const MAX_ASSET_EVENTS_LIMIT: usize = 100;
+const DEFAULT_MEDIA_JOB_MAX_ATTEMPTS: usize = 3;
+const HARD_MEDIA_JOB_MAX_ATTEMPTS: usize = 25;
+const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
 const PLAYER_HARNESS_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -588,6 +592,9 @@ struct ApiConfig {
     playback_bootstrap_prefetch_segments: usize,
     edge_warm: EdgeWarmConfig,
     media_processing: media::MediaProcessingConfig,
+    media_job_max_attempts: i32,
+    inline_media_processing: bool,
+    media_worker: MediaWorkerConfig,
     auto_migrate: bool,
     request_timeout: Duration,
 }
@@ -597,6 +604,13 @@ struct EdgeWarmConfig {
     url: Option<String>,
     internal_token: String,
     max_artifacts: usize,
+}
+
+#[derive(Clone)]
+struct MediaWorkerConfig {
+    worker_id: String,
+    poll_interval: Duration,
+    lock_timeout: Duration,
 }
 
 impl ApiConfig {
@@ -614,6 +628,15 @@ impl ApiConfig {
             "local-dev-playback-signing-secret",
         );
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
+        let inline_media_processing = env_bool("REND_API_INLINE_MEDIA_PROCESSING", false)?;
+        let media_job_max_attempts = env_usize(
+            "REND_MEDIA_JOB_MAX_ATTEMPTS",
+            DEFAULT_MEDIA_JOB_MAX_ATTEMPTS,
+        )?;
+        anyhow::ensure!(
+            (1..=HARD_MEDIA_JOB_MAX_ATTEMPTS).contains(&media_job_max_attempts),
+            "REND_MEDIA_JOB_MAX_ATTEMPTS must be between 1 and {HARD_MEDIA_JOB_MAX_ATTEMPTS}"
+        );
         let playback_bootstrap_prefetch_segments = env_usize(
             "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS",
             DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
@@ -684,6 +707,14 @@ impl ApiConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
                 process_timeout: env_duration_secs("REND_MEDIA_PROCESS_TIMEOUT_SECS", 60)?,
+            },
+            media_job_max_attempts: i32::try_from(media_job_max_attempts)
+                .context("REND_MEDIA_JOB_MAX_ATTEMPTS is too large")?,
+            inline_media_processing,
+            media_worker: MediaWorkerConfig {
+                worker_id: media_worker_id(),
+                poll_interval: env_duration_secs("REND_MEDIA_WORKER_POLL_INTERVAL_SECS", 1)?,
+                lock_timeout: env_duration_secs("REND_MEDIA_JOB_LOCK_TIMEOUT_SECS", 300)?,
             },
             auto_migrate: env_bool("REND_API_AUTO_MIGRATE", true)?,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
