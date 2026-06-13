@@ -21,6 +21,7 @@
     "backend:smoke:async-media": "scripts/smoke-async-media.sh",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
     "backend:smoke:edge-cache": "scripts/smoke-edge-cache.sh",
+    "backend:smoke:edge-coalescing": "scripts/smoke-edge-coalescing.sh",
     "backend:smoke:asset-events": "scripts/smoke-asset-events.sh",
     "backend:smoke:lifecycle-sse": "scripts/smoke-lifecycle-sse.sh",
     "backend:smoke:playback-bootstrap": "scripts/smoke-playback-bootstrap.sh",
