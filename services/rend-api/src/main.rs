@@ -1783,9 +1783,12 @@ impl HttpBody for CountedRequestBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use axum::{body::to_bytes, http::HeaderValue};
     use rend_playback_auth::{POLICY_ASSET_PLAYBACK_V1, decode_unverified_claims};
     use std::sync::atomic::AtomicUsize;
+    use tower::ServiceExt;
+
+    const NOW: u64 = 1_800_000_000;
 
     #[derive(Clone)]
     struct WarmRecorder {
@@ -1830,6 +1833,117 @@ mod tests {
         (format!("http://{addr}/internal/warm"), recorder)
     }
 
+    fn test_issuer() -> PlaybackTokenIssuer {
+        PlaybackTokenIssuer::new(
+            SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap(),
+            Duration::from_secs(600),
+        )
+        .unwrap()
+    }
+
+    fn test_config() -> ApiConfig {
+        ApiConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            database_url: "postgres://rend:rend@localhost:5432/rend".to_owned(),
+            redis_url: "redis://localhost:6379".to_owned(),
+            object_store_health_url: "http://localhost:9100/minio/health/ready".to_owned(),
+            dev_api_key: "dev-secret".to_owned(),
+            s3_endpoint: "http://localhost:9100".to_owned(),
+            s3_region: "us-east-1".to_owned(),
+            s3_bucket: "rend-local".to_owned(),
+            aws_access_key_id: "test".to_owned(),
+            aws_secret_access_key: "test".to_owned(),
+            playback_base_url: "http://127.0.0.1:4100".to_owned(),
+            playback_token_issuer: test_issuer(),
+            playback_bootstrap_prefetch_segments: DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
+            edge_warm: EdgeWarmConfig {
+                url: None,
+                internal_token: "internal".to_owned(),
+                max_artifacts: DEFAULT_EDGE_WARM_MAX_ARTIFACTS,
+            },
+            media_processing: media::MediaProcessingConfig {
+                ffmpeg_path: "ffmpeg".to_owned(),
+                ffprobe_path: "ffprobe".to_owned(),
+                process_timeout: Duration::from_secs(60),
+            },
+            auto_migrate: false,
+            request_timeout: Duration::from_secs(10),
+        }
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let config = test_config();
+        let db = PgPoolOptions::new()
+            .connect_lazy(&config.database_url)
+            .unwrap();
+        let s3 = build_s3_client(&config);
+
+        Arc::new(AppState {
+            config,
+            db,
+            http: reqwest::Client::new(),
+            s3,
+            started_at: Instant::now(),
+        })
+    }
+
+    fn asset_record(playable_state: &str) -> AssetPlaybackRecord {
+        AssetPlaybackRecord {
+            asset_id: "asset-123".to_owned(),
+            source_state: "uploaded".to_owned(),
+            playable_state: playable_state.to_owned(),
+        }
+    }
+
+    fn artifact_record(
+        kind: impl Into<String>,
+        object_key: impl Into<String>,
+        content_type: impl Into<String>,
+    ) -> PlaybackArtifactRecord {
+        PlaybackArtifactRecord {
+            kind: kind.into(),
+            object_key: object_key.into(),
+            content_type: content_type.into(),
+        }
+    }
+
+    fn hls_artifact_records() -> Vec<PlaybackArtifactRecord> {
+        vec![
+            artifact_record("opener", "videos/asset-123/opener.mp4", "video/mp4"),
+            artifact_record(
+                "manifest",
+                "videos/asset-123/hls/master.m3u8",
+                "application/vnd.apple.mpegurl",
+            ),
+            artifact_record(
+                "segment",
+                "videos/asset-123/hls/segment_00002.ts",
+                "video/mp2t",
+            ),
+            artifact_record(
+                "segment",
+                "videos/asset-123/hls/segment_00000.ts",
+                "video/mp2t",
+            ),
+            artifact_record(
+                "segment",
+                "videos/asset-123/hls/segment_00001.ts",
+                "video/mp2t",
+            ),
+        ]
+    }
+
+    async fn route_response(app: Router, path: &str, auth: Option<&str>) -> Response {
+        let mut builder = Request::builder().method("GET").uri(path);
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, auth);
+        }
+
+        app.oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
     #[test]
     fn bearer_authorization_accepts_matching_dev_key() {
         let mut headers = HeaderMap::new();
@@ -1852,6 +1966,140 @@ mod tests {
         );
 
         assert!(!is_authorized(&headers, "dev-secret"));
+    }
+
+    #[tokio::test]
+    async fn playback_bootstrap_endpoint_requires_dev_api_key() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+
+        let response = route_response(app.clone(), "/v1/assets/asset-123/playback", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(
+            app,
+            "/v1/assets/asset-123/playback",
+            Some("Bearer wrong-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn playback_bootstrap_unknown_asset_returns_404() {
+        let result =
+            playback_bootstrap_response(None, &[], "http://127.0.0.1:4100", &test_issuer(), 2, NOW);
+        let Err(error) = result else {
+            panic!("unknown asset unexpectedly returned bootstrap JSON");
+        };
+
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "asset not found");
+    }
+
+    #[test]
+    fn playback_bootstrap_hls_ready_returns_manifest_opener_and_segment_hints() {
+        let response = playback_bootstrap_response(
+            Some(asset_record("hls_ready")),
+            &hls_artifact_records(),
+            "http://127.0.0.1:4100/",
+            &test_issuer(),
+            2,
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(response.asset_id, "asset-123");
+        assert_eq!(response.source_state, "uploaded");
+        assert_eq!(response.playable_state, "hls_ready");
+        assert_eq!(response.ttl_seconds, 600);
+        assert_eq!(response.playback_token_expires_at, NOW + 600);
+        assert_eq!(response.playback_url, response.manifest_url);
+        assert_eq!(
+            response.playback_content_type.as_deref(),
+            Some("application/vnd.apple.mpegurl")
+        );
+        assert_eq!(
+            response.opener_url.as_deref().map(url_without_token),
+            Some("http://127.0.0.1:4100/v/asset-123/opener.mp4".to_owned())
+        );
+        assert_eq!(response.opener_content_type.as_deref(), Some("video/mp4"));
+        assert_eq!(
+            response.manifest_url.as_deref().map(url_without_token),
+            Some("http://127.0.0.1:4100/v/asset-123/hls/master.m3u8".to_owned())
+        );
+        assert_eq!(response.prefetch_hints.len(), 2);
+        assert_eq!(
+            response.prefetch_hints[0].artifact_path,
+            "hls/segment_00000.ts"
+        );
+        assert_eq!(response.prefetch_hints[0].content_type, "video/mp2t");
+        assert_eq!(
+            response.prefetch_hints[1].artifact_path,
+            "hls/segment_00001.ts"
+        );
+    }
+
+    #[test]
+    fn playback_bootstrap_opener_ready_returns_opener_primary_without_manifest() {
+        let response = playback_bootstrap_response(
+            Some(asset_record("opener_ready")),
+            &hls_artifact_records(),
+            "http://127.0.0.1:4100",
+            &test_issuer(),
+            2,
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.playback_url.as_deref().map(url_without_token),
+            Some("http://127.0.0.1:4100/v/asset-123/opener.mp4".to_owned())
+        );
+        assert_eq!(response.playback_content_type.as_deref(), Some("video/mp4"));
+        assert!(response.manifest_url.is_none());
+        assert!(response.manifest_content_type.is_none());
+        assert!(response.prefetch_hints.is_empty());
+    }
+
+    #[test]
+    fn playback_bootstrap_urls_use_signed_edge_playback_shape() {
+        let response = playback_bootstrap_response(
+            Some(asset_record("hls_ready")),
+            &hls_artifact_records(),
+            "http://edge.local",
+            &test_issuer(),
+            1,
+            NOW,
+        )
+        .unwrap();
+        let playback_url = response.playback_url.as_deref().unwrap();
+        let (path, token) = playback_url.split_once("?token=").unwrap();
+        let claims = decode_unverified_claims(token).unwrap();
+
+        assert_eq!(path, "http://edge.local/v/asset-123/hls/master.m3u8");
+        assert_eq!(claims.asset_id, "asset-123");
+        assert_eq!(claims.exp, NOW + 600);
+        assert_eq!(claims.kid, "kid-a");
+        assert_eq!(claims.policy, POLICY_ASSET_PLAYBACK_V1);
+    }
+
+    #[test]
+    fn playback_bootstrap_prefetch_hints_are_bounded() {
+        let response = playback_bootstrap_response(
+            Some(asset_record("hls_ready")),
+            &hls_artifact_records(),
+            "http://edge.local",
+            &test_issuer(),
+            1,
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(response.prefetch_hints.len(), 1);
+        assert_eq!(
+            response.prefetch_hints[0].artifact_path,
+            "hls/segment_00000.ts"
+        );
     }
 
     #[test]
@@ -1991,5 +2239,23 @@ mod tests {
             request_content_type(&HeaderMap::new()),
             "application/octet-stream".to_owned()
         );
+    }
+
+    #[tokio::test]
+    async fn player_harness_route_loads_without_auth() {
+        let app = build_app(test_state(), Duration::from_secs(10));
+        let response = route_response(app, "/player", None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<title>Rend local playback</title>"));
+    }
+
+    fn url_without_token(url: &str) -> String {
+        url.split_once("?token=")
+            .map(|(path, _token)| path)
+            .unwrap_or(url)
+            .to_owned()
     }
 }
