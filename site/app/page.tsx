@@ -1,6 +1,110 @@
 import Effects from "@/components/Effects";
 import WaitlistForm from "@/components/WaitlistForm";
 
+type CmpCell = { kind: "yes" | "no" | "mid" } | { kind: "text"; value: string };
+
+const cmpColumns = [
+  "Rend",
+  "Minute-billed platforms",
+  "Budget per-GB CDNs",
+  "Roll your own",
+];
+
+const cmpRows: { feature: string; cells: CmpCell[] }[] = [
+  {
+    feature: "Pricing model",
+    cells: [
+      { kind: "text", value: "Two meters, in minutes" },
+      { kind: "text", value: "Per minute, plus tiers" },
+      { kind: "text", value: "Per GB, by region" },
+      { kind: "text", value: "Whatever the bill says" },
+    ],
+  },
+  {
+    feature: "1080p delivery",
+    cells: [
+      { kind: "text", value: "$0.95 / 1k min" },
+      { kind: "text", value: "Higher per minute" },
+      { kind: "text", value: "Per GB streamed" },
+      { kind: "text", value: "Egress $50–90 / TB" },
+    ],
+  },
+  {
+    feature: "4K delivery",
+    cells: [
+      { kind: "text", value: "$3.20 / 1k min" },
+      { kind: "text", value: "Premium minute tier" },
+      { kind: "text", value: "Per GB streamed" },
+      { kind: "text", value: "Bitrate-dependent" },
+    ],
+  },
+  {
+    feature: "Storage",
+    cells: [
+      { kind: "text", value: "$2.50 / 1k min·mo" },
+      { kind: "text", value: "Per stored minute" },
+      { kind: "text", value: "Per GB stored" },
+      { kind: "text", value: "You run the disks" },
+    ],
+  },
+  {
+    feature: "Encoding included",
+    cells: [{ kind: "yes" }, { kind: "no" }, { kind: "no" }, { kind: "no" }],
+  },
+  {
+    feature: "Instant start on cold video",
+    cells: [{ kind: "yes" }, { kind: "mid" }, { kind: "no" }, { kind: "no" }],
+  },
+  {
+    feature: "Open source",
+    cells: [{ kind: "yes" }, { kind: "no" }, { kind: "no" }, { kind: "yes" }],
+  },
+  {
+    feature: "Self-host, free forever",
+    cells: [{ kind: "yes" }, { kind: "no" }, { kind: "no" }, { kind: "yes" }],
+  },
+  {
+    feature: "Runs on owned bare metal",
+    cells: [{ kind: "yes" }, { kind: "no" }, { kind: "mid" }, { kind: "no" }],
+  },
+  {
+    feature: "Agent-native, MCP + llms.txt",
+    cells: [{ kind: "yes" }, { kind: "mid" }, { kind: "no" }, { kind: "no" }],
+  },
+  {
+    feature: "Measured in public",
+    cells: [{ kind: "yes" }, { kind: "no" }, { kind: "no" }, { kind: "no" }],
+  },
+];
+
+function CmpMark({ kind }: { kind: "yes" | "no" | "mid" }) {
+  if (kind === "yes") {
+    return (
+      <svg className="cmp-mark cmp-yes" viewBox="0 0 24 24" role="img" aria-label="Yes">
+        <path pathLength={1} d="M4 13 C7 15 9 17 11 20 C14 12 17 7 21 4" />
+      </svg>
+    );
+  }
+  if (kind === "no") {
+    return (
+      <svg className="cmp-mark cmp-no" viewBox="0 0 24 24" role="img" aria-label="No">
+        <path pathLength={1} d="M6 6 C10 10 14 14 18 18" />
+        <path pathLength={1} d="M18 6 C14 10 10 14 6 18" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="cmp-mark cmp-mid" viewBox="0 0 24 24" role="img" aria-label="Partial">
+      <path pathLength={1} d="M4 13 C7 9 10 9 12 13 C14 17 17 17 20 13" />
+    </svg>
+  );
+}
+
+function renderCmpCell(cell: CmpCell) {
+  if (cell.kind === "text") return <span>{cell.value}</span>;
+  return <CmpMark kind={cell.kind} />;
+}
+
 export default function Home() {
   return (
     <>
