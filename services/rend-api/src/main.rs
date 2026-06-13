@@ -1314,14 +1314,83 @@ async fn fetch_asset_artifact_summaries(
         .collect())
 }
 
-async fn asset_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
+fn normalize_asset_id(asset_id: &str) -> Result<String, AppError> {
+    let asset_id = asset_id.trim();
+    if !is_canonical_uuid(asset_id) {
+        return Err(AppError::bad_request("malformed asset_id"));
+    }
+
+    Ok(asset_id.to_ascii_lowercase())
+}
+
+async fn mark_asset_deleted(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
+    let mut tx = db.begin().await.map_err(AppError::internal)?;
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        "
+        SELECT source_state, playable_state, deleted_at IS NOT NULL
+        FROM rend.assets
+        WHERE id = $1::uuid
+        FOR UPDATE
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let Some((source_state, playable_state, already_deleted)) = row else {
+        return Err(AppError::not_found("asset not found"));
+    };
+
+    if already_deleted {
+        tx.commit().await.map_err(AppError::internal)?;
+        return Ok(true);
+    }
+
+    events::insert_asset_event(
+        &mut tx,
+        asset_id,
+        events::EVENT_ASSET_DELETION_REQUESTED,
+        events::asset_deletion_requested_metadata(&source_state, &playable_state),
+    )
+    .await
+    .map_err(AppError::internal)?;
+
+    sqlx::query(
+        "
+        UPDATE rend.assets
+        SET source_state = 'deleted',
+            playable_state = 'deleted',
+            current_opener_artifact_id = NULL,
+            deleted_at = now()
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    events::insert_asset_event(
+        &mut tx,
+        asset_id,
+        events::EVENT_ASSET_DELETED,
+        events::asset_deleted_metadata(&source_state, &playable_state),
+    )
+    .await
+    .map_err(AppError::internal)?;
+
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(false)
+}
+
+async fn asset_row_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
     let exists: bool = sqlx::query_scalar(
         "
         SELECT EXISTS (
           SELECT 1
           FROM rend.assets
           WHERE id::text = $1
-            AND deleted_at IS NULL
         )
         ",
     )
@@ -2246,6 +2315,15 @@ async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
 }
 
 async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Result<()> {
+    if asset_is_deleted_or_missing(&state.db, &job.asset_id).await? {
+        tracing::info!(
+            job_id = %job.id,
+            asset_id = %job.asset_id,
+            "media job asset is deleted or missing",
+        );
+        return Ok(());
+    }
+
     if asset_is_already_playable(&state.db, &job.asset_id).await? {
         tracing::info!(
             job_id = %job.id,
@@ -3540,6 +3618,10 @@ mod tests {
             events::EVENT_PLAYABLE_STATE_CHANGED,
             events::EVENT_EDGE_WARMING_ATTEMPTED,
             events::EVENT_EDGE_WARMING_SUCCEEDED,
+            events::EVENT_ASSET_DELETION_REQUESTED,
+            events::EVENT_ASSET_DELETED,
+            events::EVENT_EDGE_PURGE_ATTEMPTED,
+            events::EVENT_EDGE_PURGE_SUCCEEDED,
         ] {
             assert!(event_types.contains(&required), "{required}");
         }
