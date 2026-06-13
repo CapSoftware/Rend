@@ -130,7 +130,6 @@ pub(crate) struct PlaybackTelemetryInput<'a> {
     pub(crate) error_code: Option<&'a str>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TelemetryCounters {
     pub(crate) queued: u64,
@@ -219,7 +218,6 @@ impl TelemetryHandle {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn counters(&self) -> TelemetryCounters {
         let Some(inner) = &self.inner else {
             return TelemetryCounters::default();
@@ -231,6 +229,13 @@ impl TelemetryHandle {
             sent: inner.sent.load(Ordering::Relaxed),
             dropped: inner.dropped.load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) async fn spool_bytes(&self) -> u64 {
+        let Some(inner) = &self.inner else {
+            return 0;
+        };
+        inner.spool.size_bytes().await.unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -322,6 +327,14 @@ impl LocalSpool {
             .await
             .with_context(|| format!("failed to flush telemetry spool {}", path.display()))?;
         Ok(true)
+    }
+
+    async fn size_bytes(&self) -> Result<u64> {
+        match fs::metadata(self.path()).await {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error).context("failed to inspect telemetry spool size"),
+        }
     }
 }
 

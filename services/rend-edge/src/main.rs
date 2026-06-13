@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -21,7 +21,10 @@ use axum::{
     routing::{get, post},
 };
 use rend_config::{
-    env_duration_secs, env_path, env_socket_addr, env_string, env_usize, load_dotenv,
+    ExpectedEdges, RendEnv, env_bool, env_duration_secs, env_path, env_socket_addr, env_string,
+    env_u64, env_usize, load_dotenv, optional_env_url,
+    validate_edge_base_url as validate_config_edge_base_url, validate_required_secret,
+    validate_required_url,
 };
 use rend_playback_auth::{
     SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
@@ -40,6 +43,8 @@ const HARD_MAX_IN_FLIGHT_FILLS: usize = 1024;
 const INTERNAL_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ASSET_ID_LEN: usize = 128;
 const DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS: u64 = 15;
+const DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_CACHE_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -58,6 +63,9 @@ struct EdgeConfig {
     playback_keyring: SingleKeyring,
     warm_max_artifacts: usize,
     max_in_flight_fills: usize,
+    cache_max_bytes: Option<u64>,
+    max_origin_artifact_bytes: u64,
+    cache_min_free_bytes: u64,
     control_plane: Option<ControlPlaneConfig>,
     request_timeout: Duration,
 }
@@ -72,16 +80,16 @@ struct ControlPlaneConfig {
 
 impl EdgeConfig {
     fn from_env() -> Result<Self> {
+        let rend_env = RendEnv::from_env()?;
+        let allow_insecure_edge_urls = env_bool("REND_ALLOW_INSECURE_EDGE_URLS", false)?;
+        let edge_id = env_string("REND_EDGE_ID", "local-edge-001");
+        let region = env_string("REND_EDGE_REGION", "local");
         let playback_signing_key_id =
             env_string("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key");
         let playback_signing_secret = env_string(
             "REND_PLAYBACK_SIGNING_SECRET",
             "local-dev-playback-signing-secret",
         );
-        let playback_keyring = SingleKeyring::new(
-            playback_signing_key_id,
-            playback_signing_secret.into_bytes(),
-        )?;
         let warm_max_artifacts =
             env_usize("REND_EDGE_WARM_MAX_ARTIFACTS", DEFAULT_WARM_MAX_ARTIFACTS)?;
         anyhow::ensure!(
@@ -96,12 +104,85 @@ impl EdgeConfig {
         );
 
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
+        validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
+        validate_required_secret(
+            rend_env,
+            "REND_PLAYBACK_SIGNING_KEY_ID",
+            &playback_signing_key_id,
+        )?;
+        validate_required_secret(
+            rend_env,
+            "REND_PLAYBACK_SIGNING_SECRET",
+            &playback_signing_secret,
+        )?;
+        let playback_keyring = SingleKeyring::new(
+            playback_signing_key_id,
+            playback_signing_secret.into_bytes(),
+        )?;
+        let internal_telemetry_token = env_string("REND_INTERNAL_TELEMETRY_TOKEN", "");
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
+        let telemetry_secret_for_validation = if rend_env.is_strict() {
+            internal_telemetry_token.as_str()
+        } else {
+            playback_telemetry.internal_token.as_str()
+        };
+        validate_required_secret(
+            rend_env,
+            "REND_INTERNAL_TELEMETRY_TOKEN",
+            telemetry_secret_for_validation,
+        )?;
         let bind_addr = env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?;
         let control_plane_url = optional_env_url("REND_CONTROL_PLANE_URL");
         let edge_base_url = optional_env_url("REND_EDGE_BASE_URL")
             .unwrap_or_else(|| format!("http://127.0.0.1:{}", bind_addr.port()));
-        let cache_max_bytes = optional_i64_env("REND_EDGE_CACHE_MAX_BYTES")?;
+        let expected_edges =
+            ExpectedEdges::from_env("REND_EXPECTED_EDGES", rend_env, allow_insecure_edge_urls)?;
+        validate_config_edge_base_url(
+            rend_env,
+            "REND_EDGE_BASE_URL",
+            &edge_base_url,
+            allow_insecure_edge_urls,
+        )?;
+        validate_required_url(
+            rend_env,
+            "REND_EDGE_ORIGIN_HEALTH_URL",
+            &env_string(
+                "REND_EDGE_ORIGIN_HEALTH_URL",
+                "http://localhost:9100/minio/health/ready",
+            ),
+        )?;
+        validate_required_url(
+            rend_env,
+            "S3_ENDPOINT",
+            &env_string("S3_ENDPOINT", "http://localhost:9100"),
+        )?;
+        if let Some(control_plane_url) = control_plane_url.as_deref() {
+            validate_required_url(rend_env, "REND_CONTROL_PLANE_URL", control_plane_url)?;
+        }
+        if let Some(ingest_url) = playback_telemetry.ingest_url.as_deref() {
+            validate_required_url(rend_env, "REND_EDGE_TELEMETRY_INGEST_URL", ingest_url)?;
+        }
+        if !expected_edges.is_empty()
+            && !expected_edges.contains_match(&edge_id, &region, &edge_base_url)
+        {
+            anyhow::bail!(
+                "REND_EDGE_ID/REND_EDGE_REGION/REND_EDGE_BASE_URL must match REND_EXPECTED_EDGES"
+            );
+        }
+        let cache_max_bytes_i64 = optional_i64_env("REND_EDGE_CACHE_MAX_BYTES")?;
+        let cache_max_bytes = cache_max_bytes_i64.and_then(|value| u64::try_from(value).ok());
+        let max_origin_artifact_bytes = env_u64(
+            "REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES",
+            DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
+        )?;
+        anyhow::ensure!(
+            max_origin_artifact_bytes > 0,
+            "REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES must be greater than 0"
+        );
+        let cache_min_free_bytes = env_u64(
+            "REND_EDGE_CACHE_MIN_FREE_BYTES",
+            DEFAULT_CACHE_MIN_FREE_BYTES,
+        )?;
         let heartbeat_interval = env_duration_secs(
             "REND_EDGE_HEARTBEAT_INTERVAL_SECS",
             DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS,
@@ -109,14 +190,14 @@ impl EdgeConfig {
         let control_plane = control_plane_url.map(|url| ControlPlaneConfig {
             url,
             edge_base_url,
-            cache_max_bytes,
+            cache_max_bytes: cache_max_bytes_i64,
             heartbeat_interval,
         });
 
         Ok(Self {
             bind_addr,
-            edge_id: env_string("REND_EDGE_ID", "local-edge-001"),
-            region: env_string("REND_EDGE_REGION", "local"),
+            edge_id,
+            region,
             cache_dir: env_path("REND_EDGE_CACHE_DIR", ".rend/cache"),
             origin_health_url: env_string(
                 "REND_EDGE_ORIGIN_HEALTH_URL",
@@ -132,6 +213,9 @@ impl EdgeConfig {
             playback_keyring,
             warm_max_artifacts,
             max_in_flight_fills,
+            cache_max_bytes,
+            max_origin_artifact_bytes,
+            cache_min_free_bytes,
             control_plane,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
         })
@@ -144,6 +228,7 @@ struct AppState {
     http: reqwest::Client,
     s3: S3Client,
     in_flight_fills: Arc<FillRegistry>,
+    metrics: Arc<EdgeMetrics>,
     telemetry: telemetry::TelemetryHandle,
     started_at: Instant,
 }
@@ -317,6 +402,14 @@ struct FillRegistry {
     fills: std::sync::Mutex<HashMap<String, Arc<InFlightFill>>>,
 }
 
+#[derive(Default)]
+struct EdgeMetrics {
+    cache_hit: std::sync::atomic::AtomicU64,
+    cache_miss: std::sync::atomic::AtomicU64,
+    cache_coalesced: std::sync::atomic::AtomicU64,
+    cache_error: std::sync::atomic::AtomicU64,
+}
+
 struct InFlightFill {
     notify: Notify,
     outcome: std::sync::Mutex<Option<FillOutcome>>,
@@ -381,7 +474,6 @@ impl FillRegistry {
         fill.complete(outcome);
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         lock_mutex(&self.fills).len()
     }
@@ -468,6 +560,7 @@ async fn main() -> Result<()> {
         http,
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
         started_at: Instant::now(),
     });
@@ -510,12 +603,6 @@ fn build_s3_client(config: &EdgeConfig) -> S3Client {
         .build();
 
     S3Client::from_conf(s3_config)
-}
-
-fn optional_env_url(key: &str) -> Option<String> {
-    let value = env_string(key, "");
-    let value = value.trim().trim_end_matches('/').to_owned();
-    (!value.is_empty()).then_some(value)
 }
 
 fn optional_i64_env(key: &str) -> Result<Option<i64>> {
@@ -730,21 +817,85 @@ async fn post_control_plane_heartbeat(
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     let ready =
         check_cache_dir(&state).await.status == "ok" && check_origin(&state).await.status == "ok";
+    let telemetry_counters = state.telemetry.counters();
+    let telemetry_spool_bytes = state.telemetry.spool_bytes().await;
+    let edge_id = prometheus_label_value(&state.config.edge_id);
+    let region = prometheus_label_value(&state.config.region);
     let body = format!(
         "# HELP rend_edge_up Edge process liveness.\n\
          # TYPE rend_edge_up gauge\n\
          rend_edge_up{{edge_id=\"{}\",region=\"{}\"}} 1\n\
          # HELP rend_edge_ready Edge readiness.\n\
          # TYPE rend_edge_ready gauge\n\
-         rend_edge_ready{{edge_id=\"{}\",region=\"{}\"}} {}\n",
-        state.config.edge_id,
-        state.config.region,
-        state.config.edge_id,
-        state.config.region,
-        if ready { 1 } else { 0 }
+         rend_edge_ready{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_cache_requests_total Playback cache responses by cache status.\n\
+         # TYPE rend_edge_cache_requests_total counter\n\
+         rend_edge_cache_requests_total{{edge_id=\"{}\",region=\"{}\",cache_status=\"HIT\"}} {}\n\
+         rend_edge_cache_requests_total{{edge_id=\"{}\",region=\"{}\",cache_status=\"MISS\"}} {}\n\
+         rend_edge_cache_requests_total{{edge_id=\"{}\",region=\"{}\",cache_status=\"COALESCED\"}} {}\n\
+         rend_edge_cache_requests_total{{edge_id=\"{}\",region=\"{}\",cache_status=\"error\"}} {}\n\
+         # HELP rend_edge_in_flight_fills Current in-flight origin cache fills.\n\
+         # TYPE rend_edge_in_flight_fills gauge\n\
+         rend_edge_in_flight_fills{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_telemetry_events_total Playback telemetry events by pipeline state.\n\
+         # TYPE rend_edge_telemetry_events_total counter\n\
+         rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"queued\"}} {}\n\
+         rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"sent\"}} {}\n\
+         rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"spooled\"}} {}\n\
+         rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"dropped\"}} {}\n\
+         # HELP rend_edge_telemetry_spool_bytes Current local telemetry spool file size.\n\
+         # TYPE rend_edge_telemetry_spool_bytes gauge\n\
+         rend_edge_telemetry_spool_bytes{{edge_id=\"{}\",region=\"{}\"}} {}\n",
+        edge_id,
+        region,
+        edge_id,
+        region,
+        if ready { 1 } else { 0 },
+        edge_id,
+        region,
+        state.metrics.cache_hit.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.metrics.cache_miss.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.metrics.cache_coalesced.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.metrics.cache_error.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.in_flight_fills.len(),
+        edge_id,
+        region,
+        telemetry_counters.queued,
+        edge_id,
+        region,
+        telemetry_counters.sent,
+        edge_id,
+        region,
+        telemetry_counters.spooled,
+        edge_id,
+        region,
+        telemetry_counters.dropped,
+        edge_id,
+        region,
+        telemetry_spool_bytes,
     );
 
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+fn prometheus_label_value(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            ch => vec![ch],
+        })
+        .collect()
 }
 
 async fn playback(
@@ -772,7 +923,32 @@ async fn playback(
         started.elapsed(),
         error_code,
     );
+    record_cache_metrics(&state, &response);
     response
+}
+
+fn record_cache_metrics(state: &AppState, response: &Response) {
+    match response
+        .headers()
+        .get("x-rend-cache")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("HIT") => {
+            state.metrics.cache_hit.fetch_add(1, Ordering::Relaxed);
+        }
+        Some("MISS") => {
+            state.metrics.cache_miss.fetch_add(1, Ordering::Relaxed);
+        }
+        Some("COALESCED") => {
+            state
+                .metrics
+                .cache_coalesced
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            state.metrics.cache_error.fetch_add(1, Ordering::Relaxed);
+        }
+    };
 }
 
 async fn playback_inner(
@@ -888,7 +1064,7 @@ async fn fill_cache_from_origin(
     cache_path: &FsPath,
 ) -> std::result::Result<(), PlaybackError> {
     let bytes = fetch_origin_artifact(state, artifact).await?;
-    write_cache_file(cache_path, &bytes).await
+    write_cache_file(state, cache_path, &bytes).await
 }
 
 async fn wait_for_coalesced_fill(
@@ -1264,7 +1440,7 @@ async fn warm_artifact(
     };
 
     let byte_size = u64::try_from(bytes.len()).ok();
-    if let Err(error) = write_cache_file(&cache_path, &bytes).await {
+    if let Err(error) = write_cache_file(state, &cache_path, &bytes).await {
         let message = error.log_message();
         tracing::warn!(
             artifact_path,
@@ -1379,6 +1555,13 @@ async fn fetch_origin_artifact(
                 ))
             }
         })?;
+    if let Some(content_length) = object.content_length() {
+        ensure_origin_artifact_size_allowed(
+            state,
+            &artifact.object_key,
+            u64::try_from(content_length).unwrap_or(u64::MAX),
+        )?;
+    }
 
     let bytes = object.body.collect().await.map_err(|error| {
         PlaybackError::Origin(format!(
@@ -1386,11 +1569,37 @@ async fn fetch_origin_artifact(
             artifact.object_key
         ))
     })?;
+    let bytes = bytes.into_bytes();
+    ensure_origin_artifact_size_allowed(
+        state,
+        &artifact.object_key,
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    )?;
 
-    Ok(bytes.into_bytes().to_vec())
+    Ok(bytes.to_vec())
 }
 
-async fn write_cache_file(path: &FsPath, bytes: &[u8]) -> std::result::Result<(), PlaybackError> {
+fn ensure_origin_artifact_size_allowed(
+    state: &AppState,
+    object_key: &str,
+    byte_size: u64,
+) -> std::result::Result<(), PlaybackError> {
+    if byte_size > state.config.max_origin_artifact_bytes {
+        return Err(PlaybackError::Origin(format!(
+            "origin artifact {object_key} is {byte_size} bytes, exceeding REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES ({})",
+            state.config.max_origin_artifact_bytes
+        )));
+    }
+
+    Ok(())
+}
+
+async fn write_cache_file(
+    state: &AppState,
+    path: &FsPath,
+    bytes: &[u8],
+) -> std::result::Result<(), PlaybackError> {
+    ensure_cache_write_allowed(state, bytes.len()).await?;
     let parent = path
         .parent()
         .ok_or_else(|| PlaybackError::Io(format!("cache path {} has no parent", path.display())))?;
@@ -1429,6 +1638,79 @@ async fn write_cache_file(path: &FsPath, bytes: &[u8]) -> std::result::Result<()
     }
 
     Ok(())
+}
+
+async fn ensure_cache_write_allowed(
+    state: &AppState,
+    byte_len: usize,
+) -> std::result::Result<(), PlaybackError> {
+    let byte_len = u64::try_from(byte_len).unwrap_or(u64::MAX);
+    fs::create_dir_all(&state.config.cache_dir)
+        .await
+        .map_err(|error| {
+            PlaybackError::Io(format!(
+                "failed to create cache directory {}: {error}",
+                state.config.cache_dir.display()
+            ))
+        })?;
+
+    if let Some(max_bytes) = state.config.cache_max_bytes {
+        let current_size = cache_dir_size_bytes(state.config.cache_dir.clone()).await?;
+        if current_size.saturating_add(byte_len) > max_bytes {
+            return Err(PlaybackError::Overloaded(format!(
+                "edge cache size guard refused write: current {current_size} bytes + artifact {byte_len} bytes exceeds REND_EDGE_CACHE_MAX_BYTES ({max_bytes})"
+            )));
+        }
+    }
+
+    let cache_dir = state.config.cache_dir.clone();
+    let min_free_bytes = state.config.cache_min_free_bytes;
+    let available = tokio::task::spawn_blocking(move || fs2::available_space(cache_dir))
+        .await
+        .map_err(|error| PlaybackError::Io(format!("failed to join free-space check: {error}")))?
+        .map_err(|error| {
+            PlaybackError::Io(format!("failed to inspect cache free space: {error}"))
+        })?;
+    if available < byte_len.saturating_add(min_free_bytes) {
+        return Err(PlaybackError::Overloaded(format!(
+            "edge cache free-space guard refused write: available {available} bytes, artifact {byte_len} bytes, reserve {min_free_bytes} bytes"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn cache_dir_size_bytes(cache_dir: PathBuf) -> std::result::Result<u64, PlaybackError> {
+    let display_path = cache_dir.display().to_string();
+    tokio::task::spawn_blocking(move || dir_size_bytes(&cache_dir))
+        .await
+        .map_err(|error| PlaybackError::Io(format!("failed to join cache size check: {error}")))?
+        .map_err(|error| {
+            PlaybackError::Io(format!(
+                "failed to inspect cache directory size {display_path}: {error}"
+            ))
+        })
+}
+
+fn dir_size_bytes(path: &FsPath) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+
+    Ok(total)
 }
 
 fn temp_file_suffix() -> String {
