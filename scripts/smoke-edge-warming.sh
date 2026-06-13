@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
+source "$root_dir/scripts/smoke-common.sh"
 
 api_base="${REND_API_BASE_URL:-http://127.0.0.1:4000}"
 edge_base="${REND_EDGE_BASE_URL:-http://127.0.0.1:4100}"
@@ -14,9 +15,12 @@ api_started=0
 api_pid=""
 edge_started=0
 edge_pid=""
+worker_started=0
+worker_pid=""
 
 cleanup() {
   rm -rf "$tmp_dir"
+  stop_media_worker
   if [[ "$edge_started" == "1" && -n "$edge_pid" ]]; then
     kill "$edge_pid" >/dev/null 2>&1 || true
     wait "$edge_pid" >/dev/null 2>&1 || true
@@ -63,6 +67,10 @@ export REND_PLAYBACK_SIGNING_SECRET="${REND_PLAYBACK_SIGNING_SECRET:-local-dev-p
 export REND_PLAYBACK_TOKEN_TTL_SECS="${REND_PLAYBACK_TOKEN_TTL_SECS:-900}"
 export REND_HTTP_TIMEOUT_SECS="${REND_HTTP_TIMEOUT_SECS:-120}"
 export REND_MEDIA_PROCESS_TIMEOUT_SECS="${REND_MEDIA_PROCESS_TIMEOUT_SECS:-60}"
+export REND_API_INLINE_MEDIA_PROCESSING="${REND_API_INLINE_MEDIA_PROCESSING:-false}"
+export REND_MEDIA_JOB_MAX_ATTEMPTS="${REND_MEDIA_JOB_MAX_ATTEMPTS:-3}"
+export REND_MEDIA_WORKER_POLL_INTERVAL_SECS="${REND_MEDIA_WORKER_POLL_INTERVAL_SECS:-1}"
+export REND_MEDIA_JOB_LOCK_TIMEOUT_SECS="${REND_MEDIA_JOB_LOCK_TIMEOUT_SECS:-300}"
 export REND_FFMPEG_PATH="${REND_FFMPEG_PATH:-ffmpeg}"
 export REND_FFPROBE_PATH="${REND_FFPROBE_PATH:-ffprobe}"
 export REND_EDGE_BIND_ADDR="${REND_EDGE_BIND_ADDR:-127.0.0.1:4100}"
@@ -130,6 +138,7 @@ done
 curl -fsS "$edge_base/readyz" >/dev/null
 rm -rf "$REND_EDGE_CACHE_DIR"
 mkdir -p "$REND_EDGE_CACHE_DIR"
+start_media_worker "rend-api-media-worker-edge-warming-smoke"
 
 upload_response="$tmp_dir/upload.json"
 status_code="$(
@@ -147,30 +156,14 @@ if [[ "$status_code" != "201" ]]; then
 fi
 
 asset_id="$(
-  python3 - "$upload_response" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    response = json.load(f)
-required = ["asset_id", "playable_state"]
-missing = [key for key in required if key not in response]
-if missing:
-    raise SystemExit(f"response missing fields: {', '.join(missing)}")
-if response["playable_state"] != "hls_ready":
-    raise SystemExit(f"expected playable_state hls_ready, got {response['playable_state']}")
-print(response["asset_id"])
-PY
+  assert_async_upload_response "$upload_response"
 )"
 
+poll_asset_until_hls_ready "$asset_id" "$tmp_dir/asset.json"
+bootstrap_response="$tmp_dir/bootstrap.json"
+fetch_playback_bootstrap "$asset_id" "$bootstrap_response"
 playback_url="$(
-  python3 - "$upload_response" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    response = json.load(f)
-playback_url = response.get("playback_url", "")
-if not playback_url:
-    raise SystemExit("response missing playback_url")
-print(playback_url)
-PY
+  playback_url_from_bootstrap "$bootstrap_response"
 )"
 
 expected_playback_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
