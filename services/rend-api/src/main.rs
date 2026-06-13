@@ -762,7 +762,8 @@ struct CreateVideoResponse {
     source_artifact_id: String,
     source_object_key: String,
     byte_size: i64,
-    playback_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playback_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -919,6 +920,7 @@ struct CountedRequestBody {
 async fn main() -> Result<()> {
     load_dotenv();
     init_tracing();
+    let command = std::env::args().skip(1).collect::<Vec<_>>();
 
     let config = ApiConfig::from_env()?;
     let db = PgPoolOptions::new()
@@ -944,6 +946,14 @@ async fn main() -> Result<()> {
         started_at: Instant::now(),
     });
 
+    match command.as_slice() {
+        [] => {}
+        [command, subcommand] if command == "worker" && subcommand == "media" => {
+            return run_media_worker(state).await;
+        }
+        _ => anyhow::bail!("usage: rend-api [worker media]"),
+    }
+
     let app = build_app(state.clone(), request_timeout);
 
     let listener = TcpListener::bind(state.config.bind_addr)
@@ -955,6 +965,51 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("rend-api server failed")
+}
+
+async fn run_media_worker(state: Arc<AppState>) -> Result<()> {
+    tracing::info!(
+        worker_id = %state.config.media_worker.worker_id,
+        poll_interval_ms = state.config.media_worker.poll_interval.as_millis(),
+        "rend-api media worker listening for queued jobs",
+    );
+
+    let mut shutdown = Box::pin(shutdown_signal());
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                tracing::info!(
+                    worker_id = %state.config.media_worker.worker_id,
+                    "rend-api media worker shutting down",
+                );
+                break;
+            }
+            result = process_next_media_job(state.clone()) => {
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tokio::select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            worker_id = %state.config.media_worker.worker_id,
+                            error = %error,
+                            "media worker loop failed",
+                        );
+                        tokio::select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
@@ -1015,6 +1070,16 @@ fn optional_env_url(key: &str) -> Option<String> {
     let value = env_string(key, "");
     let value = value.trim().trim_end_matches('/').to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+fn media_worker_id() -> String {
+    let configured = env_string("REND_MEDIA_WORKER_ID", "");
+    let configured = configured.trim();
+    if configured.is_empty() {
+        format!("rend-api-media-worker-{}", std::process::id())
+    } else {
+        configured.to_owned()
+    }
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthResponse<'static>> {
@@ -1387,7 +1452,10 @@ fn playback_bootstrap_response(
     now: u64,
 ) -> Result<PlaybackBootstrapResponse, AppError> {
     let asset = asset.ok_or_else(|| AppError::not_found("asset not found"))?;
-    let token = issue_playback_token(issuer, &asset.asset_id, now).map_err(AppError::internal)?;
+    if !matches!(asset.playable_state.as_str(), "opener_ready" | "hls_ready") {
+        return Err(AppError::not_found("asset is not playable yet"));
+    }
+
     let playback_artifacts = playback_artifacts(&asset.asset_id, artifacts);
     let opener_artifact = find_playback_artifact(&playback_artifacts, "opener.mp4").cloned();
     let manifest_artifact = (asset.playable_state == "hls_ready")
@@ -1398,6 +1466,11 @@ fn playback_bootstrap_response(
         opener_artifact.as_ref(),
         manifest_artifact.as_ref(),
     );
+    if primary_artifact.is_none() {
+        return Err(AppError::not_found("asset is not playable yet"));
+    }
+
+    let token = issue_playback_token(issuer, &asset.asset_id, now).map_err(AppError::internal)?;
     let (playback_url, playback_content_type) = signed_artifact_fields(
         playback_base_url,
         &asset.asset_id,
@@ -1658,6 +1731,47 @@ async fn create_video_inner(
     .execute(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+
+    if !state.config.inline_media_processing {
+        let media_job_id = jobs::enqueue_media_processing_job(
+            &mut tx,
+            &asset_id,
+            state.config.media_job_max_attempts,
+        )
+        .await
+        .map_err(AppError::internal)?;
+        events::insert_asset_event(
+            &mut tx,
+            &asset_id,
+            events::EVENT_MEDIA_PROCESSING_QUEUED,
+            events::media_processing_queued_metadata(
+                &media_job_id,
+                state.config.media_job_max_attempts,
+            ),
+        )
+        .await
+        .map_err(AppError::internal)?;
+        events::insert_asset_event(
+            &mut tx,
+            &asset_id,
+            events::EVENT_UPLOAD_RESPONSE_READY,
+            events::upload_response_ready_metadata("uploaded", "not_playable", byte_size),
+        )
+        .await
+        .map_err(AppError::internal)?;
+        tx.commit().await.map_err(AppError::internal)?;
+
+        return Ok(CreateVideoResponse {
+            asset_id,
+            source_state: "uploaded".to_owned(),
+            playable_state: "not_playable".to_owned(),
+            source_artifact_id,
+            source_object_key,
+            byte_size,
+            playback_url: None,
+        });
+    }
+
     tx.commit().await.map_err(AppError::internal)?;
 
     events::insert_asset_event_pool(
@@ -1741,6 +1855,261 @@ async fn create_video_inner(
     })
 }
 
+async fn process_next_media_job(state: Arc<AppState>) -> Result<bool> {
+    let Some(job) = jobs::claim_next_media_job(
+        &state.db,
+        &state.config.media_worker.worker_id,
+        state.config.media_worker.lock_timeout,
+    )
+    .await
+    .context("failed to claim media job")?
+    else {
+        return Ok(false);
+    };
+
+    process_media_job(&state, job).await;
+    Ok(true)
+}
+
+async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
+    tracing::info!(
+        job_id = %job.id,
+        asset_id = %job.asset_id,
+        attempt = job.attempts,
+        max_attempts = job.max_attempts,
+        worker_id = %state.config.media_worker.worker_id,
+        "media worker claimed job",
+    );
+
+    match process_media_job_inner(state, &job).await {
+        Ok(()) => {
+            if let Err(error) = jobs::mark_media_job_succeeded(&state.db, &job.id).await {
+                tracing::error!(
+                    job_id = %job.id,
+                    asset_id = %job.asset_id,
+                    error = %error,
+                    "failed to mark media job succeeded",
+                );
+            }
+        }
+        Err(error) => {
+            handle_media_job_failure(state, &job, error).await;
+        }
+    }
+}
+
+async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Result<()> {
+    if asset_is_already_playable(&state.db, &job.asset_id).await? {
+        tracing::info!(
+            job_id = %job.id,
+            asset_id = %job.asset_id,
+            "media job asset is already playable",
+        );
+        return Ok(());
+    }
+
+    mark_asset_media_processing_started(&state.db, &job.asset_id)
+        .await
+        .context("failed to mark asset media processing started")?;
+    let source_object_key = fetch_source_object_key(&state.db, &job.asset_id)
+        .await
+        .context("failed to fetch source artifact for media job")?;
+    let outcome = media::try_process_uploaded_source(&media::ProcessMediaRequest {
+        asset_id: job.asset_id.clone(),
+        source_object_key,
+        s3_bucket: state.config.s3_bucket.clone(),
+        s3: state.s3.clone(),
+        db: state.db.clone(),
+        config: state.config.media_processing.clone(),
+    })
+    .await?;
+
+    maybe_warm_edge(
+        Some(&state.db),
+        &state.http,
+        &state.config.edge_warm,
+        &job.asset_id,
+        &outcome.playable_state,
+        &outcome.playback_artifact_paths,
+    )
+    .await;
+
+    Ok(())
+}
+
+async fn handle_media_job_failure(state: &AppState, job: &jobs::MediaJob, error: anyhow::Error) {
+    let last_error = bounded_error_message(&error);
+    let final_attempt = jobs::is_final_attempt(job.attempts, job.max_attempts);
+    record_media_processing_failed_event(
+        &state.db,
+        &job.asset_id,
+        job.attempts,
+        job.max_attempts,
+        final_attempt,
+        &last_error,
+    )
+    .await;
+
+    if final_attempt {
+        if let Err(error) = media::set_asset_media_failed(&state.db, &job.asset_id).await {
+            tracing::error!(
+                job_id = %job.id,
+                asset_id = %job.asset_id,
+                error = %error,
+                "failed to mark asset media processing failed",
+            );
+        }
+        if let Err(error) = jobs::mark_media_job_failed(&state.db, &job.id, &last_error).await {
+            tracing::error!(
+                job_id = %job.id,
+                asset_id = %job.asset_id,
+                error = %error,
+                "failed to mark media job failed",
+            );
+        }
+        return;
+    }
+
+    if let Err(error) = mark_asset_media_processing_retryable(&state.db, &job.asset_id).await {
+        tracing::warn!(
+            job_id = %job.id,
+            asset_id = %job.asset_id,
+            error = %error,
+            "failed to reset asset state before media retry",
+        );
+    }
+    if let Err(error) = jobs::mark_media_job_retryable(
+        &state.db,
+        &job.id,
+        &last_error,
+        jobs::retry_backoff(job.attempts),
+    )
+    .await
+    {
+        tracing::error!(
+            job_id = %job.id,
+            asset_id = %job.asset_id,
+            error = %error,
+            "failed to requeue media job",
+        );
+    }
+}
+
+async fn asset_is_already_playable(db: &PgPool, asset_id: &str) -> Result<bool> {
+    let playable_state: Option<String> = sqlx::query_scalar(
+        "
+        SELECT playable_state
+        FROM rend.assets
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(matches!(
+        playable_state.as_deref(),
+        Some("opener_ready" | "hls_ready")
+    ))
+}
+
+async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> {
+    let object_key: Option<String> = sqlx::query_scalar(
+        "
+        SELECT object_key
+        FROM rend.artifacts
+        WHERE asset_id = $1::uuid
+          AND kind = 'source'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await?;
+
+    object_key.ok_or_else(|| anyhow::anyhow!("source artifact is missing"))
+}
+
+async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let playable_state: String = sqlx::query_scalar(
+        "
+        SELECT playable_state
+        FROM rend.assets
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+        FOR UPDATE
+        ",
+    )
+    .bind(asset_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "
+        UPDATE rend.assets
+        SET source_state = 'processing'
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await?;
+
+    events::insert_asset_event(
+        &mut tx,
+        asset_id,
+        events::EVENT_MEDIA_PROCESSING_STARTED,
+        events::media_processing_started_metadata("processing", &playable_state),
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn mark_asset_media_processing_retryable(db: &PgPool, asset_id: &str) -> Result<()> {
+    sqlx::query(
+        "
+        UPDATE rend.assets
+        SET source_state = 'uploaded',
+            playable_state = 'not_playable'
+        WHERE id = $1::uuid
+          AND playable_state = 'not_playable'
+        ",
+    )
+    .bind(asset_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+async fn record_media_processing_failed_event(
+    db: &PgPool,
+    asset_id: &str,
+    attempt: i32,
+    max_attempts: i32,
+    final_attempt: bool,
+    reason: &str,
+) {
+    if let Err(error) = events::insert_asset_event_pool(
+        db,
+        asset_id,
+        events::EVENT_MEDIA_PROCESSING_FAILED,
+        events::media_processing_failed_metadata(attempt, max_attempts, final_attempt, reason),
+    )
+    .await
+    {
+        tracing::warn!(
+            asset_id,
+            error = %error,
+            "failed to record media processing failure event",
+        );
+    }
+}
+
 fn counted_body_stream(body: Body, byte_count: Arc<AtomicU64>) -> ByteStream {
     ByteStream::from_body_1_x(CountedRequestBody {
         body: Mutex::new(Box::pin(body)),
@@ -1788,23 +2157,25 @@ fn playback_url(
     playable_state: &str,
     issuer: &PlaybackTokenIssuer,
     now: u64,
-) -> Result<String, PlaybackAuthError> {
-    let artifact_path = playback_artifact_path(playable_state);
+) -> Result<Option<String>, PlaybackAuthError> {
+    let Some(artifact_path) = playback_artifact_path(playable_state) else {
+        return Ok(None);
+    };
     let token = issue_playback_token(issuer, asset_id, now)?;
 
-    Ok(signed_artifact_url(
+    Ok(Some(signed_artifact_url(
         base_url,
         asset_id,
         artifact_path,
         &token.token,
-    ))
+    )))
 }
 
-fn playback_artifact_path(playable_state: &str) -> &'static str {
+fn playback_artifact_path(playable_state: &str) -> Option<&'static str> {
     match playable_state {
-        "hls_ready" => "hls/master.m3u8",
-        "opener_ready" => "opener.mp4",
-        _ => "opener.mp4",
+        "hls_ready" => Some("hls/master.m3u8"),
+        "opener_ready" => Some("opener.mp4"),
+        _ => None,
     }
 }
 
@@ -1989,6 +2360,19 @@ fn limit_log_body(body: &str) -> String {
         format!("{}...[truncated]", &body[..end])
     } else {
         body.to_owned()
+    }
+}
+
+fn bounded_error_message(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    if message.len() > MEDIA_JOB_LAST_ERROR_LIMIT_BYTES {
+        let mut end = MEDIA_JOB_LAST_ERROR_LIMIT_BYTES;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...[truncated]", &message[..end])
+    } else {
+        message
     }
 }
 
@@ -2308,6 +2692,13 @@ mod tests {
                 ffprobe_path: "ffprobe".to_owned(),
                 process_timeout: Duration::from_secs(60),
             },
+            media_job_max_attempts: 3,
+            inline_media_processing: false,
+            media_worker: MediaWorkerConfig {
+                worker_id: "test-worker".to_owned(),
+                poll_interval: Duration::from_secs(1),
+                lock_timeout: Duration::from_secs(300),
+            },
             auto_migrate: false,
             request_timeout: Duration::from_secs(10),
         }
@@ -2596,6 +2987,8 @@ mod tests {
             events::EVENT_ASSET_CREATED,
             events::EVENT_SOURCE_UPLOAD_STARTED,
             events::EVENT_SOURCE_UPLOADED,
+            events::EVENT_MEDIA_PROCESSING_QUEUED,
+            events::EVENT_UPLOAD_RESPONSE_READY,
             events::EVENT_MEDIA_PROCESSING_STARTED,
         ];
         event_types.extend(artifact_events.iter().map(|event| event.event_type));
@@ -2610,12 +3003,13 @@ mod tests {
             events::EVENT_ASSET_CREATED,
             events::EVENT_SOURCE_UPLOAD_STARTED,
             events::EVENT_SOURCE_UPLOADED,
+            events::EVENT_MEDIA_PROCESSING_QUEUED,
+            events::EVENT_UPLOAD_RESPONSE_READY,
             events::EVENT_MEDIA_PROCESSING_STARTED,
             events::EVENT_ARTIFACT_GENERATED,
             events::EVENT_PLAYABLE_STATE_CHANGED,
             events::EVENT_EDGE_WARMING_ATTEMPTED,
             events::EVENT_EDGE_WARMING_SUCCEEDED,
-            events::EVENT_UPLOAD_RESPONSE_READY,
         ] {
             assert!(event_types.contains(&required), "{required}");
         }
@@ -2631,6 +3025,42 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::NOT_FOUND);
         assert_eq!(error.message, "asset not found");
+    }
+
+    #[test]
+    fn playback_bootstrap_not_playable_asset_returns_404() {
+        let result = playback_bootstrap_response(
+            Some(asset_record("not_playable")),
+            &[],
+            "http://127.0.0.1:4100",
+            &test_issuer(),
+            2,
+            NOW,
+        );
+        let Err(error) = result else {
+            panic!("not playable asset unexpectedly returned bootstrap JSON");
+        };
+
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "asset is not playable yet");
+    }
+
+    #[test]
+    fn playback_bootstrap_ready_asset_without_artifact_returns_404() {
+        let result = playback_bootstrap_response(
+            Some(asset_record("opener_ready")),
+            &[],
+            "http://127.0.0.1:4100",
+            &test_issuer(),
+            2,
+            NOW,
+        );
+        let Err(error) = result else {
+            panic!("ready asset without artifacts unexpectedly returned bootstrap JSON");
+        };
+
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "asset is not playable yet");
     }
 
     #[test]
@@ -2761,6 +3191,7 @@ mod tests {
             &issuer,
             1_800_000_000,
         )
+        .unwrap()
         .unwrap();
         let (path, token) = url.split_once("?token=").unwrap();
         let claims = decode_unverified_claims(token).unwrap();
@@ -2770,6 +3201,25 @@ mod tests {
         assert_eq!(claims.exp, 1_800_000_600);
         assert_eq!(claims.kid, "kid-a");
         assert_eq!(claims.policy, POLICY_ASSET_PLAYBACK_V1);
+    }
+
+    #[test]
+    fn playback_url_is_absent_until_playable() {
+        let issuer = PlaybackTokenIssuer::new(
+            SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap(),
+            Duration::from_secs(600),
+        )
+        .unwrap();
+        let url = playback_url(
+            "http://127.0.0.1:4100/",
+            "asset-123",
+            "not_playable",
+            &issuer,
+            1_800_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(url, None);
     }
 
     #[test]
