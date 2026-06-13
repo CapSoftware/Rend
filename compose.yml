@@ -199,6 +199,7 @@ services:
       REND_API_INLINE_MEDIA_PROCESSING: "false"
       REND_PLAYBACK_BASE_URL: ${REND_PLAYBACK_BASE_URL:-http://127.0.0.1:4100}
       REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: "2"
+      REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: "30"
       REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
       REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
     ports:
@@ -222,6 +223,7 @@ services:
       REND_API_AUTO_MIGRATE: "false"
       REND_API_INLINE_MEDIA_PROCESSING: "false"
       REND_MEDIA_WORKER_ID: docker-media-worker-001
+      REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: "30"
       REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
       REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
       REND_PLAYBACK_BASE_URL: ${REND_PLAYBACK_BASE_URL:-http://127.0.0.1:4100}
@@ -243,6 +245,9 @@ services:
       REND_EDGE_BIND_ADDR: 0.0.0.0:4100
       REND_EDGE_ID: local-edge-001
       REND_EDGE_REGION: local
+      REND_EDGE_BASE_URL: http://rend-edge:4100
+      REND_CONTROL_PLANE_URL: http://rend-api:4000
+      REND_EDGE_HEARTBEAT_INTERVAL_SECS: "2"
       REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
       REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
@@ -261,6 +266,9 @@ services:
       REND_EDGE_BIND_ADDR: 0.0.0.0:4100
       REND_EDGE_ID: rend-edge-us-east
       REND_EDGE_REGION: us-east
+      REND_EDGE_BASE_URL: http://rend-edge-us-east:4100
+      REND_CONTROL_PLANE_URL: http://rend-api:4000
+      REND_EDGE_HEARTBEAT_INTERVAL_SECS: "2"
       REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
       REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
@@ -279,6 +287,9 @@ services:
       REND_EDGE_BIND_ADDR: 0.0.0.0:4100
       REND_EDGE_ID: rend-edge-london
       REND_EDGE_REGION: london
+      REND_EDGE_BASE_URL: http://rend-edge-london:4100
+      REND_CONTROL_PLANE_URL: http://rend-api:4000
+      REND_EDGE_HEARTBEAT_INTERVAL_SECS: "2"
       REND_EDGE_CACHE_DIR: /var/lib/rend/edge-cache
       REND_EDGE_ORIGIN_HEALTH_URL: http://minio:9000/minio/health/ready
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
