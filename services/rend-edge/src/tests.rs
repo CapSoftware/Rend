@@ -174,6 +174,22 @@ fn test_state_with_max_in_flight(
     origin_endpoint: String,
     max_in_flight_fills: usize,
 ) -> Arc<AppState> {
+    test_state_with_max_in_flight_and_telemetry(
+        cache_dir,
+        origin_endpoint,
+        max_in_flight_fills,
+        telemetry::TelemetryConfig::disabled(),
+        telemetry::TelemetryHandle::disabled(),
+    )
+}
+
+fn test_state_with_max_in_flight_and_telemetry(
+    cache_dir: PathBuf,
+    origin_endpoint: String,
+    max_in_flight_fills: usize,
+    playback_telemetry: telemetry::TelemetryConfig,
+    telemetry: telemetry::TelemetryHandle,
+) -> Arc<AppState> {
     let config = EdgeConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         edge_id: "test-edge".to_owned(),
@@ -186,6 +202,7 @@ fn test_state_with_max_in_flight(
         aws_access_key_id: "test".to_owned(),
         aws_secret_access_key: "test".to_owned(),
         internal_token: "test-internal-token".to_owned(),
+        playback_telemetry,
         playback_keyring: test_auth().0,
         warm_max_artifacts: 4,
         max_in_flight_fills,
@@ -198,6 +215,7 @@ fn test_state_with_max_in_flight(
         http: reqwest::Client::new(),
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        telemetry,
         started_at: Instant::now(),
     })
 }
@@ -725,6 +743,45 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.cache_status.as_deref(), Some("HIT"));
     assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
+    assert_eq!(response.body, b"cached-opener");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_succeeds_when_telemetry_ingest_is_down() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-telemetry-down");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"cached-opener").await.unwrap();
+    let telemetry_config = telemetry::TelemetryConfig {
+        enabled: true,
+        ingest_url: Some("http://127.0.0.1:1/internal/telemetry/playback".to_owned()),
+        internal_token: "test-internal-token".to_owned(),
+        queue_capacity: 1,
+        batch_size: 1,
+        flush_interval: Duration::from_millis(10),
+        request_timeout: Duration::from_millis(50),
+        spool_dir: test_cache_dir("playback-telemetry-down-spool"),
+        spool_max_bytes: 1024 * 1024,
+    };
+    let telemetry_handle =
+        telemetry::TelemetryHandle::start(telemetry_config.clone(), reqwest::Client::new());
+    let state = test_state_with_max_in_flight_and_telemetry(
+        cache_dir,
+        origin_endpoint,
+        DEFAULT_MAX_IN_FLIGHT_FILLS,
+        telemetry_config,
+        telemetry_handle,
+    );
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.cache_status.as_deref(), Some("HIT"));
     assert_eq!(response.body, b"cached-opener");
     assert!(requests.lock().unwrap().is_empty());
 }
