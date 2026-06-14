@@ -1524,7 +1524,12 @@ fn artifact_response(
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header("x-rend-cache", cache_status);
+        .header("x-rend-cache", cache_status)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "content-length, content-type, x-rend-cache",
+        );
 
     if let Some(content_length) = content_length {
         builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());

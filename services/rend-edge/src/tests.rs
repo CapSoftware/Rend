@@ -343,6 +343,8 @@ struct PlaybackTestResponse {
     status: StatusCode,
     cache_status: Option<String>,
     content_type: Option<String>,
+    access_control_allow_origin: Option<String>,
+    access_control_expose_headers: Option<String>,
     body: Vec<u8>,
 }
 
@@ -378,6 +380,14 @@ async fn get_playback(app: Router, uri: impl AsRef<str>) -> PlaybackTestResponse
             .map(str::to_owned),
         content_type: headers
             .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        access_control_allow_origin: headers
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        access_control_expose_headers: headers
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         body,
@@ -801,6 +811,11 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.cache_status.as_deref(), Some("HIT"));
     assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
+    assert_eq!(response.access_control_allow_origin.as_deref(), Some("*"));
+    assert_eq!(
+        response.access_control_expose_headers.as_deref(),
+        Some("content-length, content-type, x-rend-cache")
+    );
     assert_eq!(response.body, b"cached-opener");
     assert!(requests.lock().unwrap().is_empty());
 }
