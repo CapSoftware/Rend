@@ -84,6 +84,9 @@ impl EdgeConfig {
         let allow_insecure_edge_urls = env_bool("REND_ALLOW_INSECURE_EDGE_URLS", false)?;
         let edge_id = env_string("REND_EDGE_ID", "local-edge-001");
         let region = env_string("REND_EDGE_REGION", "local");
+        let s3_endpoint = env_string("S3_ENDPOINT", "http://localhost:9100");
+        let aws_access_key_id = env_string("AWS_ACCESS_KEY_ID", "rend_minio");
+        let aws_secret_access_key = env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password");
         let playback_signing_key_id =
             env_string("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key");
         let playback_signing_secret = env_string(
@@ -104,6 +107,8 @@ impl EdgeConfig {
         );
 
         let edge_internal_token = env_string("REND_EDGE_INTERNAL_TOKEN", "dev-internal-token");
+        validate_required_secret(rend_env, "AWS_ACCESS_KEY_ID", &aws_access_key_id)?;
+        validate_required_secret(rend_env, "AWS_SECRET_ACCESS_KEY", &aws_secret_access_key)?;
         validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
         validate_required_secret(
             rend_env,
@@ -151,11 +156,7 @@ impl EdgeConfig {
                 "http://localhost:9100/minio/health/ready",
             ),
         )?;
-        validate_required_url(
-            rend_env,
-            "S3_ENDPOINT",
-            &env_string("S3_ENDPOINT", "http://localhost:9100"),
-        )?;
+        validate_required_url(rend_env, "S3_ENDPOINT", &s3_endpoint)?;
         if let Some(control_plane_url) = control_plane_url.as_deref() {
             validate_required_url(rend_env, "REND_CONTROL_PLANE_URL", control_plane_url)?;
         }
@@ -203,11 +204,11 @@ impl EdgeConfig {
                 "REND_EDGE_ORIGIN_HEALTH_URL",
                 "http://localhost:9100/minio/health/ready",
             ),
-            s3_endpoint: env_string("S3_ENDPOINT", "http://localhost:9100"),
+            s3_endpoint,
             s3_region: env_string("S3_REGION", "us-east-1"),
             s3_bucket: env_string("S3_BUCKET", "rend-local"),
-            aws_access_key_id: env_string("AWS_ACCESS_KEY_ID", "rend_minio"),
-            aws_secret_access_key: env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password"),
+            aws_access_key_id,
+            aws_secret_access_key,
             internal_token: edge_internal_token,
             playback_telemetry,
             playback_keyring,
@@ -543,7 +544,7 @@ enum PurgeRequestError {
 #[tokio::main]
 async fn main() -> Result<()> {
     install_rustls_crypto_provider();
-    load_dotenv();
+    load_dotenv()?;
     init_tracing();
 
     let config = EdgeConfig::from_env()?;
