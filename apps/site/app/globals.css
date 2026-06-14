@@ -439,3 +439,147 @@
     animation: none;
   }
 }
+
+.rend-embed-page {
+  min-height: 100svh;
+  background: linear-gradient(135deg, #101311 0%, #171915 45%, #202118 100%);
+  color: #f7f4ec;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+}
+
+.rend-embed-shell {
+  width: min(1080px, 100%);
+}
+
+.rend-embed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.rend-embed-logo {
+  display: block;
+  height: 34px;
+  width: auto;
+  filter: invert(1) saturate(0) brightness(1.9);
+}
+
+.rend-embed-asset {
+  max-width: min(56vw, 520px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(247, 244, 236, 0.64);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+}
+
+.rend-player {
+  display: grid;
+  gap: 12px;
+}
+
+.rend-player__stage {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  min-height: 220px;
+  background: #050605;
+  border: 1px solid rgba(247, 244, 236, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+}
+
+.rend-player__video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #050605;
+  object-fit: contain;
+}
+
+.rend-player__overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 28px;
+  text-align: center;
+  background: rgba(5, 6, 5, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.rend-player__status {
+  color: #f7f4ec;
+  font-family: var(--font-head);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.rend-player__message {
+  max-width: 440px;
+  color: rgba(247, 244, 236, 0.7);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.rend-player__retry {
+  justify-self: center;
+  border: 1px solid rgba(247, 244, 236, 0.24);
+  border-radius: 8px;
+  background: rgba(247, 244, 236, 0.1);
+  color: #f7f4ec;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 10px 14px;
+}
+
+.rend-player__retry:hover {
+  background: rgba(247, 244, 236, 0.16);
+}
+
+.rend-player__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: rgba(247, 244, 236, 0.6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.rend-player__meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(247, 244, 236, 0.1);
+  border-radius: 6px;
+  background: rgba(247, 244, 236, 0.05);
+  padding: 5px 7px;
+}
+
+@media (max-width: 640px) {
+  .rend-embed-page {
+    align-items: flex-start;
+    padding: 18px;
+  }
+
+  .rend-embed-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .rend-embed-asset {
+    max-width: 100%;
+  }
+
+  .rend-player__stage {
+    min-height: 190px;
+  }
+}
