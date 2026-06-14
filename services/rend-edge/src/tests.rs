@@ -1,5 +1,7 @@
 use super::*;
 use axum::body::to_bytes;
+use bytes::Bytes;
+use http_body_util::BodyExt;
 use rend_playback_auth::{PlaybackTokenIssuer, SigningKey};
 use serde_json::Value;
 use std::{
@@ -26,9 +28,22 @@ struct FakeOriginMetrics {
 #[derive(Clone)]
 enum FakeOriginObject {
     Body(Vec<u8>),
-    DelayedBody { bytes: Vec<u8>, delay: Duration },
+    DelayedBody {
+        bytes: Vec<u8>,
+        delay: Duration,
+    },
+    ChunkedBody {
+        chunks: Vec<Vec<u8>>,
+        delay_between: Duration,
+    },
+    FailingChunkedBody {
+        chunks: Vec<Vec<u8>>,
+        delay_before_error: Duration,
+    },
     Error(StatusCode),
-    DelayedNoSuchKey { delay: Duration },
+    DelayedNoSuchKey {
+        delay: Duration,
+    },
 }
 
 struct FakeOriginRequestGuard {
@@ -74,10 +89,72 @@ async fn fake_s3_get(
         Some(FakeOriginObject::DelayedBody { bytes, .. }) => {
             (StatusCode::OK, bytes).into_response()
         }
+        Some(FakeOriginObject::ChunkedBody {
+            chunks,
+            delay_between,
+        }) => (
+            StatusCode::OK,
+            Body::from_stream(fake_chunk_stream(chunks, delay_between, None)),
+        )
+            .into_response(),
+        Some(FakeOriginObject::FailingChunkedBody {
+            chunks,
+            delay_before_error,
+        }) => (
+            StatusCode::OK,
+            Body::from_stream(fake_chunk_stream(
+                chunks,
+                Duration::ZERO,
+                Some(delay_before_error),
+            )),
+        )
+            .into_response(),
         Some(FakeOriginObject::Error(status)) => status.into_response(),
         Some(FakeOriginObject::DelayedNoSuchKey { .. }) => no_such_key_response(&path.key),
         None => no_such_key_response(&path.key),
     }
+}
+
+fn fake_chunk_stream(
+    chunks: Vec<Vec<u8>>,
+    delay_between: Duration,
+    delay_before_error: Option<Duration>,
+) -> impl futures_util::Stream<Item = std::result::Result<Bytes, std::io::Error>> {
+    stream::unfold(
+        (chunks, 0usize, false, delay_between, delay_before_error),
+        |(chunks, index, error_sent, delay_between, delay_before_error)| async move {
+            if index < chunks.len() {
+                if index > 0 && !delay_between.is_zero() {
+                    tokio::time::sleep(delay_between).await;
+                }
+                let chunk = Bytes::from(chunks[index].clone());
+                return Some((
+                    Ok(chunk),
+                    (
+                        chunks,
+                        index + 1,
+                        error_sent,
+                        delay_between,
+                        delay_before_error,
+                    ),
+                ));
+            }
+
+            if !error_sent {
+                if let Some(delay) = delay_before_error {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    return Some((
+                        Err(std::io::Error::other("fake origin stream failure")),
+                        (chunks, index, true, delay_between, delay_before_error),
+                    ));
+                }
+            }
+
+            None
+        },
+    )
 }
 
 fn no_such_key_response(key: &str) -> Response {
@@ -123,7 +200,10 @@ async fn spawn_fake_origin_with_metrics(
 impl FakeOriginObject {
     fn delay(&self) -> Duration {
         match self {
-            Self::Body(_) | Self::Error(_) => Duration::ZERO,
+            Self::Body(_)
+            | Self::ChunkedBody { .. }
+            | Self::FailingChunkedBody { .. }
+            | Self::Error(_) => Duration::ZERO,
             Self::DelayedBody { delay, .. } | Self::DelayedNoSuchKey { delay } => *delay,
         }
     }
@@ -219,6 +299,8 @@ fn test_state_with_max_in_flight_and_telemetry(
         http: reqwest::Client::new(),
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        active_streams: Arc::new(ActiveStreamRegistry::default()),
+        cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
         started_at: Instant::now(),
@@ -261,6 +343,8 @@ fn test_state_with_resource_limits(
         http: reqwest::Client::new(),
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        active_streams: Arc::new(ActiveStreamRegistry::default()),
+        cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry: telemetry::TelemetryHandle::disabled(),
         started_at: Instant::now(),
@@ -436,6 +520,28 @@ async fn wait_for_in_flight_count(state: &AppState, expected: usize) {
         "timed out waiting for {expected} in-flight fills; last count was {}",
         state.in_flight_fills.len()
     );
+}
+
+async fn write_test_cache_artifact(
+    state: &AppState,
+    cache_key: &str,
+    bytes: &[u8],
+    last_access_unix_ms: u64,
+) -> PathBuf {
+    let cache_path = state.config.cache_dir.join(cache_key);
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, bytes).await.unwrap();
+    write_cache_metadata(
+        state,
+        cache_key,
+        u64::try_from(bytes.len()).unwrap(),
+        last_access_unix_ms,
+    )
+    .await
+    .unwrap();
+    cache_path
 }
 
 #[test]
@@ -899,6 +1005,13 @@ async fn metrics_include_cache_fill_and_telemetry_series() {
         )
     );
     assert!(metrics.contains("rend_edge_in_flight_fills{edge_id=\"test-edge\",region=\"test\"} 0"));
+    assert!(
+        metrics
+            .contains("rend_edge_active_streamed_fills{edge_id=\"test-edge\",region=\"test\"} 0")
+    );
+    assert!(metrics.contains("rend_edge_cache_evictions_total"));
+    assert!(metrics.contains("rend_edge_cache_evicted_bytes_total"));
+    assert!(metrics.contains("rend_edge_cache_eviction_errors_total"));
     assert!(metrics.contains("rend_edge_telemetry_events_total"));
     assert!(metrics.contains("rend_edge_telemetry_spool_bytes"));
 }
@@ -938,6 +1051,95 @@ async fn playback_miss_fetches_origin_writes_cache_then_hits() {
 }
 
 #[tokio::test]
+async fn cold_miss_streams_first_chunk_before_origin_body_completes() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/segment_00000.ts".to_owned(),
+        FakeOriginObject::ChunkedBody {
+            chunks: vec![b"first-".to_vec(), b"second-".to_vec(), b"third".to_vec()],
+            delay_between: Duration::from_millis(250),
+        },
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("stream-first-byte");
+    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+    let started = Instant::now();
+    let mut response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(signed_playback_uri("asset-123", "hls/segment_00000.ts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rend-cache")
+            .and_then(|value| value.to_str().ok()),
+        Some("MISS")
+    );
+    let frame = response.body_mut().frame().await.unwrap().unwrap();
+    let first = frame.into_data().unwrap();
+    assert_eq!(first, Bytes::from_static(b"first-"));
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "first chunk arrived after {:?}",
+        started.elapsed()
+    );
+
+    let rest = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let mut body = first.to_vec();
+    body.extend_from_slice(&rest);
+
+    assert!(started.elapsed() >= Duration::from_millis(450));
+    assert_eq!(body, b"first-second-third");
+    assert_eq!(fs::read(cache_path).await.unwrap(), b"first-second-third");
+    assert_eq!(state.active_streams.len(), 0);
+}
+
+#[tokio::test]
+async fn failed_origin_stream_removes_temp_file_and_wakes_fill() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::FailingChunkedBody {
+            chunks: vec![b"partial".to_vec()],
+            delay_before_error: Duration::from_millis(20),
+        },
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("stream-failure");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    let state = test_state(cache_dir.clone(), origin_endpoint);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(signed_playback_uri("asset-123", "opener.mp4"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+    assert!(!cache_path.exists());
+    assert!(!cache_metadata_path(&cache_dir, "videos/asset-123/opener.mp4").exists());
+    assert_eq!(state.in_flight_fills.len(), 0);
+    assert_eq!(state.active_streams.len(), 0);
+}
+
+#[tokio::test]
 async fn playback_rejects_origin_artifact_over_configured_limit() {
     let mut objects = HashMap::new();
     objects.insert(
@@ -954,6 +1156,121 @@ async fn playback_rejects_origin_artifact_over_configured_limit() {
 
     assert_eq!(response.status, StatusCode::BAD_GATEWAY);
     assert!(!cache_path.exists());
+}
+
+#[tokio::test]
+async fn cache_eviction_prefers_old_deep_tail_segments() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/segment_00010.ts".to_owned(),
+        FakeOriginObject::Body(b"new10".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("evict-priority");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 1024, Some(20), 0);
+    let opener =
+        write_test_cache_artifact(&state, "videos/asset-123/opener.mp4", b"openr", 5_000).await;
+    let first = write_test_cache_artifact(
+        &state,
+        "videos/asset-123/hls/segment_00000.ts",
+        b"first",
+        5_000,
+    )
+    .await;
+    let old_tail = write_test_cache_artifact(
+        &state,
+        "videos/asset-123/hls/segment_00008.ts",
+        b"old08",
+        1_000,
+    )
+    .await;
+    let hot_tail = write_test_cache_artifact(
+        &state,
+        "videos/asset-123/hls/segment_00009.ts",
+        b"hot09",
+        9_000,
+    )
+    .await;
+    let new_tail = state
+        .config
+        .cache_dir
+        .join("videos/asset-123/hls/segment_00010.ts");
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = get_playback(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00010.ts"),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.cache_status.as_deref(), Some("MISS"));
+    assert!(opener.exists());
+    assert!(first.exists());
+    assert!(!old_tail.exists());
+    assert!(hot_tail.exists());
+    assert!(new_tail.exists());
+    assert_eq!(state.metrics.cache_evictions.load(Ordering::Relaxed), 1);
+    assert_eq!(state.metrics.cache_evicted_bytes.load(Ordering::Relaxed), 5);
+}
+
+#[tokio::test]
+async fn cache_eviction_never_removes_active_stream_key() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/segment_00011.ts".to_owned(),
+        FakeOriginObject::Body(b"new11".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("evict-active");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 1024, Some(10), 0);
+    let active_key = "videos/asset-123/hls/segment_00009.ts";
+    let inactive_key = "videos/asset-123/hls/segment_00010.ts";
+    let active_path = write_test_cache_artifact(&state, active_key, b"act09", 1_000).await;
+    let inactive_path = write_test_cache_artifact(&state, inactive_key, b"old10", 1_000).await;
+    let active_guard = state.active_streams.begin(active_key, 0);
+    let new_path = state
+        .config
+        .cache_dir
+        .join("videos/asset-123/hls/segment_00011.ts");
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = get_playback(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00011.ts"),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.cache_status.as_deref(), Some("MISS"));
+    assert!(active_path.exists());
+    assert!(!inactive_path.exists());
+    assert!(new_path.exists());
+    assert_eq!(state.metrics.cache_evictions.load(Ordering::Relaxed), 1);
+    drop(active_guard);
+}
+
+#[tokio::test]
+async fn cache_min_free_limit_is_enforced_without_committing_partial_file() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"openr".to_vec()),
+    );
+    let (origin_endpoint, _requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("min-free-limit");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    let state = test_state_with_resource_limits(cache_dir, origin_endpoint, 1024, None, u64::MAX);
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.cache_status.is_none());
+    assert!(!cache_path.exists());
+    assert_eq!(state.active_streams.len(), 0);
+    let json: Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("free-space guard"));
 }
 
 #[tokio::test]
