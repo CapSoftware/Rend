@@ -10,6 +10,12 @@ import {
   type OperatorAction,
   type OperatorTargetType,
 } from "../../lib/operator.ts";
+import {
+  latestPlaybackReadinessResult,
+  type PlaybackReadinessArtifactTimings,
+  type PlaybackReadinessEdgeResult,
+  type PlaybackReadinessResult,
+} from "../../lib/readiness.ts";
 
 type OperatorPageProps = {
   searchParams: Promise<{
@@ -76,12 +82,153 @@ function formatTimestamp(value: string) {
     : date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
+function formatMs(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${Math.round(value)} ms`;
+}
+
+function formatCount(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function statusClass(status: string | undefined) {
+  return `app-pill app-state-${status || "missing"}`;
+}
+
+function metricValue(result: PlaybackReadinessResult, name: string) {
+  for (const fixture of result.fixtures) {
+    const metric = fixture.metrics?.find((entry) => entry.name === name);
+    if (metric) return metric.value_ms;
+  }
+  return undefined;
+}
+
+function artifactTriplet(timings: PlaybackReadinessArtifactTimings | undefined) {
+  return [
+    formatMs(timings?.cold_miss?.ttfb_ms),
+    formatMs(timings?.second_view_hit?.ttfb_ms),
+    formatMs(timings?.warmed_hit?.ttfb_ms),
+  ].join(" / ");
+}
+
+function allReadinessEdges(result: PlaybackReadinessResult): PlaybackReadinessEdgeResult[] {
+  return result.fixtures.flatMap((fixture) => fixture.edges || []);
+}
+
+function ReadinessPanel({ result }: { result: Awaited<ReturnType<typeof latestPlaybackReadinessResult>> }) {
+  if (!result.available) {
+    return (
+      <section className="app-panel">
+        <div className="app-panel-title-row">
+          <h2>Playback readiness</h2>
+          <span className={statusClass("missing")}>missing</span>
+        </div>
+        <div className="app-empty">No readiness run has been recorded.</div>
+      </section>
+    );
+  }
+
+  const data = result.result;
+  const edges = allReadinessEdges(data);
+  const cache = data.cache_mix || {};
+  const telemetry = data.telemetry_health || {};
+  const cleanupStatus = data.cleanup?.status || "unknown";
+
+  return (
+    <section className="app-panel app-readiness-panel">
+      <div className="app-panel-title-row">
+        <div>
+          <h2>Playback readiness</h2>
+          <p className="app-muted app-mono">{data.run_id}</p>
+        </div>
+        <span className={statusClass(data.status)}>{data.status}</span>
+      </div>
+
+      <dl className="app-stats app-readiness-stats">
+        <div>
+          <dt>Completed</dt>
+          <dd>{formatTimestamp(data.ended_at)}</dd>
+        </div>
+        <div>
+          <dt>Target</dt>
+          <dd>{data.target}</dd>
+        </div>
+        <div>
+          <dt>Upload</dt>
+          <dd>{formatMs(metricValue(data, "upload_response_ms"))}</dd>
+        </div>
+        <div>
+          <dt>HLS ready</dt>
+          <dd>{formatMs(metricValue(data, "upload_to_hls_ready_ms"))}</dd>
+        </div>
+        <div>
+          <dt>Bootstrap</dt>
+          <dd>{formatMs(metricValue(data, "playback_bootstrap_response_ms"))}</dd>
+        </div>
+        <div>
+          <dt>Telemetry</dt>
+          <dd>
+            {formatCount(telemetry.request_count)} events, {formatCount(telemetry.edge_dropped_delta)} dropped
+          </dd>
+        </div>
+        <div>
+          <dt>Cache</dt>
+          <dd>HIT {formatCount(cache.HIT)} / MISS {formatCount(cache.MISS)}</dd>
+        </div>
+        <div>
+          <dt>Cleanup</dt>
+          <dd>{cleanupStatus}</dd>
+        </div>
+      </dl>
+
+      {edges.length === 0 ? (
+        <div className="app-empty">No edge timings were recorded.</div>
+      ) : (
+        <div className="app-table-wrap app-readiness-table">
+          <table className="app-table app-compact-table">
+            <thead>
+              <tr>
+                <th>Edge</th>
+                <th>Opener</th>
+                <th>Manifest</th>
+                <th>Segment</th>
+                <th>Spool</th>
+                <th>Bytes/min</th>
+              </tr>
+            </thead>
+            <tbody>
+              {edges.map((edge, index) => (
+                <tr key={`${edge.edge_id}-${edge.region}-${index}`}>
+                  <td>
+                    <span className="app-mono">{edge.edge_id}</span>
+                    <span className="app-muted"> {edge.region}</span>
+                  </td>
+                  <td>{artifactTriplet(edge.timings?.opener)}</td>
+                  <td>{artifactTriplet(edge.timings?.manifest)}</td>
+                  <td>{artifactTriplet(edge.timings?.segment)}</td>
+                  <td>{formatCount(edge.telemetry?.spool_bytes_after)}</td>
+                  <td>{formatCount(edge.bytes_per_delivered_minute_proxy?.bytes_per_delivered_minute)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default async function OperatorPage({ searchParams }: OperatorPageProps) {
   const access = await dashboardAccessFromHeaders(new Headers(await headers()));
   if (!access.ok) redirect(`/login?next=${encodeURIComponent("/operator")}`);
   if (!canUseOperatorSurface(access.context)) notFound();
 
-  const [query, audits] = await Promise.all([searchParams, recentOperatorAuditRecords()]);
+  const [query, audits, readiness] = await Promise.all([
+    searchParams,
+    recentOperatorAuditRecords(),
+    latestPlaybackReadinessResult(),
+  ]);
   const status = firstParam(query.status);
   const message = firstParam(query.message);
   const purge = firstParam(query.purge);
@@ -111,6 +258,8 @@ export default async function OperatorPage({ searchParams }: OperatorPageProps) 
             <span>{message}{purge === "1" ? " Purge attempted." : ""}</span>
           </section>
         ) : null}
+
+        <ReadinessPanel result={readiness} />
 
         <section className="app-detail-grid">
           <div className="app-panel">
