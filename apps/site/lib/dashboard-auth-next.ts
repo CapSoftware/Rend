@@ -7,7 +7,9 @@ import {
 
 export function safeDashboardNextPath(value: string | string[] | undefined) {
   const nextPath = Array.isArray(value) ? value[0] : value;
-  if (!nextPath || !nextPath.startsWith("/dashboard/")) return "/dashboard/assets";
+  if (!nextPath || (!nextPath.startsWith("/dashboard/") && nextPath !== "/operator")) {
+    return "/dashboard/assets";
+  }
   if (nextPath.startsWith("//") || nextPath.includes("\\")) return "/dashboard/assets";
   return nextPath;
 }
