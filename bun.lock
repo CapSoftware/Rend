@@ -50,6 +50,13 @@
         "react-dom": "^19.2.4",
       },
     },
+    "packages/sdk": {
+      "name": "@rend/sdk",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^5",
+      },
+    },
   },
   "overrides": {
     "postcss": "8.5.15",
@@ -162,6 +169,8 @@
     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.41.1", "", {}, "sha512-/UhIkaZgPutTFmQ7RnIJGgDXZmtEJ7Dvi86xNTFWcnRxVRNk/aotsqDJYeEvDP+FSMB2SdW+pQzNMcWP0rwuNA=="],
 
     "@rend/player": ["@rend/player@workspace:packages/player"],
+
+    "@rend/sdk": ["@rend/sdk@workspace:packages/sdk"],
 
     "@rend/site": ["@rend/site@workspace:apps/site"],
 
