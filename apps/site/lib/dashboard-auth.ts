@@ -18,6 +18,8 @@ export type DashboardAccessContext = {
   organizationName: string;
   organizationSlug: string;
   role: DashboardRole;
+  organizationSuspendedAt?: string;
+  organizationSuspensionReason?: string;
 };
 
 export type DashboardAccessResult =
@@ -85,6 +87,12 @@ function normalizeRole(value: string): DashboardRole {
   return value === "owner" || value === "admin" || value === "member" ? value : "member";
 }
 
+function isoDate(value: Date | string | null) {
+  if (!value) return undefined;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 function defaultOrganizationSlug(userId: string) {
   return `user-${userId.replace(/-/g, "").slice(0, 16)}`;
 }
@@ -150,15 +158,25 @@ async function provisionDefaultOrganization(userId: string, userEmail: string) {
 }
 
 export function canManageApiKeys(context: DashboardAccessContext) {
-  return context.role === "owner" || context.role === "admin";
+  return !organizationIsSuspended(context) && (context.role === "owner" || context.role === "admin");
 }
 
 export function canDeleteAssets(context: DashboardAccessContext) {
-  return context.role === "owner" || context.role === "admin";
+  return !organizationIsSuspended(context) && (context.role === "owner" || context.role === "admin");
 }
 
 export function canUploadAssets(context: DashboardAccessContext) {
-  return context.role === "owner" || context.role === "admin";
+  return !organizationIsSuspended(context) && (context.role === "owner" || context.role === "admin");
+}
+
+export function organizationIsSuspended(context: DashboardAccessContext) {
+  return Boolean(context.organizationSuspendedAt);
+}
+
+export function organizationSuspendedMessage(context: DashboardAccessContext) {
+  return context.organizationSuspensionReason
+    ? `Organization is suspended: ${context.organizationSuspensionReason}`
+    : "Organization is suspended. This workspace is read-only.";
 }
 
 export async function dashboardAccessFromHeaders(headers: Headers): Promise<DashboardAccessResult> {
@@ -185,6 +203,8 @@ export async function dashboardAccessFromHeaders(headers: Headers): Promise<Dash
       organizationId: organization.id,
       organizationName: organization.name,
       organizationSlug: organization.slug,
+      organizationSuspendedAt: organization.suspended_at,
+      organizationSuspensionReason: organization.suspension_reason,
       role: member.role,
     })
     .from(member)
@@ -221,12 +241,31 @@ export async function dashboardAccessFromHeaders(headers: Headers): Promise<Dash
       organizationName: row.organizationName,
       organizationSlug: row.organizationSlug,
       role: normalizeRole(row.role),
+      organizationSuspendedAt: isoDate(row.organizationSuspendedAt),
+      organizationSuspensionReason: row.organizationSuspensionReason ?? undefined,
     },
   };
 }
 
 export function dashboardAccessFromRequest(request: Request) {
   return dashboardAccessFromHeaders(request.headers);
+}
+
+export function dashboardSuspendedResponse(context: DashboardAccessContext) {
+  return Response.json(
+    {
+      status: "error",
+      error: "organization_suspended",
+      message: organizationSuspendedMessage(context),
+    },
+    {
+      status: 403,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+      },
+    }
+  );
 }
 
 export function dashboardAccessErrorResponse(access: Exclude<DashboardAccessResult, { ok: true }>) {
