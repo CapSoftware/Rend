@@ -216,6 +216,8 @@ impl ApiConfig {
             anyhow::ensure!(!value.trim().is_empty(), "{key} must not be empty");
         }
         validate_required_secret(rend_env, "REND_DEV_API_KEY", &dev_api_key)?;
+        validate_required_secret(rend_env, "AWS_ACCESS_KEY_ID", &aws_access_key_id)?;
+        validate_required_secret(rend_env, "AWS_SECRET_ACCESS_KEY", &aws_secret_access_key)?;
         validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
         let telemetry_secret_for_validation = if rend_env.is_strict() {
             internal_telemetry_token.as_str()
@@ -677,7 +679,7 @@ struct EventStreamBody {
 #[tokio::main]
 async fn main() -> Result<()> {
     install_rustls_crypto_provider();
-    load_dotenv();
+    load_dotenv()?;
     init_tracing();
     let command = std::env::args().skip(1).collect::<Vec<_>>();
 
