@@ -1,5 +1,6 @@
 docs/*
 !docs/deployment-v1.md
+!docs/deployment-automation.md
 !docs/edge-host-runbook-v1.md
 !docs/release-images-v1.md
 !docs/releases/
