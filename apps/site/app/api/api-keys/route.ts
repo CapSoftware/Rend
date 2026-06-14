@@ -7,6 +7,8 @@ import {
   canManageApiKeys,
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
+  dashboardSuspendedResponse,
+  organizationIsSuspended,
 } from "../../../lib/dashboard-auth.ts";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +17,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
-  if (!canManageApiKeys(access.context)) {
+  if (access.context.role !== "owner" && access.context.role !== "admin") {
     return dashboardAccessErrorResponse({ ok: false, reason: "forbidden" });
   }
 
@@ -40,6 +42,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
+  if (organizationIsSuspended(access.context)) return dashboardSuspendedResponse(access.context);
   if (!canManageApiKeys(access.context)) {
     return dashboardAccessErrorResponse({ ok: false, reason: "forbidden" });
   }
