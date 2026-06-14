@@ -11,7 +11,10 @@ bun dev
 
 Then visit http://localhost:3000.
 
-For production builds, run `bun run build` from the repo root.
+For production builds, run `bun run build` from the repo root. Site commands
+use the root env wrapper: `next dev` loads the `local` profile, while
+`next build` and `next start` load the `production` profile and never read
+root `.env.local`.
 
 From the app workspace directly:
 
@@ -50,6 +53,9 @@ check is:
 ```bash
 bun run e2e:site-assets
 ```
+
+Do not put server-only tokens or API keys in `NEXT_PUBLIC_*`; those values are
+client bundle values.
 
 ## Deploy
 
