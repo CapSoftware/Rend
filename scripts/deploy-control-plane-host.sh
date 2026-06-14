@@ -6,6 +6,7 @@ source "$root_dir/scripts/operator-common.sh"
 
 manifest="${REND_RELEASE_MANIFEST:-}"
 compose_file="${REND_CONTROL_PLANE_COMPOSE_FILE:-/opt/rend/control-plane.compose.yml}"
+expected_platform="${REND_EXPECTED_IMAGE_PLATFORM:-linux/amd64}"
 dry_run=false
 allow_local_image_refs=false
 
@@ -18,6 +19,8 @@ Deploy control-plane services with immutable image refs from a release manifest.
 Options:
   --manifest FILE             Release manifest with image_digest refs.
   --compose-file FILE         Compose file. Default: /opt/rend/control-plane.compose.yml.
+  --expected-platform PLATFORM
+                              Expected host image platform. Default: linux/amd64.
   --dry-run                   Print exact docker compose commands without running them.
   --allow-local-image-refs    Permit manifest image_tag fallback when image_digest is absent.
   -h, --help                  Show this help.
@@ -32,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --compose-file)
       compose_file="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --expected-platform)
+      expected_platform="${2:?missing value for $1}"
       shift 2
       ;;
     --dry-run)
@@ -61,7 +68,7 @@ done
 
 operator_require_command python3
 operator_require_file "$compose_file"
-operator_validate_manifest_services "$manifest" "$allow_local_image_refs" rend-api rend-media-worker
+operator_validate_manifest_services "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
 operator_finish
 
 api_image="$(operator_manifest_image_ref "$manifest" rend-api "$allow_local_image_refs")"
@@ -69,6 +76,8 @@ worker_image="$(operator_manifest_image_ref "$manifest" rend-media-worker "$allo
 
 if [[ "$dry_run" != "true" ]]; then
   operator_check_docker_compose
+  operator_info "checking manifest image pull readiness and platform"
+  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
   operator_finish
 fi
 
