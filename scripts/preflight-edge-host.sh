@@ -45,12 +45,12 @@ Options:
   --allow-placeholders        Permit placeholder example values.
   --allow-local-image-refs    Permit manifest image_tag fallback when image_digest is absent.
   --allow-direct-edge-exposure
-                              Permit a public or wildcard direct :4100 bind for short trial debugging.
+                              Permit a public or wildcard direct :4100 bind for short production debugging.
   -h, --help                  Show this help.
 
 Local example dry-run:
   scripts/preflight-edge-host.sh --dry-run --allow-dev-defaults \
-    --allow-local-image-refs --manifest .rend/releases/trial-001.json \
+    --allow-local-image-refs --manifest .rend/releases/production-001.json \
     --edge-env .env.docker.example --compose-file docs/templates/edge-host.compose.yml
 EOF
 }

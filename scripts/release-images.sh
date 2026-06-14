@@ -20,10 +20,10 @@ usage() {
   cat <<'EOF'
 Usage: scripts/release-images.sh [options]
 
-Build all first-trial container targets and write a release manifest.
+Build all production container targets and write a release manifest.
 
 Options:
-  --tag TAG              Optional human release tag, for example trial-001.
+  --tag TAG              Optional human release tag, for example production-001.
   --prefix PREFIX        Optional image repository prefix, for example ghcr.io/acme.
   --registry PREFIX      Alias for --prefix.
   --manifest PATH        Release manifest path. Defaults under .rend/releases/.

@@ -293,7 +293,7 @@ require_contains docs/edge-host-runbook-v1.md "scripts/verify-first-host-deploy.
 require_contains docs/edge-host-runbook-v1.md "sslrootcert=system"
 require_contains docs/edge-host-runbook-v1.md "docs/releases"
 require_contains docs/deployment-v1.md "docs/edge-host-runbook-v1.md"
-require_contains docs/deployment-v1.md "REND_ENV=local|trial|production"
+require_contains docs/deployment-v1.md "REND_ENV=local|production"
 require_contains docs/deployment-v1.md "REND_EXPECTED_EDGES"
 require_contains docs/deployment-v1.md "Full cache LRU eviction"
 require_contains docs/deployment-v1.md "docs/release-images-v1.md"

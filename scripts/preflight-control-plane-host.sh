@@ -43,7 +43,7 @@ Options:
 
 Local example dry-run:
   scripts/preflight-control-plane-host.sh --dry-run --allow-dev-defaults \
-    --allow-local-image-refs --manifest .rend/releases/trial-001.json \
+    --allow-local-image-refs --manifest .rend/releases/production-001.json \
     --api-env .env.docker.example --worker-env .env.docker.example \
     --compose-file docs/templates/control-plane.compose.yml
 EOF
