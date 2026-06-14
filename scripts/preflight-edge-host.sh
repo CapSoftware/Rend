@@ -11,6 +11,7 @@ publish_addr="${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}"
 publish_port="${REND_EDGE_PUBLISH_PORT:-4100}"
 cache_dir="${REND_EDGE_CACHE_VOLUME:-}"
 spool_dir="${REND_EDGE_TELEMETRY_SPOOL_VOLUME:-}"
+expected_platform="${REND_EXPECTED_IMAGE_PLATFORM:-linux/amd64}"
 allow_dev_defaults=false
 allow_placeholders=false
 allow_local_image_refs=false
@@ -34,6 +35,8 @@ Options:
   --spool-dir DIR             Host telemetry spool dir. Defaults to REND_EDGE_TELEMETRY_SPOOL_VOLUME or env REND_EDGE_TELEMETRY_SPOOL_DIR.
   --publish-addr ADDR         Host publish address to probe. Default: 127.0.0.1.
   --publish-port PORT         Host publish port to probe. Default: 4100.
+  --expected-platform PLATFORM
+                              Expected host image platform. Default: linux/amd64.
   --dry-run                   Skip mutating/network and host write probes; validate local inputs only.
   --skip-connectivity         Skip object-store, control-plane, and telemetry probes.
   --skip-bind-port-check      Skip bind-port probe.
@@ -80,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --publish-port)
       publish_port="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --expected-platform)
+      expected_platform="${2:?missing value for $1}"
       shift 2
       ;;
     --dry-run)
@@ -140,14 +147,14 @@ operator_info "validating edge env file"
 operator_validate_edge_env "$edge_env" "$allow_dev_defaults" "$allow_placeholders"
 
 operator_info "validating release manifest image ref"
-operator_validate_manifest_services "$manifest" "$allow_local_image_refs" rend-edge
+operator_validate_manifest_services "$manifest" "$allow_local_image_refs" "$expected_platform" rend-edge
 operator_check_edge_publish_addr_policy "$publish_addr" "$allow_direct_edge_exposure"
 
 if [[ "$dry_run" == "true" ]]; then
   operator_warn "skipping manifest image pull readiness check"
 else
   operator_info "checking manifest image pull readiness"
-  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" rend-edge
+  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-edge
 fi
 
 cache_dir="${cache_dir:-$(operator_env_value "$edge_env" REND_EDGE_CACHE_DIR 2>/dev/null || true)}"
