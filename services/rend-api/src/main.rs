@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     convert::Infallible,
     net::SocketAddr,
     pin::Pin,
@@ -373,6 +374,7 @@ struct DeleteAssetResponse {
     asset_id: String,
     deleted: bool,
     already_deleted: bool,
+    origin_objects_deleted: usize,
     purge_attempted: bool,
 }
 
@@ -1147,24 +1149,31 @@ async fn delete_asset_inner(
 ) -> Result<DeleteAssetResponse, AppError> {
     let asset_id = normalize_asset_id(&asset_id)?;
     let already_deleted = mark_asset_deleted(&state.db, &asset_id).await?;
-    let purge_attempted = if already_deleted {
-        false
-    } else {
-        maybe_purge_edge(
-            &state.db,
-            &state.http,
-            &state.config.edge_registry,
-            &state.config.edge_purge,
-            &asset_id,
-            None,
-        )
-        .await
-    };
+    let origin_object_keys =
+        list_asset_origin_object_keys(&state.s3, &state.config.s3_bucket, &asset_id).await?;
+    let origin_objects_deleted = delete_asset_origin_objects(
+        &state.s3,
+        &state.config.s3_bucket,
+        &asset_id,
+        &origin_object_keys,
+    )
+    .await;
+    let purge_attempted = maybe_purge_edge(
+        &state.db,
+        &state.http,
+        &state.config.edge_registry,
+        &state.config.edge_purge,
+        &asset_id,
+        None,
+    )
+    .await;
+    let origin_objects_deleted = origin_objects_deleted?;
 
     Ok(DeleteAssetResponse {
         asset_id,
         deleted: true,
         already_deleted,
+        origin_objects_deleted,
         purge_attempted,
     })
 }
@@ -1366,6 +1375,79 @@ async fn mark_asset_deleted(db: &PgPool, asset_id: &str) -> Result<bool, AppErro
 
     tx.commit().await.map_err(AppError::internal)?;
     Ok(false)
+}
+
+async fn list_asset_origin_object_keys(
+    s3: &S3Client,
+    bucket: &str,
+    asset_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let prefix = format!("videos/{asset_id}/");
+    let mut continuation_token = None;
+    let mut object_keys = BTreeSet::new();
+
+    loop {
+        let mut request = s3.list_objects_v2().bucket(bucket).prefix(&prefix);
+        if let Some(token) = continuation_token.as_deref() {
+            request = request.continuation_token(token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to list origin objects with prefix {prefix}"))
+            .map_err(AppError::internal)?;
+
+        for object in response.contents() {
+            if let Some(object_key) = object.key()
+                && is_rend_owned_asset_object_key(asset_id, object_key)
+            {
+                object_keys.insert(object_key.to_owned());
+            }
+        }
+
+        if response.is_truncated().unwrap_or(false) {
+            continuation_token = response.next_continuation_token().map(str::to_owned);
+            if continuation_token.is_none() {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    Ok(object_keys.into_iter().collect())
+}
+
+fn is_rend_owned_asset_object_key(asset_id: &str, object_key: &str) -> bool {
+    object_key.starts_with(&format!("videos/{asset_id}/"))
+        && !object_key.contains("/../")
+        && !object_key.contains("/./")
+}
+
+async fn delete_asset_origin_objects(
+    s3: &S3Client,
+    bucket: &str,
+    asset_id: &str,
+    object_keys: &[String],
+) -> Result<usize, AppError> {
+    let mut deleted = 0;
+    for object_key in object_keys {
+        s3.delete_object()
+            .bucket(bucket)
+            .key(object_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to delete origin object {object_key}"))
+            .map_err(AppError::internal)?;
+        deleted += 1;
+    }
+    tracing::info!(
+        asset_id,
+        origin_objects_deleted = deleted,
+        "deleted Rend-owned asset origin objects",
+    );
+    Ok(deleted)
 }
 
 async fn asset_row_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
