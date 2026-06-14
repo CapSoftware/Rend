@@ -321,6 +321,102 @@ Postgres and ClickHouse settings from `--api-env`, or from explicit
 runs. For `psql` probes only, it normalizes hosted Postgres URLs by removing
 `sslrootcert=system`; the service `DATABASE_URL` is not rewritten.
 
+## Playback Readiness Gate
+
+Run the synthetic playback readiness gate before and after production deploys
+that can affect upload ingest, media processing, playback bootstrap, edge
+cache behavior, telemetry, or deploy routing. The gate uploads generated test
+media only; it does not use customer media.
+
+Local two-edge run:
+
+```sh
+bun run playback:readiness
+```
+
+The default target starts the local Docker stack plus the `two-edge` profile,
+then verifies `rend-edge-us-east` on `http://127.0.0.1:4101` and
+`rend-edge-london` on `http://127.0.0.1:4102`.
+
+Production-style run:
+
+```sh
+REND_API_BASE_URL=https://api.example.com \
+REND_READINESS_API_KEY=<api-key-with-upload-read-delete-analytics> \
+REND_EDGE_INTERNAL_TOKEN=<edge-internal-token> \
+REND_READINESS_EDGES='edge-us=us-east=https://edge-us.example.com=http://10.0.10.12:4100,edge-eu=london=https://edge-eu.example.com=http://10.0.20.12:4100' \
+bun run playback:readiness -- --target configured --skip-local-stack
+```
+
+`REND_READINESS_EDGES` uses
+`edge_id=region=public_playback_base[=private_edge_base]`. The public base is
+used for signed playback fetches; the private base is used for `/readyz`,
+`/internal/warm`, `/internal/purge`, and `/metrics`. If the private base is
+omitted, the public base is used for both.
+
+To include the gate in first-host verification:
+
+```sh
+scripts/verify-first-host-deploy.sh \
+  --api-base https://api.example.com \
+  --edge-base https://edge-us-east.example.com \
+  --edge-internal-base http://10.0.10.12:4100 \
+  --edge-base https://edge-london.example.com \
+  --edge-internal-base http://10.0.20.12:4100 \
+  --api-env /etc/rend/rend-api.env \
+  --edge-env /etc/rend/rend-edge.env \
+  --asset-id 00000000-0000-0000-0000-000000000000 \
+  --rewrite-playback-base \
+  --run-readiness-gate
+```
+
+The gate writes a run artifact and updates
+`.rend/readiness/playback-readiness-latest.json` for the private operator UI.
+Set `REND_READINESS_OUTPUT`, `REND_READINESS_LATEST_OUTPUT`, or
+`REND_READINESS_ARTIFACT_PATH` to place or read the latest result elsewhere.
+Artifacts are redacted and are checked before write: they must not contain full
+URLs, cookies, signed URL query tokens, authorization headers, bearer tokens,
+configured API keys, edge internal tokens, or client IPs.
+
+The result status means:
+
+- `pass`: correctness checks passed and all measured timings stayed under warn
+  thresholds.
+- `warn`: correctness checks passed, but one or more conservative performance
+  warn thresholds were exceeded. Treat this as a deploy note unless the trend is
+  regressing.
+- `fail`: a correctness/safety check failed or a fail threshold was exceeded.
+  Do not promote the deploy until the artifact's `failures` list is resolved.
+
+Correctness failures include missing expected edges, non-200 upload/bootstrap/
+playback responses, non-tokenless playback URL shape, wrong content types,
+unexpected cache headers, telemetry visibility timeout, dropped telemetry
+increase, nonzero telemetry spool bytes after the run, unredacted artifact
+content, or synthetic cleanup failure.
+
+Performance thresholds can be configured with env vars:
+
+- `REND_READINESS_WARN_UPLOAD_RESPONSE_MS`,
+  `REND_READINESS_FAIL_UPLOAD_RESPONSE_MS`
+- `REND_READINESS_WARN_UPLOAD_TO_OPENER_PLAYABLE_MS`,
+  `REND_READINESS_FAIL_UPLOAD_TO_OPENER_PLAYABLE_MS`
+- `REND_READINESS_WARN_UPLOAD_TO_HLS_READY_MS`,
+  `REND_READINESS_FAIL_UPLOAD_TO_HLS_READY_MS`
+- `REND_READINESS_WARN_PLAYBACK_BOOTSTRAP_MS`,
+  `REND_READINESS_FAIL_PLAYBACK_BOOTSTRAP_MS`
+- `REND_READINESS_WARN_EDGE_TTFB_MISS_MS`,
+  `REND_READINESS_FAIL_EDGE_TTFB_MISS_MS`
+- `REND_READINESS_WARN_EDGE_TTFB_HIT_MS`,
+  `REND_READINESS_FAIL_EDGE_TTFB_HIT_MS`
+- `REND_READINESS_WARN_EDGE_TTFB_WARMED_HIT_MS`,
+  `REND_READINESS_FAIL_EDGE_TTFB_WARMED_HIT_MS`
+- `REND_READINESS_WARN_TELEMETRY_VISIBILITY_MS`,
+  `REND_READINESS_FAIL_TELEMETRY_VISIBILITY_MS`
+
+The bytes-per-delivered-minute value is a proxy from synthetic playback bytes
+and fixture duration. It is useful for deploy comparison, not billing-grade
+usage or watch accounting.
+
 ## Deploy Order
 
 1. Provision managed Postgres, Redis, S3-compatible storage, and ClickHouse.
@@ -342,6 +438,8 @@ runs. For `psql` probes only, it normalizes hosted Postgres URLs by removing
 10. Start `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
 11. Run `scripts/verify-first-host-deploy.sh` with a provided `hls_ready` asset
     to confirm edge registration, signed playback, and telemetry analytics.
+12. Run `bun run playback:readiness -- --target configured --skip-local-stack`
+    or pass `--run-readiness-gate` to the verifier before promoting traffic.
 
 ## Rollback Basics
 
