@@ -41,6 +41,39 @@ operator_is_truthy() {
   esac
 }
 
+operator_normalize_platform() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+platform = sys.argv[1].strip().lower()
+if not re.fullmatch(r"[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9_.-]+)?", platform):
+    print(f"invalid Docker platform: {platform}", file=sys.stderr)
+    raise SystemExit(1)
+os_name, _architecture, *_variant = platform.split("/")
+if os_name != "linux":
+    print("release image platform must target linux hosts", file=sys.stderr)
+    raise SystemExit(1)
+print(platform)
+PY
+}
+
+operator_psql_database_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+url = sys.argv[1]
+parts = urlsplit(url)
+query = [
+    (key, value)
+    for key, value in parse_qsl(parts.query, keep_blank_values=True)
+    if not (key.lower() == "sslrootcert" and value.lower() == "system")
+]
+print(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
+PY
+}
+
 operator_require_command() {
   local command_name="$1"
   if command -v "$command_name" >/dev/null 2>&1; then
@@ -782,10 +815,23 @@ PY
 operator_validate_manifest_services() {
   local manifest="$1"
   local allow_local="$2"
-  shift 2
-  local service ref
+  local expected_platform="${3:-linux/amd64}"
+  shift 3
+  local service ref platform
+  if ! expected_platform="$(operator_normalize_platform "$expected_platform" 2>/tmp/rend-platform-error.$$)"; then
+    operator_fail "$(cat /tmp/rend-platform-error.$$)"
+    rm -f /tmp/rend-platform-error.$$
+    return 0
+  fi
+  rm -f /tmp/rend-platform-error.$$
   operator_require_file "$manifest"
   for service in "$@"; do
+    if platform="$(operator_manifest_service_platform "$manifest" "$service" "$expected_platform" 2>/tmp/rend-manifest-platform-error.$$)"; then
+      operator_ok "$service manifest platform matches host expectation: $platform"
+    else
+      operator_fail "$(cat /tmp/rend-manifest-platform-error.$$)"
+    fi
+    rm -f /tmp/rend-manifest-platform-error.$$
     if ref="$(operator_manifest_image_ref "$manifest" "$service" "$allow_local" 2>/tmp/rend-manifest-error.$$)"; then
       if [[ "$ref" == *@sha256:* ]]; then
         operator_ok "$service manifest image uses digest ref: $ref"
@@ -799,11 +845,85 @@ operator_validate_manifest_services() {
   done
 }
 
+operator_manifest_service_platform() {
+  local manifest="$1"
+  local service="$2"
+  local expected_platform="$3"
+  python3 - "$manifest" "$service" "$expected_platform" <<'PY'
+import json
+import sys
+
+manifest_path, service_name, expected_platform = sys.argv[1:4]
+try:
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+except FileNotFoundError:
+    print(f"missing release manifest: {manifest_path}", file=sys.stderr)
+    raise SystemExit(1)
+except json.JSONDecodeError as exc:
+    print(f"invalid release manifest JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+service = manifest.get("services", {}).get(service_name)
+if not service:
+    print(f"release manifest missing services.{service_name}", file=sys.stderr)
+    raise SystemExit(1)
+
+platform = service.get("platform") or manifest.get("platform")
+os_name = service.get("os") or manifest.get("os")
+architecture = service.get("architecture") or manifest.get("architecture")
+variant = service.get("variant") or manifest.get("variant")
+
+if not platform and os_name and architecture:
+    platform = f"{os_name}/{architecture}" + (f"/{variant}" if variant else "")
+if not platform:
+    print(f"release manifest services.{service_name} is missing platform metadata", file=sys.stderr)
+    raise SystemExit(1)
+
+platform = platform.lower()
+if platform != expected_platform:
+    print(
+        f"release manifest services.{service_name} platform {platform} does not match host expectation {expected_platform}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+print(platform)
+PY
+}
+
+operator_check_image_platform() {
+  local image_ref="$1"
+  local service="$2"
+  local expected_platform="$3"
+  local actual_platform
+
+  if ! actual_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "$image_ref" 2>/tmp/rend-image-platform-error.$$)"; then
+    operator_fail "$service pulled image platform could not be inspected for $image_ref: $(cat /tmp/rend-image-platform-error.$$)"
+    rm -f /tmp/rend-image-platform-error.$$
+    return 0
+  fi
+  rm -f /tmp/rend-image-platform-error.$$
+  actual_platform="$(printf '%s' "$actual_platform" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$actual_platform" == "$expected_platform" ]]; then
+    operator_ok "$service pulled image platform matches host expectation: $actual_platform"
+  else
+    operator_fail "$service pulled image platform is $actual_platform, expected $expected_platform"
+  fi
+}
+
 operator_check_manifest_image_pulls() {
   local manifest="$1"
   local allow_local="$2"
-  shift 2
+  local expected_platform="${3:-linux/amd64}"
+  shift 3
   local service ref
+  if ! expected_platform="$(operator_normalize_platform "$expected_platform" 2>/tmp/rend-platform-error.$$)"; then
+    operator_fail "$(cat /tmp/rend-platform-error.$$)"
+    rm -f /tmp/rend-platform-error.$$
+    return 0
+  fi
+  rm -f /tmp/rend-platform-error.$$
   for service in "$@"; do
     if ! ref="$(operator_manifest_image_ref "$manifest" "$service" "$allow_local" 2>/tmp/rend-manifest-pull-error.$$)"; then
       operator_fail "$(cat /tmp/rend-manifest-pull-error.$$)"
@@ -817,6 +937,7 @@ operator_check_manifest_image_pulls() {
     fi
     if docker image pull "$ref" >/dev/null; then
       operator_ok "$service manifest image is pullable: $ref"
+      operator_check_image_platform "$ref" "$service" "$expected_platform"
     else
       operator_fail "$service manifest image could not be pulled: $ref"
     fi
