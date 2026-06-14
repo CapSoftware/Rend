@@ -196,12 +196,13 @@ fixture, verifies durable lifecycle frames through media processing and edge
 warming, and reconnects with `Last-Event-ID` to prove replay resumes after the
 sequence cursor.
 
-The delete/purge smoke uploads and processes a fixture, fetches the signed edge
-manifest to populate the local cache, deletes the asset, verifies repeat DELETE
-idempotency, confirms new playback bootstrap returns 404, checks durable
-deletion and purge lifecycle events, verifies the cached manifest file was
-removed, and proves the already-issued signed edge URL can still work while the
-token and origin object remain valid.
+The delete/purge smoke uploads and processes a fixture, fetches signed opener,
+manifest, and segment URLs to populate the local cache, deletes the asset,
+verifies repeat DELETE idempotency, confirms new playback bootstrap returns
+404, checks durable deletion and purge lifecycle events, verifies cached
+playback files were removed, deletes Rend-owned origin objects, and proves
+already-issued signed edge URLs cannot refill the cache after a successful
+delete.
 
 The edge coalescing smoke uploads and processes a fixture, fetches a signed
 opener URL from playback bootstrap, purges that opener from the edge cache,
@@ -309,9 +310,9 @@ curl -s http://127.0.0.1:4000/v1/assets/$asset_id/events \
 curl -s http://127.0.0.1:4000/v1/assets/$asset_id/playback \
   -H 'authorization: Bearer dev-api-key' | jq
 
-# Delete is authenticated and idempotent. It marks rend.assets.deleted_at and
-# asks healthy registered edges, or the fallback purge URL, to purge cached
-# playback bytes for the asset.
+# Delete is authenticated and idempotent. It marks rend.assets.deleted_at,
+# deletes Rend-owned origin objects for the asset, and asks healthy registered
+# edges, or the fallback purge URL, to purge cached playback bytes.
 curl -s -X DELETE http://127.0.0.1:4000/v1/assets/$asset_id \
   -H 'authorization: Bearer dev-api-key' | jq
 
@@ -364,11 +365,10 @@ curl -s -X POST http://127.0.0.1:4100/internal/purge \
   -H 'content-type: application/json' \
   --data "{\"asset_id\":\"$asset_id\",\"artifact_paths\":[\"opener.mp4\",\"hls/master.m3u8\"]}" | jq
 
-# Deletion semantics are intentionally narrow: deletion blocks new bootstrap
-# responses and future token issuance, and purge removes local edge-cache bytes.
-# It does not revoke already-issued signed playback URLs. Those URLs may remain
-# valid until token expiry if the origin objects still exist and no real edge
-# revocation layer has been implemented.
+# Deletion blocks new bootstrap responses and future token issuance, removes
+# Rend-owned origin objects, and purges local edge-cache bytes. Already-issued
+# signed playback URLs should fail after successful delete instead of refilling
+# edge cache from origin.
 
 open "http://127.0.0.1:4000/player?asset_id=$asset_id"
 
