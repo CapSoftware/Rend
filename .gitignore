@@ -7,6 +7,8 @@ docs/*
 !docs/releases/*.json
 !docs/env/
 !docs/env/*.env.example
+!docs/openapi/
+!docs/openapi/*.json
 !docs/templates/
 !docs/templates/*.yml
 
