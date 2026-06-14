@@ -507,7 +507,7 @@ export default function Home() {
           </div>
 
           <p className="mx-auto mt-6 max-w-[680px] text-center text-[13px] text-muted">
-            Rend figures are beta launch targets for supported regions. The other columns describe
+            Rend figures are launch targets for supported regions. The other columns describe
             how each kind of platform tends to bill and operate, not a quote from any one vendor.
           </p>
         </section>
