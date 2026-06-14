@@ -17,6 +17,8 @@ edge_started=0
 edge_pid=""
 worker_started=0
 worker_pid=""
+edge_cache_backend="local"
+edge_cache_root=""
 
 cleanup() {
   rm -rf "$tmp_dir"
@@ -39,6 +41,15 @@ require_command() {
   }
 }
 
+edge_cache_exists() {
+  local path="$1"
+  if [[ "$edge_cache_backend" == "compose" ]]; then
+    docker compose exec -T rend-edge sh -c 'test -e "$1"' sh "$path" >/dev/null 2>&1
+  else
+    [[ -e "$path" ]]
+  fi
+}
+
 require_command cargo
 require_command curl
 require_command docker
@@ -50,6 +61,7 @@ ffmpeg -version >/dev/null
 ffprobe -version >/dev/null
 
 export DATABASE_URL="${DATABASE_URL:-postgres://rend:rend@localhost:5432/rend}"
+export REND_ENV="${REND_SMOKE_REND_ENV:-local}"
 export REND_REDIS_URL="${REND_REDIS_URL:-redis://localhost:6379}"
 export OBJECT_STORE_HEALTH_URL="${OBJECT_STORE_HEALTH_URL:-http://localhost:9100/minio/health/ready}"
 export S3_ENDPOINT="${S3_ENDPOINT:-http://localhost:9100}"
@@ -78,12 +90,15 @@ export REND_FFPROBE_PATH="${REND_FFPROBE_PATH:-ffprobe}"
 export REND_EDGE_BIND_ADDR="${REND_EDGE_BIND_ADDR:-127.0.0.1:4100}"
 export REND_EDGE_ID="${REND_EDGE_ID:-local-edge-001}"
 export REND_EDGE_REGION="${REND_EDGE_REGION:-local}"
+export REND_EDGE_BASE_URL="${REND_EDGE_BASE_URL:-$edge_base}"
+export REND_EXPECTED_EDGES="${REND_SMOKE_EXPECTED_EDGES:-$REND_EDGE_ID=$REND_EDGE_REGION=$REND_EDGE_BASE_URL}"
 export REND_EDGE_CACHE_DIR="${REND_EDGE_CACHE_DIR:-$root_dir/.rend/edge-cache}"
 export REND_EDGE_ORIGIN_HEALTH_URL="${REND_EDGE_ORIGIN_HEALTH_URL:-http://localhost:9100/minio/health/ready}"
 export REND_EDGE_INTERNAL_TOKEN="${REND_EDGE_INTERNAL_TOKEN:-dev-internal-token}"
 export REND_EDGE_WARM_MAX_ARTIFACTS="${REND_EDGE_WARM_MAX_ARTIFACTS:-4}"
 
-docker compose up -d
+docker compose stop rend-api rend-media-worker rend-edge >/dev/null 2>&1 || true
+docker compose up -d postgres redis clickhouse minio minio-init clickhouse-init
 
 for _ in $(seq 1 60); do
   if docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null 2>&1 &&
@@ -141,6 +156,16 @@ for _ in $(seq 1 120); do
 done
 
 curl -fsS "$edge_base/readyz" >/dev/null
+edge_cache_root="$REND_EDGE_CACHE_DIR"
+if [[ "$edge_started" != "1" ]]; then
+  compose_edge_cache_root="$(
+    docker compose exec -T rend-edge sh -c 'printf "%s" "${REND_EDGE_CACHE_DIR:-/var/lib/rend/edge-cache}"' 2>/dev/null || true
+  )"
+  if [[ -n "$compose_edge_cache_root" ]]; then
+    edge_cache_backend="compose"
+    edge_cache_root="$compose_edge_cache_root"
+  fi
+fi
 start_media_worker "rend-api-media-worker-delete-purge-smoke"
 
 upload_response="$tmp_dir/upload.json"
@@ -175,7 +200,7 @@ if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
   exit 1
 fi
 
-manifest_cache_path="$REND_EDGE_CACHE_DIR/videos/$asset_id/hls/master.m3u8"
+manifest_cache_path="$edge_cache_root/videos/$asset_id/hls/master.m3u8"
 manifest_body="$tmp_dir/manifest.body"
 status_code="$(curl -sS -o "$manifest_body" -w "%{http_code}" "$playback_url")"
 if [[ "$status_code" != "200" ]]; then
@@ -183,8 +208,49 @@ if [[ "$status_code" != "200" ]]; then
   cat "$manifest_body" >&2 || true
   exit 1
 fi
-if [[ ! -f "$manifest_cache_path" ]]; then
+if ! edge_cache_exists "$manifest_cache_path"; then
   echo "expected edge playback fetch to populate $manifest_cache_path" >&2
+  exit 1
+fi
+token="${playback_url#*token=}"
+opener_url="$edge_base/v/$asset_id/opener.mp4?token=$token"
+opener_cache_path="$edge_cache_root/videos/$asset_id/opener.mp4"
+opener_body="$tmp_dir/opener.body"
+status_code="$(curl -sS -o "$opener_body" -w "%{http_code}" "$opener_url")"
+if [[ "$status_code" != "200" ]]; then
+  echo "edge opener fetch expected HTTP 200, got $status_code" >&2
+  cat "$opener_body" >&2 || true
+  exit 1
+fi
+if ! edge_cache_exists "$opener_cache_path"; then
+  echo "expected edge opener fetch to populate $opener_cache_path" >&2
+  exit 1
+fi
+segment_name="$(
+  python3 - "$manifest_body" <<'PY'
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith(".ts") and "/" not in line:
+            print(line)
+            raise SystemExit(0)
+raise SystemExit("manifest did not contain a local .ts segment")
+PY
+)"
+segment_url="$edge_base/v/$asset_id/hls/$segment_name?token=$token"
+segment_cache_path="$edge_cache_root/videos/$asset_id/hls/$segment_name"
+segment_body="$tmp_dir/segment.body"
+status_code="$(curl -sS -o "$segment_body" -w "%{http_code}" "$segment_url")"
+if [[ "$status_code" != "200" ]]; then
+  echo "edge segment fetch expected HTTP 200, got $status_code" >&2
+  cat "$segment_body" >&2 || true
+  exit 1
+fi
+if ! edge_cache_exists "$segment_cache_path"; then
+  echo "expected edge segment fetch to populate $segment_cache_path" >&2
   exit 1
 fi
 
@@ -211,14 +277,18 @@ if response.get("deleted") is not True:
     raise SystemExit(f"delete response did not report deleted: {response}")
 if response.get("already_deleted") is not False:
     raise SystemExit(f"first delete unexpectedly reported already_deleted: {response}")
+if int(response.get("origin_objects_deleted", 0)) < 1:
+    raise SystemExit(f"delete response did not report origin object cleanup: {response}")
 if response.get("purge_attempted") is not True:
     raise SystemExit(f"delete response did not attempt configured edge purge: {response}")
 PY
 
-if [[ -e "$manifest_cache_path" ]]; then
-  echo "expected edge purge to remove $manifest_cache_path" >&2
-  exit 1
-fi
+for cache_path in "$opener_cache_path" "$manifest_cache_path" "$segment_cache_path"; do
+  if edge_cache_exists "$cache_path"; then
+    echo "expected edge purge to remove $cache_path" >&2
+    exit 1
+  fi
+done
 
 repeat_delete_response="$tmp_dir/repeat-delete.json"
 status_code="$(
@@ -243,6 +313,8 @@ if response.get("deleted") is not True:
     raise SystemExit(f"repeat delete response did not report deleted: {response}")
 if response.get("already_deleted") is not True:
     raise SystemExit(f"repeat delete did not report already_deleted: {response}")
+if response.get("origin_objects_deleted") is None:
+    raise SystemExit(f"repeat delete response did not report origin object cleanup: {response}")
 PY
 
 bootstrap_after_delete="$tmp_dir/bootstrap-after-delete.json"
@@ -286,17 +358,35 @@ if not purge_results:
     raise SystemExit(f"missing edge purge result event: {types}")
 if purge_results[-1].get("event_type") != "edge.purge_succeeded":
     raise SystemExit(f"expected successful edge purge event, got {purge_results[-1]}")
-metadata = purge_results[-1].get("metadata", {})
-if int(metadata.get("purged", 0)) < 1:
-    raise SystemExit(f"expected edge purge to report at least one purged file: {metadata}")
+def purged_count(event):
+    metadata = event.get("metadata", {})
+    total = 0
+    for edge in metadata.get("edges", []):
+        summary = edge.get("purge_summary") or {}
+        total += int(summary.get("purged") or 0)
+    return total
+if not any(event.get("event_type") == "edge.purge_succeeded" and purged_count(event) >= 1 for event in purge_results):
+    raise SystemExit(f"expected at least one edge purge to report purged files: {purge_results}")
 PY
 
-old_url_body="$tmp_dir/old-url-after-delete.body"
-status_code="$(curl -sS -o "$old_url_body" -w "%{http_code}" "$playback_url")"
-if [[ "$status_code" != "200" ]]; then
-  echo "already-issued URL was expected to remain usable while token and origin object are valid; got HTTP $status_code" >&2
-  cat "$old_url_body" >&2 || true
-  exit 1
-fi
+old_urls=(
+  "opener|$opener_url|$opener_cache_path"
+  "manifest|$playback_url|$manifest_cache_path"
+  "segment|$segment_url|$segment_cache_path"
+)
+for entry in "${old_urls[@]}"; do
+  IFS='|' read -r label url cache_path <<<"$entry"
+  old_url_body="$tmp_dir/old-url-after-delete-$label.body"
+  status_code="$(curl -sS -o "$old_url_body" -w "%{http_code}" "$url")"
+  if [[ "$status_code" == "200" ]]; then
+    echo "already-issued $label URL unexpectedly remained usable after successful delete" >&2
+    cat "$old_url_body" >&2 || true
+    exit 1
+  fi
+  if edge_cache_exists "$cache_path"; then
+    echo "old signed $label URL recreated the edge cache after delete" >&2
+    exit 1
+  fi
+done
 
-echo "delete/purge smoke passed for asset $asset_id; new bootstrap is blocked, local cache was purged, and already-issued URL remained valid until expiry/origin removal"
+echo "delete/purge smoke passed for asset $asset_id; new bootstrap is blocked, local cache and origin objects were removed, and already-issued URLs cannot refetch"
