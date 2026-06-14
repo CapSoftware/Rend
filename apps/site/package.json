@@ -6,20 +6,26 @@
     "dev": "node ../../scripts/with-root-env.mjs --profile local next dev",
     "build": "node ../../scripts/with-root-env.mjs --profile production next build",
     "start": "node ../../scripts/with-root-env.mjs --profile production next start",
-    "test": "node --test --experimental-strip-types lib/player-telemetry.test.mts lib/dashboard-auth.test.mts lib/asset-api.test.mts lib/asset-routes.test.mts app/api/player/telemetry/route.test.mts",
+    "test": "node --test --experimental-strip-types lib/player-telemetry.test.mts lib/dashboard-auth.test.mts lib/auth.test.mts lib/api-keys.test.mts lib/asset-api.test.mts lib/asset-routes.test.mts lib/player-artifact-proxy.test.mts app/api/player/telemetry/route.test.mts",
     "test:telemetry": "node --test --experimental-strip-types lib/player-telemetry.test.mts app/api/player/telemetry/route.test.mts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"
   },
   "dependencies": {
+    "@better-auth/drizzle-adapter": "^1.6.18",
     "@rend/player": "workspace:*",
+    "better-auth": "^1.6.18",
+    "drizzle-orm": "^0.45.2",
     "next": "16.2.9",
+    "pg": "^8.21.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "resend": "^6.12.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
