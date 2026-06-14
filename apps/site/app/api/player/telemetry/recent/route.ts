@@ -1,4 +1,4 @@
-import { recentPlayerTelemetryEvents } from "@/lib/player-telemetry";
+import { recentPlayerTelemetryEvents } from "../../../../../lib/player-telemetry.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

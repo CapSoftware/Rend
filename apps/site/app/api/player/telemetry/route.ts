@@ -2,7 +2,7 @@ import {
   PLAYER_TELEMETRY_MAX_BODY_BYTES,
   recordPlayerTelemetryEvents,
   sanitizePlayerTelemetryPayload,
-} from "@/lib/player-telemetry";
+} from "../../../../lib/player-telemetry.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
