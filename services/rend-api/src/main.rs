@@ -41,7 +41,7 @@ use rend_playback_auth::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::{net::TcpListener, sync::mpsc};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
@@ -355,14 +355,22 @@ enum ApiScope {
     Analytics,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCredential {
+    ApiKey,
+    DevKey,
+    SiteInternal,
+}
+
 #[derive(Clone, Debug)]
 struct RequestAuth {
     organization_id: String,
     scopes: BTreeSet<ApiScope>,
+    credential: RequestCredential,
 }
 
 impl RequestAuth {
-    fn all(organization_id: impl Into<String>) -> Self {
+    fn all(organization_id: impl Into<String>, credential: RequestCredential) -> Self {
         Self {
             organization_id: organization_id.into(),
             scopes: [
@@ -373,11 +381,16 @@ impl RequestAuth {
             ]
             .into_iter()
             .collect(),
+            credential,
         }
     }
 
     fn has_scope(&self, scope: ApiScope) -> bool {
         self.scopes.contains(&scope)
+    }
+
+    fn allows_suspended_reads(&self) -> bool {
+        self.credential == RequestCredential::SiteInternal
     }
 }
 
@@ -433,6 +446,14 @@ struct AssetListItem {
     updated_at: String,
     source_byte_size: Option<i64>,
     artifact_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspension_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_suspended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_suspension_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -447,6 +468,14 @@ struct AssetCurrentResponse {
     playable_state: String,
     created_at: String,
     updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspension_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_suspended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_suspension_reason: Option<String>,
     artifacts: Vec<AssetArtifactSummary>,
 }
 
@@ -553,6 +582,10 @@ struct AssetStateRecord {
     playable_state: String,
     created_at: String,
     updated_at: String,
+    suspended_at: Option<String>,
+    suspension_reason: Option<String>,
+    organization_suspended_at: Option<String>,
+    organization_suspension_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -702,6 +735,37 @@ struct EdgePurgeResponseSummary {
     missing: usize,
     rejected: usize,
     errors: usize,
+}
+
+#[derive(Clone, Debug)]
+struct OperatorIdentity {
+    user_id: String,
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorActionRequest {
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct OperatorActionResponse {
+    status: &'static str,
+    action: &'static str,
+    target_type: &'static str,
+    target_id: String,
+    audit_id: String,
+    purge_attempted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspended_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SuspensionStateRecord {
+    target_id: String,
+    suspended_at: Option<String>,
+    suspension_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -875,6 +939,22 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             state.clone(),
             require_internal_edge_token,
         ));
+    let operator_routes = Router::new()
+        .route(
+            "/organizations/{organization_id}/suspend",
+            post(suspend_organization),
+        )
+        .route(
+            "/organizations/{organization_id}/restore",
+            post(restore_organization),
+        )
+        .route("/assets/{asset_id}/suspend", post(suspend_asset))
+        .route("/assets/{asset_id}/restore", post(restore_asset))
+        .route_layer(DefaultBodyLimit::max(8 * 1024))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_operator_internal_auth,
+        ));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -884,6 +964,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/player", get(player_harness))
         .merge(authenticated_routes)
         .nest("/internal/edges", edge_routes)
+        .nest("/internal/operator", operator_routes)
         .nest("/internal/telemetry", telemetry_routes)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
@@ -1194,6 +1275,54 @@ async fn create_video(
     }
 }
 
+async fn suspend_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(operator): Extension<OperatorIdentity>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<OperatorActionRequest>,
+) -> Response {
+    match suspend_organization_inner(state, operator, organization_id, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn restore_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(operator): Extension<OperatorIdentity>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<OperatorActionRequest>,
+) -> Response {
+    match restore_organization_inner(state, operator, organization_id, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn suspend_asset(
+    State(state): State<Arc<AppState>>,
+    Extension(operator): Extension<OperatorIdentity>,
+    AxumPath(asset_id): AxumPath<String>,
+    Json(request): Json<OperatorActionRequest>,
+) -> Response {
+    match suspend_asset_inner(state, operator, asset_id, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn restore_asset(
+    State(state): State<Arc<AppState>>,
+    Extension(operator): Extension<OperatorIdentity>,
+    AxumPath(asset_id): AxumPath<String>,
+    Json(request): Json<OperatorActionRequest>,
+) -> Response {
+    match restore_asset_inner(state, operator, asset_id, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn list_assets(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<RequestAuth>,
@@ -1212,7 +1341,13 @@ async fn list_assets_inner(
 ) -> Result<AssetListResponse, AppError> {
     require_scope(&auth, ApiScope::Read)?;
     let limit = normalize_asset_list_limit(query.limit);
-    let assets = fetch_asset_list_items(&state.db, &auth.organization_id, limit).await?;
+    let assets = fetch_asset_list_items(
+        &state.db,
+        &auth.organization_id,
+        limit,
+        auth.allows_suspended_reads(),
+    )
+    .await?;
 
     Ok(AssetListResponse { assets })
 }
@@ -1235,6 +1370,9 @@ async fn get_asset_current_inner(
 ) -> Result<AssetCurrentResponse, AppError> {
     require_scope(&auth, ApiScope::Read)?;
     let asset = fetch_asset_state_record(&state.db, &auth.organization_id, &asset_id).await?;
+    if !auth.allows_suspended_reads() {
+        ensure_asset_state_record_not_suspended(asset.as_ref())?;
+    }
     let artifacts = if asset.is_some() {
         fetch_asset_artifact_summaries(&state.db, &auth.organization_id, &asset_id).await?
     } else {
@@ -1262,6 +1400,7 @@ async fn delete_asset_inner(
 ) -> Result<DeleteAssetResponse, AppError> {
     require_scope(&auth, ApiScope::Delete)?;
     let asset_id = normalize_asset_id(&asset_id)?;
+    ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
     let already_deleted = mark_asset_deleted(&state.db, &auth.organization_id, &asset_id).await?;
     let origin_object_keys =
         list_asset_origin_object_keys(&state.s3, &state.config.s3_bucket, &asset_id).await?;
@@ -1292,6 +1431,236 @@ async fn delete_asset_inner(
     })
 }
 
+async fn suspend_organization_inner(
+    state: Arc<AppState>,
+    operator: OperatorIdentity,
+    organization_id: String,
+    request: OperatorActionRequest,
+) -> Result<OperatorActionResponse, AppError> {
+    let organization_id = normalize_org_id(&organization_id)?;
+    let reason = normalize_operator_reason(&request.reason)?;
+    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+    let before = fetch_organization_suspension_state_for_update(&mut tx, &organization_id).await?;
+
+    sqlx::query(
+        "
+        UPDATE rend_auth.organization
+        SET suspended_at = COALESCE(suspended_at, now()),
+            suspended_by_user_id = $2::uuid,
+            suspension_reason = $3
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(&organization_id)
+    .bind(&operator.user_id)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let after = fetch_organization_suspension_state_for_update(&mut tx, &organization_id).await?;
+    let audit_id = insert_operator_audit_record(
+        &mut tx,
+        &operator,
+        "suspend",
+        "organization",
+        &organization_id,
+        &reason,
+        suspension_state_json(&before),
+        suspension_state_json(&after),
+    )
+    .await?;
+    tx.commit().await.map_err(AppError::internal)?;
+
+    let asset_ids = fetch_active_asset_ids_for_org(&state.db, &organization_id).await?;
+    let mut purge_attempted = false;
+    for asset_id in asset_ids {
+        purge_attempted |= maybe_purge_edge(
+            &state.db,
+            &state.http,
+            &state.config.edge_registry,
+            &state.config.edge_purge,
+            &asset_id,
+            None,
+        )
+        .await;
+    }
+
+    Ok(OperatorActionResponse {
+        status: "ok",
+        action: "suspend",
+        target_type: "organization",
+        target_id: organization_id,
+        audit_id,
+        purge_attempted,
+        suspended_at: after.suspended_at,
+    })
+}
+
+async fn restore_organization_inner(
+    state: Arc<AppState>,
+    operator: OperatorIdentity,
+    organization_id: String,
+    request: OperatorActionRequest,
+) -> Result<OperatorActionResponse, AppError> {
+    let organization_id = normalize_org_id(&organization_id)?;
+    let reason = normalize_operator_reason(&request.reason)?;
+    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+    let before = fetch_organization_suspension_state_for_update(&mut tx, &organization_id).await?;
+
+    sqlx::query(
+        "
+        UPDATE rend_auth.organization
+        SET suspended_at = NULL,
+            suspended_by_user_id = NULL,
+            suspension_reason = NULL
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(&organization_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let after = fetch_organization_suspension_state_for_update(&mut tx, &organization_id).await?;
+    let audit_id = insert_operator_audit_record(
+        &mut tx,
+        &operator,
+        "restore",
+        "organization",
+        &organization_id,
+        &reason,
+        suspension_state_json(&before),
+        suspension_state_json(&after),
+    )
+    .await?;
+    tx.commit().await.map_err(AppError::internal)?;
+
+    Ok(OperatorActionResponse {
+        status: "ok",
+        action: "restore",
+        target_type: "organization",
+        target_id: organization_id,
+        audit_id,
+        purge_attempted: false,
+        suspended_at: after.suspended_at,
+    })
+}
+
+async fn suspend_asset_inner(
+    state: Arc<AppState>,
+    operator: OperatorIdentity,
+    asset_id: String,
+    request: OperatorActionRequest,
+) -> Result<OperatorActionResponse, AppError> {
+    let asset_id = normalize_asset_id(&asset_id)?;
+    let reason = normalize_operator_reason(&request.reason)?;
+    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+    let before = fetch_asset_suspension_state_for_update(&mut tx, &asset_id).await?;
+
+    sqlx::query(
+        "
+        UPDATE rend.assets
+        SET suspended_at = COALESCE(suspended_at, now()),
+            suspended_by_user_id = $2::uuid,
+            suspension_reason = $3
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+        ",
+    )
+    .bind(&asset_id)
+    .bind(&operator.user_id)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let after = fetch_asset_suspension_state_for_update(&mut tx, &asset_id).await?;
+    let audit_id = insert_operator_audit_record(
+        &mut tx,
+        &operator,
+        "suspend",
+        "asset",
+        &asset_id,
+        &reason,
+        suspension_state_json(&before),
+        suspension_state_json(&after),
+    )
+    .await?;
+    tx.commit().await.map_err(AppError::internal)?;
+
+    let purge_attempted = maybe_purge_edge(
+        &state.db,
+        &state.http,
+        &state.config.edge_registry,
+        &state.config.edge_purge,
+        &asset_id,
+        None,
+    )
+    .await;
+
+    Ok(OperatorActionResponse {
+        status: "ok",
+        action: "suspend",
+        target_type: "asset",
+        target_id: asset_id,
+        audit_id,
+        purge_attempted,
+        suspended_at: after.suspended_at,
+    })
+}
+
+async fn restore_asset_inner(
+    state: Arc<AppState>,
+    operator: OperatorIdentity,
+    asset_id: String,
+    request: OperatorActionRequest,
+) -> Result<OperatorActionResponse, AppError> {
+    let asset_id = normalize_asset_id(&asset_id)?;
+    let reason = normalize_operator_reason(&request.reason)?;
+    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+    let before = fetch_asset_suspension_state_for_update(&mut tx, &asset_id).await?;
+
+    sqlx::query(
+        "
+        UPDATE rend.assets
+        SET suspended_at = NULL,
+            suspended_by_user_id = NULL,
+            suspension_reason = NULL
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+        ",
+    )
+    .bind(&asset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let after = fetch_asset_suspension_state_for_update(&mut tx, &asset_id).await?;
+    let audit_id = insert_operator_audit_record(
+        &mut tx,
+        &operator,
+        "restore",
+        "asset",
+        &asset_id,
+        &reason,
+        suspension_state_json(&before),
+        suspension_state_json(&after),
+    )
+    .await?;
+    tx.commit().await.map_err(AppError::internal)?;
+
+    Ok(OperatorActionResponse {
+        status: "ok",
+        action: "restore",
+        target_type: "asset",
+        target_id: asset_id,
+        audit_id,
+        purge_attempted: false,
+        suspended_at: after.suspended_at,
+    })
+}
+
 async fn get_asset_events(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<RequestAuth>,
@@ -1311,6 +1680,9 @@ async fn get_asset_events_inner(
     query: AssetEventsQuery,
 ) -> Result<AssetEventsResponse, AppError> {
     require_scope(&auth, ApiScope::Read)?;
+    if !auth.allows_suspended_reads() {
+        ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
+    }
     let asset_exists = asset_row_exists(&state.db, &auth.organization_id, &asset_id).await?;
     let query = normalize_asset_events_query(query);
     let events = if asset_exists {
@@ -1339,7 +1711,18 @@ async fn get_event_stream(
         return error.into_response();
     }
     match normalize_event_stream_query(&headers, query) {
-        Ok(query) => event_stream_response(state, auth, query),
+        Ok(query) => {
+            if !auth.allows_suspended_reads() {
+                if let Some(asset_id) = query.asset_id.as_deref() {
+                    if let Err(error) =
+                        ensure_asset_not_suspended(&state.db, &auth.organization_id, asset_id).await
+                    {
+                        return error.into_response();
+                    }
+                }
+            }
+            event_stream_response(state, auth, query)
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -1398,17 +1781,32 @@ async fn fetch_asset_state_record(
 ) -> Result<Option<AssetStateRecord>, AppError> {
     let asset_id = normalize_asset_id(asset_id)?;
     let organization_id = normalize_org_id(organization_id)?;
-    let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "
-        SELECT id::text,
-               source_state,
-               playable_state,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
-        FROM rend.assets
-        WHERE id = $1::uuid
-          AND organization_id = $2::uuid
-          AND deleted_at IS NULL
+        SELECT asset.id::text,
+               asset.source_state,
+               asset.playable_state,
+               to_char(asset.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               to_char(asset.suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               asset.suspension_reason,
+               to_char(org.suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               org.suspension_reason
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND asset.deleted_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -1418,12 +1816,26 @@ async fn fetch_asset_state_record(
     .map_err(AppError::internal)?;
 
     Ok(row.map(
-        |(asset_id, source_state, playable_state, created_at, updated_at)| AssetStateRecord {
+        |(
             asset_id,
             source_state,
             playable_state,
             created_at,
             updated_at,
+            suspended_at,
+            suspension_reason,
+            organization_suspended_at,
+            organization_suspension_reason,
+        )| AssetStateRecord {
+            asset_id,
+            source_state,
+            playable_state,
+            created_at,
+            updated_at,
+            suspended_at,
+            suspension_reason,
+            organization_suspended_at,
+            organization_suspension_reason,
         },
     ))
 }
@@ -1432,10 +1844,23 @@ async fn fetch_asset_list_items(
     db: &PgPool,
     organization_id: &str,
     limit: usize,
+    include_suspended: bool,
 ) -> Result<Vec<AssetListItem>, AppError> {
     let organization_id = normalize_org_id(organization_id)?;
     let limit = i64::try_from(limit).map_err(AppError::internal)?;
-    let rows: Vec<(String, String, String, String, String, Option<i64>, i64)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "
         SELECT asset.id::text,
                asset.source_state,
@@ -1443,18 +1868,28 @@ async fn fetch_asset_list_items(
                to_char(asset.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
                to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
                max(artifact.byte_size) FILTER (WHERE artifact.kind = 'source') AS source_byte_size,
-               count(artifact.id)::bigint AS artifact_count
+               count(artifact.id)::bigint AS artifact_count,
+               to_char(asset.suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               asset.suspension_reason,
+               to_char(org.suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               org.suspension_reason
         FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
         LEFT JOIN rend.artifacts artifact ON artifact.asset_id = asset.id
         WHERE asset.organization_id = $1::uuid
           AND asset.deleted_at IS NULL
+          AND ($3::boolean OR asset.suspended_at IS NULL)
+          AND ($3::boolean OR org.suspended_at IS NULL)
         GROUP BY asset.id
+               , org.suspended_at
+               , org.suspension_reason
         ORDER BY asset.created_at DESC, asset.id DESC
         LIMIT $2
         ",
     )
     .bind(organization_id)
     .bind(limit)
+    .bind(include_suspended)
     .fetch_all(db)
     .await
     .map_err(AppError::internal)?;
@@ -1470,6 +1905,10 @@ async fn fetch_asset_list_items(
                 updated_at,
                 source_byte_size,
                 artifact_count,
+                suspended_at,
+                suspension_reason,
+                organization_suspended_at,
+                organization_suspension_reason,
             )| AssetListItem {
                 asset_id,
                 source_state,
@@ -1478,6 +1917,10 @@ async fn fetch_asset_list_items(
                 updated_at,
                 source_byte_size,
                 artifact_count,
+                suspended_at,
+                suspension_reason,
+                organization_suspended_at,
+                organization_suspension_reason,
             },
         )
         .collect())
@@ -1692,6 +2135,74 @@ async fn asset_row_exists(
     Ok(exists)
 }
 
+async fn ensure_org_not_suspended(db: &PgPool, organization_id: &str) -> Result<(), AppError> {
+    let organization_id = normalize_org_id(organization_id)?;
+    let suspended: Option<bool> = sqlx::query_scalar(
+        "
+        SELECT suspended_at IS NOT NULL
+        FROM rend_auth.organization
+        WHERE id = $1::uuid
+        ",
+    )
+    .bind(organization_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    match suspended {
+        Some(false) => Ok(()),
+        Some(true) => Err(AppError::forbidden("organization is suspended")),
+        None => Err(AppError::not_found("organization not found")),
+    }
+}
+
+pub(crate) async fn ensure_asset_not_suspended(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+) -> Result<(), AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
+    let row: Option<(bool, bool, bool)> = sqlx::query_as(
+        "
+        SELECT asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+          AND asset.organization_id = $2::uuid
+        ",
+    )
+    .bind(asset_id)
+    .bind(organization_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    match row {
+        Some((false, false, false)) => Ok(()),
+        Some((true, _, _)) | None => Err(AppError::not_found("asset not found")),
+        Some((_, _, true)) => Err(AppError::forbidden("organization is suspended")),
+        Some((_, true, _)) => Err(AppError::forbidden("asset is suspended")),
+    }
+}
+
+fn ensure_asset_state_record_not_suspended(
+    asset: Option<&AssetStateRecord>,
+) -> Result<(), AppError> {
+    let Some(asset) = asset else {
+        return Ok(());
+    };
+    if asset.organization_suspended_at.is_some() {
+        return Err(AppError::forbidden("organization is suspended"));
+    }
+    if asset.suspended_at.is_some() {
+        return Err(AppError::forbidden("asset is suspended"));
+    }
+    Ok(())
+}
+
 async fn fetch_asset_events(
     db: &PgPool,
     organization_id: &str,
@@ -1832,11 +2343,14 @@ async fn fetch_asset_playback_record(
     let organization_id = normalize_org_id(organization_id)?;
     let row: Option<(String, String, String)> = sqlx::query_as(
         "
-        SELECT id::text, source_state, playable_state
-        FROM rend.assets
-        WHERE id = $1::uuid
-          AND organization_id = $2::uuid
-          AND deleted_at IS NULL
+        SELECT asset.id::text, asset.source_state, asset.playable_state
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND asset.deleted_at IS NULL
+          AND asset.suspended_at IS NULL
+          AND org.suspended_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -1900,6 +2414,10 @@ fn asset_current_response(
         playable_state: asset.playable_state,
         created_at: asset.created_at,
         updated_at: asset.updated_at,
+        suspended_at: asset.suspended_at,
+        suspension_reason: asset.suspension_reason,
+        organization_suspended_at: asset.organization_suspended_at,
+        organization_suspension_reason: asset.organization_suspension_reason,
         artifacts,
     })
 }
@@ -2391,6 +2909,7 @@ async fn create_video_inner(
     require_scope(&auth, ApiScope::Upload)?;
     let content_type = request_content_type(&headers);
     let content_length = request_content_length(&headers, state.config.max_upload_bytes)?;
+    ensure_org_not_suspended(&state.db, &auth.organization_id).await?;
     let mut tx = state.db.begin().await.map_err(AppError::internal)?;
     let asset_id: String = sqlx::query_scalar(
         "
@@ -2659,11 +3178,11 @@ async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
 }
 
 async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Result<()> {
-    if asset_is_deleted_or_missing(&state.db, &job.asset_id).await? {
+    if asset_is_unavailable_for_media_processing(&state.db, &job.asset_id).await? {
         tracing::info!(
             job_id = %job.id,
             asset_id = %job.asset_id,
-            "media job asset is deleted or missing",
+            "media job asset is deleted, suspended, or missing",
         );
         return Ok(());
     }
@@ -2684,7 +3203,7 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
         tracing::info!(
             job_id = %job.id,
             asset_id = %job.asset_id,
-            "media job skipped because asset was deleted before processing started",
+            "media job skipped because asset was deleted or suspended before processing started",
         );
         return Ok(());
     }
@@ -2793,19 +3312,22 @@ async fn asset_is_already_playable(db: &PgPool, asset_id: &str) -> Result<bool> 
     ))
 }
 
-async fn asset_is_deleted_or_missing(db: &PgPool, asset_id: &str) -> Result<bool> {
-    let deleted: Option<bool> = sqlx::query_scalar(
+async fn asset_is_unavailable_for_media_processing(db: &PgPool, asset_id: &str) -> Result<bool> {
+    let unavailable: Option<bool> = sqlx::query_scalar(
         "
-        SELECT deleted_at IS NOT NULL
-        FROM rend.assets
-        WHERE id = $1::uuid
+        SELECT asset.deleted_at IS NOT NULL
+            OR asset.suspended_at IS NOT NULL
+            OR org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
         ",
     )
     .bind(asset_id)
     .fetch_optional(db)
     .await?;
 
-    Ok(deleted.unwrap_or(true))
+    Ok(unavailable.unwrap_or(true))
 }
 
 async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> {
@@ -2828,11 +3350,15 @@ async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> 
 
 async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Result<bool> {
     let mut tx = db.begin().await?;
-    let row: Option<(String, bool)> = sqlx::query_as(
+    let row: Option<(String, bool, bool, bool)> = sqlx::query_as(
         "
-        SELECT playable_state, deleted_at IS NOT NULL
-        FROM rend.assets
-        WHERE id = $1::uuid
+        SELECT asset.playable_state,
+               asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
         FOR UPDATE
         ",
     )
@@ -2840,12 +3366,12 @@ async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Res
     .fetch_optional(&mut *tx)
     .await?;
 
-    let Some((playable_state, deleted)) = row else {
+    let Some((playable_state, deleted, asset_suspended, org_suspended)) = row else {
         tx.commit().await?;
         return Ok(false);
     };
 
-    if deleted {
+    if deleted || asset_suspended || org_suspended {
         tx.commit().await?;
         return Ok(false);
     }
@@ -2856,6 +3382,7 @@ async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Res
         SET source_state = 'processing'
         WHERE id = $1::uuid
           AND deleted_at IS NULL
+          AND suspended_at IS NULL
         ",
     )
     .bind(asset_id)
@@ -2883,6 +3410,13 @@ async fn mark_asset_media_processing_retryable(db: &PgPool, asset_id: &str) -> R
         WHERE id = $1::uuid
           AND playable_state = 'not_playable'
           AND deleted_at IS NULL
+          AND suspended_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM rend_auth.organization org
+            WHERE org.id = rend.assets.organization_id
+              AND org.suspended_at IS NOT NULL
+          )
         ",
     )
     .bind(asset_id)
@@ -3553,6 +4087,13 @@ async fn mark_asset_failed(state: &AppState, asset_id: &str) {
         SET source_state = 'failed', playable_state = 'not_playable'
         WHERE id = $1::uuid
           AND deleted_at IS NULL
+          AND suspended_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM rend_auth.organization org
+            WHERE org.id = rend.assets.organization_id
+              AND org.suspended_at IS NOT NULL
+          )
         ",
     )
     .bind(asset_id)
@@ -3590,7 +4131,10 @@ async fn authenticate_request(
             return Ok(None);
         };
         let organization_id = normalize_org_id(organization_id)?;
-        return Ok(Some(RequestAuth::all(organization_id)));
+        return Ok(Some(RequestAuth::all(
+            organization_id,
+            RequestCredential::SiteInternal,
+        )));
     }
 
     let Some(token) = bearer_token(headers) else {
@@ -3600,7 +4144,10 @@ async fn authenticate_request(
     if !state.config.dev_api_key.is_empty()
         && secret_matches(token, state.config.dev_api_key.as_str())
     {
-        return Ok(Some(RequestAuth::all(LOCAL_ORG_ID)));
+        return Ok(Some(RequestAuth::all(
+            LOCAL_ORG_ID,
+            RequestCredential::DevKey,
+        )));
     }
 
     if !looks_like_api_key(token) {
@@ -3612,14 +4159,16 @@ async fn authenticate_request(
 
 async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestAuth>, AppError> {
     let key_hash = hash_api_key(token);
-    let row: Option<(String, Vec<String>, bool)> = sqlx::query_as(
+    let row: Option<(String, Vec<String>, bool, bool)> = sqlx::query_as(
         "
-        SELECT organization_id::text,
-               scopes,
-               (last_used_update_after IS NULL OR last_used_update_after <= now())
-        FROM rend.api_keys
-        WHERE key_hash = $1
-          AND revoked_at IS NULL
+        SELECT key.organization_id::text,
+               key.scopes,
+               (key.last_used_update_after IS NULL OR key.last_used_update_after <= now()),
+               org.suspended_at IS NOT NULL
+        FROM rend.api_keys key
+        INNER JOIN rend_auth.organization org ON org.id = key.organization_id
+        WHERE key.key_hash = $1
+          AND key.revoked_at IS NULL
         ",
     )
     .bind(&key_hash)
@@ -3627,9 +4176,15 @@ async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestA
     .await
     .map_err(AppError::internal)?;
 
-    let Some((organization_id, scope_values, should_update_last_used)) = row else {
+    let Some((organization_id, scope_values, should_update_last_used, organization_suspended)) =
+        row
+    else {
         return Ok(None);
     };
+
+    if organization_suspended {
+        return Err(AppError::forbidden("organization is suspended"));
+    }
 
     if should_update_last_used {
         schedule_api_key_last_used_update(db.clone(), key_hash);
@@ -3638,6 +4193,7 @@ async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestA
     Ok(Some(RequestAuth {
         organization_id,
         scopes: parse_api_scopes(scope_values)?,
+        credential: RequestCredential::ApiKey,
     }))
 }
 
@@ -3711,6 +4267,28 @@ async fn require_internal_edge_token(
     }
 }
 
+async fn require_operator_internal_auth(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let provided = request
+        .headers()
+        .get("x-rend-site-token")
+        .and_then(|value| value.to_str().ok());
+    if !provided.is_some_and(|token| secret_matches(token, &state.config.site_internal_token)) {
+        return unauthorized_response();
+    }
+
+    match operator_identity_from_headers(request.headers()) {
+        Ok(operator) => {
+            request.extensions_mut().insert(operator);
+            next.run(request).await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
 #[cfg(test)]
 fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
     if api_key.is_empty() {
@@ -3753,6 +4331,234 @@ fn normalize_org_id(organization_id: &str) -> Result<String, AppError> {
         return Err(AppError::bad_request("malformed organization_id"));
     }
     Ok(organization_id.to_ascii_lowercase())
+}
+
+fn operator_identity_from_headers(headers: &HeaderMap) -> Result<OperatorIdentity, AppError> {
+    let user_id = header_string(headers, "x-rend-operator-user-id")
+        .ok_or_else(|| AppError::bad_request("missing operator user id"))
+        .and_then(normalize_operator_user_id)?;
+    let email = header_string(headers, "x-rend-operator-email")
+        .ok_or_else(|| AppError::bad_request("missing operator email"))
+        .and_then(normalize_operator_email)?;
+
+    Ok(OperatorIdentity { user_id, email })
+}
+
+fn normalize_operator_user_id(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if !is_canonical_uuid(value) {
+        return Err(AppError::bad_request("operator user id must be a UUID"));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn normalize_operator_email(value: &str) -> Result<String, AppError> {
+    let email = value.trim().to_ascii_lowercase();
+    if email.len() < 3
+        || email.len() > 320
+        || !email.contains('@')
+        || email.contains("://")
+        || email.contains('?')
+        || email.contains('#')
+        || email.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(AppError::bad_request("operator email is invalid"));
+    }
+    Ok(email)
+}
+
+fn normalize_operator_reason(value: &str) -> Result<String, AppError> {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if matches!(character, '\r' | '\n' | '\t') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let redacted = redact_operator_text(&normalized);
+    if redacted.is_empty() || redacted.len() > 1000 {
+        return Err(AppError::bad_request(
+            "operator reason must be between 1 and 1000 bytes",
+        ));
+    }
+    Ok(redacted)
+}
+
+fn redact_operator_text(value: &str) -> String {
+    let mut output = Vec::new();
+    let mut skip_next = false;
+    for part in value.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            output.push("[redacted]".to_owned());
+            continue;
+        }
+
+        let lower = part.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            output.push("[redacted-url]".to_owned());
+            continue;
+        }
+        if lower == "bearer" || lower == "basic" {
+            output.push("[redacted-auth]".to_owned());
+            skip_next = true;
+            continue;
+        }
+        if lower.contains("authorization")
+            || lower.contains("cookie")
+            || lower.contains("token=")
+            || lower.contains("signature=")
+            || lower.contains("secret=")
+            || lower.contains("api_key=")
+            || lower.contains("apikey=")
+            || lower.contains("api-key=")
+        {
+            output.push("[redacted-secret]".to_owned());
+            if lower.ends_with(':') || lower.ends_with('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        output.push(part.to_owned());
+    }
+
+    output.join(" ")
+}
+
+async fn fetch_organization_suspension_state_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+) -> Result<SuspensionStateRecord, AppError> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "
+        SELECT id::text,
+               to_char(suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               suspension_reason
+        FROM rend_auth.organization
+        WHERE id = $1::uuid
+        FOR UPDATE
+        ",
+    )
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    row.map(
+        |(target_id, suspended_at, suspension_reason)| SuspensionStateRecord {
+            target_id,
+            suspended_at,
+            suspension_reason,
+        },
+    )
+    .ok_or_else(|| AppError::not_found("organization not found"))
+}
+
+async fn fetch_asset_suspension_state_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    asset_id: &str,
+) -> Result<SuspensionStateRecord, AppError> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "
+        SELECT id::text,
+               to_char(suspended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               suspension_reason
+        FROM rend.assets
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+        FOR UPDATE
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    row.map(
+        |(target_id, suspended_at, suspension_reason)| SuspensionStateRecord {
+            target_id,
+            suspended_at,
+            suspension_reason,
+        },
+    )
+    .ok_or_else(|| AppError::not_found("asset not found"))
+}
+
+fn suspension_state_json(state: &SuspensionStateRecord) -> Value {
+    serde_json::json!({
+        "target_id": state.target_id,
+        "suspended": state.suspended_at.is_some(),
+        "suspended_at": state.suspended_at,
+        "suspension_reason": state.suspension_reason,
+    })
+}
+
+async fn insert_operator_audit_record(
+    tx: &mut Transaction<'_, Postgres>,
+    operator: &OperatorIdentity,
+    action: &'static str,
+    target_type: &'static str,
+    target_id: &str,
+    reason: &str,
+    before_state: Value,
+    after_state: Value,
+) -> Result<String, AppError> {
+    sqlx::query_scalar(
+        "
+        INSERT INTO rend.operator_audit_records (
+          operator_user_id,
+          operator_email,
+          action,
+          target_type,
+          target_id,
+          reason,
+          before_state,
+          after_state
+        )
+        VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, $7::jsonb, $8::jsonb)
+        RETURNING id::text
+        ",
+    )
+    .bind(&operator.user_id)
+    .bind(&operator.email)
+    .bind(action)
+    .bind(target_type)
+    .bind(target_id)
+    .bind(reason)
+    .bind(before_state.to_string())
+    .bind(after_state.to_string())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::internal)
+}
+
+async fn fetch_active_asset_ids_for_org(
+    db: &PgPool,
+    organization_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let organization_id = normalize_org_id(organization_id)?;
+    let rows: Vec<String> = sqlx::query_scalar(
+        "
+        SELECT id::text
+        FROM rend.assets
+        WHERE organization_id = $1::uuid
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC, id DESC
+        ",
+    )
+    .bind(organization_id)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(rows)
 }
 
 fn secret_matches(provided: &str, expected: &str) -> bool {
