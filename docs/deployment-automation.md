@@ -86,9 +86,11 @@ Set these as `Production` environment variables:
 rend-edge-ash-1=us-east=https://ash-1.play.rend.so=https://ash-1-private.play.rend.so,rend-edge-ams-1=amsterdam=https://ams-1.play.rend.so=https://ams-1-private.play.rend.so
 ```
 
-The readiness gate needs `private_base` values that are reachable from the
-GitHub runner. If those private hosts are not publicly reachable, run this
-workflow on a self-hosted runner or provide VPN-accessible private bases.
+The GitHub workflow opens SSH tunnels to the configured `rend-edge-ash-1` and
+`rend-edge-ams-1` hosts and rewrites the private bases to runner-local tunnel
+URLs for the readiness gate. This keeps `/internal/*` and `/metrics` off the
+public edge hostnames while still allowing GitHub-hosted runners to run the
+synthetic playback checks.
 
 ## Rollback
 

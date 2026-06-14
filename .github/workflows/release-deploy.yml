@@ -272,6 +272,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Open edge readiness SSH tunnels
+        if: env.RUN_READINESS == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required when RUN_READINESS=true}"
+
+          start_tunnel() {
+            local label="$1"
+            local host="$2"
+            local user="$3"
+            local port="$4"
+            local local_port="$5"
+
+            if [[ -z "$host" || -z "$user" ]]; then
+              echo "cannot open $label readiness tunnel without SSH host and user" >&2
+              exit 1
+            fi
+
+            ssh \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ExitOnForwardFailure=yes \
+              -i "$REND_SSH_KEY_PATH" \
+              -p "$port" \
+              -f -N \
+              -L "127.0.0.1:${local_port}:127.0.0.1:4100" \
+              "$user@$host"
+
+            curl -fsS --retry 12 --retry-delay 2 --retry-all-errors \
+              "http://127.0.0.1:${local_port}/readyz" >/dev/null
+          }
+
+          start_tunnel "ash" "$REND_EDGE_ASH_SSH_HOST" "$REND_EDGE_ASH_SSH_USER" "${REND_EDGE_ASH_SSH_PORT:-22}" 14100
+          start_tunnel "ams" "$REND_EDGE_AMS_SSH_HOST" "$REND_EDGE_AMS_SSH_USER" "${REND_EDGE_AMS_SSH_PORT:-22}" 14101
+
+          IFS=',' read -r -a edge_entries <<< "$REND_READINESS_EDGES"
+          readiness_edges=""
+          for entry in "${edge_entries[@]}"; do
+            IFS='=' read -r edge_id region public_base _private_base <<< "$entry"
+            case "$edge_id" in
+              rend-edge-ash-1)
+                private_base="http://127.0.0.1:14100"
+                ;;
+              rend-edge-ams-1)
+                private_base="http://127.0.0.1:14101"
+                ;;
+              *)
+                echo "no readiness tunnel mapping for edge id: $edge_id" >&2
+                exit 1
+                ;;
+            esac
+            item="${edge_id}=${region}=${public_base}=${private_base}"
+            if [[ -z "$readiness_edges" ]]; then
+              readiness_edges="$item"
+            else
+              readiness_edges="${readiness_edges},${item}"
+            fi
+          done
+
+          echo "REND_READINESS_EDGES=$readiness_edges" >> "$GITHUB_ENV"
+
       - name: Run playback readiness gate
         if: env.RUN_READINESS == 'true'
         run: |
