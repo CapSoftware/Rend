@@ -75,6 +75,7 @@ edge_image="$(operator_manifest_image_ref "$manifest" rend-edge "$allow_local_im
 
 if [[ "$dry_run" != "true" ]]; then
   operator_check_docker_compose
+  operator_require_command curl
   operator_info "checking manifest image pull readiness and platform"
   operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-edge
   operator_finish
@@ -87,6 +88,11 @@ operator_run_or_dry_run "$dry_run" \
 operator_run_or_dry_run "$dry_run" \
   env "REND_EDGE_IMAGE=$edge_image" \
   docker compose -f "$compose_file" up -d --no-deps rend-edge
+
+if [[ "$dry_run" != "true" ]]; then
+  curl -fsS --retry 12 --retry-delay 5 --retry-all-errors http://127.0.0.1:4100/readyz >/dev/null
+  echo "rend-edge is ready"
+fi
 
 if [[ "$dry_run" == "true" ]]; then
   echo "Dry run complete; no edge deploy commands were executed"
