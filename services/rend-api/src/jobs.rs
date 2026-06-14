@@ -53,6 +53,10 @@ pub async fn claim_next_media_job(
           JOIN rend.assets asset
             ON asset.id = job.asset_id
            AND asset.deleted_at IS NULL
+           AND asset.suspended_at IS NULL
+          JOIN rend_auth.organization org
+            ON org.id = asset.organization_id
+           AND org.suspended_at IS NULL
           WHERE job.job_type = $1
             AND (
               (job.status = $2 AND job.run_after <= now())
