@@ -1,6 +1,6 @@
 # Rend Image Release Workflow V1
 
-This is the narrow release workflow for first edge trials. It builds the
+This is the narrow release workflow for first production edge deploys. It builds the
 existing Dockerfile targets, tags them, optionally pushes them, and writes a
 manifest that operators can use for deploy and rollback.
 
@@ -27,21 +27,21 @@ For a real registry, pass a repository prefix. With
 Local dry-run build without registry credentials:
 
 ```sh
-bun run release:images -- --tag trial-001
+bun run release:images -- --tag production-001
 ```
 
 If you are testing uncommitted changes locally, make that explicit. Do not use
 this flag with `--push`; pushed releases always require a clean git worktree.
 
 ```sh
-bun run release:images -- --tag trial-001 --allow-dirty
+bun run release:images -- --tag production-001 --allow-dirty
 ```
 
 Production release build:
 
 ```sh
 bun run release:images -- \
-  --tag trial-001 \
+  --tag production-001 \
   --registry registry.example.com/rend \
   --platform linux/amd64 \
   --push
@@ -57,9 +57,9 @@ sudo docker login ghcr.io
 ```
 
 Each image is tagged with the full git SHA. When `--tag` is provided, the same
-image also receives the human release tag, for example `trial-001`.
+image also receives the human release tag, for example `production-001`.
 
-The release workflow is platform-explicit. Hosted trial releases default to
+The release workflow is platform-explicit. Hosted production releases default to
 `linux/amd64`; pass `--platform` only when the target hosts intentionally change.
 The script validates Docker's built image OS/architecture before it writes the
 manifest.
@@ -72,9 +72,9 @@ be recovered later even though `.rend/` is ignored. Override paths with
 
 ```sh
 bun run release:images -- \
-  --tag trial-001 \
+  --tag production-001 \
   --registry registry.example.com/rend \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --artifact-dir docs/releases \
   --push
 ```
@@ -144,7 +144,7 @@ Prefer immutable digest refs from `image_digest` for production compose
 templates. Define a small helper on the host or operator laptop:
 
 ```sh
-MANIFEST=.rend/releases/trial-001.json
+MANIFEST=.rend/releases/production-001.json
 
 manifest_image() {
   python3 - "$MANIFEST" "$1" <<'PY'
@@ -203,7 +203,7 @@ bun run backend:docker:check-versions
 For release images, run strict mode so fallback `unknown` metadata fails:
 
 ```sh
-scripts/check-docker-image-versions.sh --tag trial-001 --strict
+scripts/check-docker-image-versions.sh --tag production-001 --strict
 ```
 
 For running containers on a host that has this repo checkout:
@@ -226,7 +226,7 @@ curl -fsS http://127.0.0.1:4100/healthz
 Use the previous release manifest and export its digest refs:
 
 ```sh
-MANIFEST=.rend/releases/trial-000.json
+MANIFEST=.rend/releases/production-000.json
 export REND_API_IMAGE="$(manifest_image rend-api)"
 export REND_MEDIA_WORKER_IMAGE="$(manifest_image rend-media-worker)"
 export REND_EDGE_IMAGE="$(manifest_image rend-edge)"
