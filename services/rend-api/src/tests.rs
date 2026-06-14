@@ -90,6 +90,7 @@ fn test_config() -> ApiConfig {
         aws_access_key_id: "test".to_owned(),
         aws_secret_access_key: "test".to_owned(),
         playback_base_url: "http://127.0.0.1:4100".to_owned(),
+        playback_cookie_domain: None,
         playback_token_issuer: test_issuer(),
         playback_bootstrap_prefetch_segments: DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
         edge_registry: EdgeRegistryConfig {
@@ -1102,6 +1103,7 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
         &response.playback_token,
         response.ttl_seconds,
         "https://edge.local",
+        Some("rend.so"),
     );
 
     assert_eq!(
@@ -1114,6 +1116,7 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
         "{serialized}"
     );
     assert!(cookie.starts_with("__rend_playback="));
+    assert!(cookie.contains("; Domain=rend.so"));
     assert!(cookie.contains("; HttpOnly"));
     assert!(cookie.contains("; Secure"));
     assert_eq!(claims.asset_id, "asset-123");

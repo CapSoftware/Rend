@@ -91,6 +91,7 @@ struct ApiConfig {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     playback_base_url: String,
+    playback_cookie_domain: Option<String>,
     playback_token_issuer: PlaybackTokenIssuer,
     playback_bootstrap_prefetch_segments: usize,
     edge_registry: EdgeRegistryConfig,
@@ -164,6 +165,7 @@ impl ApiConfig {
             "local-dev-playback-signing-secret",
         );
         let playback_base_url = env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100");
+        let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
         anyhow::ensure!(
@@ -299,6 +301,7 @@ impl ApiConfig {
             aws_access_key_id,
             aws_secret_access_key,
             playback_base_url,
+            playback_cookie_domain,
             playback_token_issuer,
             playback_bootstrap_prefetch_segments,
             edge_registry: EdgeRegistryConfig {
@@ -1739,6 +1742,7 @@ async fn get_asset_playback(
                 &response.playback_token,
                 response.ttl_seconds,
                 &state.config.playback_base_url,
+                state.config.playback_cookie_domain.as_deref(),
             )
             .parse()
             {
@@ -2910,7 +2914,12 @@ fn issue_playback_token(
     })
 }
 
-fn playback_cookie_header(token: &str, ttl_seconds: u64, playback_base_url: &str) -> String {
+fn playback_cookie_header(
+    token: &str,
+    ttl_seconds: u64,
+    playback_base_url: &str,
+    cookie_domain: Option<&str>,
+) -> String {
     let mut parts = vec![
         format!("{PLAYBACK_COOKIE_NAME}={token}"),
         "Path=/v/".to_owned(),
@@ -2918,10 +2927,29 @@ fn playback_cookie_header(token: &str, ttl_seconds: u64, playback_base_url: &str
         "HttpOnly".to_owned(),
         "SameSite=Lax".to_owned(),
     ];
+    if let Some(domain) = cookie_domain {
+        parts.push(format!("Domain={domain}"));
+    }
     if playback_base_url.starts_with("https://") {
         parts.push("Secure".to_owned());
     }
     parts.join("; ")
+}
+
+fn optional_cookie_domain(key: &str) -> Result<Option<String>> {
+    let value = env_string(key, "");
+    let value = value.trim().trim_start_matches('.').to_owned();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        !value.contains('/')
+            && !value.contains(':')
+            && !value.chars().any(char::is_whitespace)
+            && value.contains('.'),
+        "{key} must be a cookie domain such as rend.so"
+    );
+    Ok(Some(value))
 }
 
 fn artifact_url(base_url: &str, asset_id: &str, artifact_path: &str) -> String {

@@ -205,11 +205,11 @@ API required set:
   `OBJECT_STORE_HEALTH_URL`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 - API/runtime: `REND_API_BIND_ADDR`, `REND_API_AUTO_MIGRATE`,
-  `REND_API_INLINE_MEDIA_PROCESSING`, `REND_DEV_API_KEY`,
+  `REND_API_INLINE_MEDIA_PROCESSING`, `REND_SITE_INTERNAL_TOKEN`,
   `REND_HTTP_TIMEOUT_SECS`
-- Playback: `REND_PLAYBACK_BASE_URL`, `REND_PLAYBACK_SIGNING_KEY_ID`,
-  `REND_PLAYBACK_SIGNING_SECRET`, `REND_PLAYBACK_TOKEN_TTL_SECS`,
-  `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
+- Playback: `REND_PLAYBACK_BASE_URL`, `REND_PLAYBACK_COOKIE_DOMAIN`,
+  `REND_PLAYBACK_SIGNING_KEY_ID`, `REND_PLAYBACK_SIGNING_SECRET`,
+  `REND_PLAYBACK_TOKEN_TTL_SECS`, `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
 - Edge registry/fanout: `REND_EDGE_INTERNAL_TOKEN`,
   `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`.
   `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are fallback-only.
@@ -369,7 +369,7 @@ EDGE_BASE_US_EAST=https://edge-us-east.example.com
 EDGE_BASE_LONDON=https://edge-london.example.com
 EDGE_INTERNAL_US_EAST=http://10.0.10.12:4100
 EDGE_INTERNAL_LONDON=http://10.0.20.12:4100
-REND_DEV_API_KEY=replace-me
+REND_API_KEY=replace-me
 REND_EDGE_INTERNAL_TOKEN=replace-me
 ASSET_ID=00000000-0000-0000-0000-000000000000
 ```
@@ -444,7 +444,7 @@ Fetch a signed playback token from the API for a known `hls_ready` asset:
 
 ```sh
 curl -fsS \
-  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  -H "authorization: Bearer $REND_API_KEY" \
   "$API_BASE/v1/assets/$ASSET_ID/playback" \
   -o /tmp/rend-playback-bootstrap.json
 
@@ -475,7 +475,7 @@ each healthy registered edge and its per-edge status.
 
 ```sh
 curl -fsS \
-  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  -H "authorization: Bearer $REND_API_KEY" \
   "$API_BASE/v1/assets/$ASSET_ID/events?limit=100"
 ```
 
@@ -494,7 +494,7 @@ Telemetry flush check:
 curl -fsS -o /dev/null "$SIGNED_MANIFEST"
 sleep 5
 curl -fsS \
-  -H "authorization: Bearer $REND_DEV_API_KEY" \
+  -H "authorization: Bearer $REND_API_KEY" \
   "$API_BASE/v1/assets/$ASSET_ID/analytics/playback?window_seconds=600"
 ```
 
