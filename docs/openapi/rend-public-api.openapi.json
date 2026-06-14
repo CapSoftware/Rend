@@ -1,0 +1,962 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Rend Public API",
+    "version": "0.1.0",
+    "summary": "Public asset, playback, lifecycle, and analytics API for Rend customers.",
+    "description": "This contract intentionally excludes operator, edge, internal telemetry, and site-internal endpoints. Authenticated control-plane operations use Rend API keys in the Authorization header. Browser playback bootstrap is exposed through the site player route and returns same-origin, cookie-safe artifact URLs rather than signed edge URLs or playback tokens."
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [
+    {
+      "url": "https://api.rend.so",
+      "description": "Rend API control plane"
+    },
+    {
+      "url": "https://rend.so",
+      "description": "Rend site playback bootstrap"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Assets",
+      "description": "Upload, list, read, and delete customer assets."
+    },
+    {
+      "name": "Asset Lifecycle",
+      "description": "Poll or stream asset lifecycle events."
+    },
+    {
+      "name": "Playback",
+      "description": "Browser-safe playback bootstrap and player telemetry."
+    },
+    {
+      "name": "Analytics",
+      "description": "Playback request analytics."
+    }
+  ],
+  "paths": {
+    "/v1/videos": {
+      "post": {
+        "operationId": "uploadAsset",
+        "tags": ["Assets"],
+        "summary": "Upload a video asset",
+        "description": "Uploads a raw video body and creates an asset. API keys need the `upload` scope. The response intentionally documents only public fields; older control-plane deployments may include additional internal fields that clients must ignore.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "video/mp4": {
+              "schema": { "$ref": "#/components/schemas/BinaryUploadBody" }
+            },
+            "video/quicktime": {
+              "schema": { "$ref": "#/components/schemas/BinaryUploadBody" }
+            },
+            "application/octet-stream": {
+              "schema": { "$ref": "#/components/schemas/BinaryUploadBody" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Asset upload accepted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssetUploadResponse" },
+                "examples": {
+                  "uploaded": {
+                    "value": {
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "source_state": "uploaded",
+                      "playable_state": "not_playable",
+                      "byte_size": 428815
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      }
+    },
+    "/v1/assets": {
+      "get": {
+        "operationId": "listAssets",
+        "tags": ["Assets"],
+        "summary": "List assets",
+        "description": "Lists assets visible to the API key organization. API keys need the `read` scope.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset list.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssetListResponse" },
+                "examples": {
+                  "empty": { "value": { "assets": [] } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/assets/{assetId}": {
+      "parameters": [{ "$ref": "#/components/parameters/AssetId" }],
+      "get": {
+        "operationId": "getAsset",
+        "tags": ["Assets"],
+        "summary": "Fetch an asset",
+        "description": "Returns the current asset state and public artifact summaries. API keys need the `read` scope.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "responses": {
+          "200": {
+            "description": "Asset detail.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssetDetail" },
+                "examples": {
+                  "processing": {
+                    "value": {
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "source_state": "uploaded",
+                      "playable_state": "not_playable",
+                      "created_at": "2026-06-14T10:00:00.000Z",
+                      "updated_at": "2026-06-14T10:00:01.000Z",
+                      "artifacts": [
+                        {
+                          "kind": "source",
+                          "content_type": "video/mp4",
+                          "byte_size": 428815
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAsset",
+        "tags": ["Assets"],
+        "summary": "Delete an asset",
+        "description": "Deletes Rend-owned asset state and origin objects, then attempts edge purge. API keys need the `delete` scope.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "responses": {
+          "200": {
+            "description": "Asset deletion result.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssetDeleteResponse" },
+                "examples": {
+                  "deleted": {
+                    "value": {
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "deleted": true,
+                      "already_deleted": false,
+                      "origin_objects_deleted": 5,
+                      "purge_attempted": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/assets/{assetId}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/AssetId" }],
+      "get": {
+        "operationId": "listAssetEvents",
+        "tags": ["Asset Lifecycle"],
+        "summary": "Poll asset lifecycle events",
+        "description": "Returns ordered lifecycle events after an optional sequence cursor. API keys need the `read` scope.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "parameters": [
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset lifecycle events.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssetEventsResponse" },
+                "examples": {
+                  "events": {
+                    "value": {
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "events": [
+                        {
+                          "id": "018f52b4-1f49-7f74-b7c0-279b4c1e2d8d",
+                          "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                          "sequence": 1,
+                          "event_type": "asset.created",
+                          "created_at": "2026-06-14T10:00:00.000Z",
+                          "metadata": {
+                            "source_state": "uploading",
+                            "playable_state": "not_playable"
+                          }
+                        }
+                      ],
+                      "next_after_sequence": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "streamAssetEvents",
+        "tags": ["Asset Lifecycle"],
+        "summary": "Stream asset lifecycle events",
+        "description": "Streams Server-Sent Events for lifecycle changes. API keys need the `read` scope. Use `Last-Event-ID` or `after_sequence` to resume.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "query",
+            "required": false,
+            "schema": { "$ref": "#/components/schemas/AssetId" }
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE lifecycle stream. Each `data:` frame is an AssetEvent object.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "examples": [
+                    "id: 1\nevent: asset.created\ndata: {\"id\":\"018f52b4-1f49-7f74-b7c0-279b4c1e2d8d\",\"asset_id\":\"018f52b2-5401-7f3b-ae2e-4923f4d62120\",\"sequence\":1,\"event_type\":\"asset.created\",\"created_at\":\"2026-06-14T10:00:00.000Z\",\"metadata\":{\"source_state\":\"uploading\",\"playable_state\":\"not_playable\"}}\n\n"
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/player/{assetId}": {
+      "parameters": [{ "$ref": "#/components/parameters/AssetId" }],
+      "get": {
+        "operationId": "getPlaybackBootstrap",
+        "tags": ["Playback"],
+        "summary": "Fetch browser-safe playback bootstrap",
+        "description": "Returns tokenless same-origin artifact URLs for a browser player. The site route obtains any edge credentials server-side and does not expose playback tokens or signed edge URLs in JSON.",
+        "security": [],
+        "x-rend-server": "site",
+        "parameters": [
+          {
+            "name": "playbackBaseUrl",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Optional allowed playback base override for local testing or approved deployments."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Playback-ready bootstrap.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PlaybackBootstrapResponse" },
+                "examples": {
+                  "hlsReady": {
+                    "value": {
+                      "status": "ready",
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "source_state": "uploaded",
+                      "playable_state": "hls_ready",
+                      "playback_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
+                      "playback_content_type": "application/vnd.apple.mpegurl",
+                      "playback_token_expires_at": 1781432100,
+                      "ttl_seconds": 900,
+                      "opener_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/opener.mp4",
+                      "opener_content_type": "video/mp4",
+                      "manifest_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
+                      "manifest_content_type": "application/vnd.apple.mpegurl",
+                      "prefetch_hints": [
+                        {
+                          "artifact_path": "hls/segment_00000.ts",
+                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/segment_00000.ts",
+                          "content_type": "video/mp2t"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/SiteBadRequest" },
+          "404": { "$ref": "#/components/responses/PlaybackUnavailable" },
+          "409": { "$ref": "#/components/responses/PlaybackNotPlayable" },
+          "500": { "$ref": "#/components/responses/SiteError" },
+          "502": { "$ref": "#/components/responses/SiteError" }
+        }
+      }
+    },
+    "/api/player/telemetry": {
+      "post": {
+        "operationId": "recordPlayerTelemetry",
+        "tags": ["Playback"],
+        "summary": "Record browser player telemetry",
+        "description": "Accepts bounded client-side player telemetry. This endpoint is anonymous and stores only sanitized fields.",
+        "security": [],
+        "x-rend-server": "site",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PlayerTelemetryBatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Telemetry accepted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PlayerTelemetryAccepted" },
+                "examples": {
+                  "accepted": {
+                    "value": { "status": "ok", "accepted": 1 }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/TelemetryValidationError" },
+          "413": { "$ref": "#/components/responses/TelemetryValidationError" },
+          "415": { "$ref": "#/components/responses/TelemetryValidationError" }
+        }
+      }
+    },
+    "/v1/assets/{assetId}/analytics/playback": {
+      "parameters": [{ "$ref": "#/components/parameters/AssetId" }],
+      "get": {
+        "operationId": "getPlaybackAnalytics",
+        "tags": ["Analytics"],
+        "summary": "Fetch playback request analytics",
+        "description": "Returns deduped playback request counts, bytes served, cache statuses, and HTTP statuses for a bounded time window. API keys need the `analytics` scope.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "parameters": [
+          {
+            "name": "window_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 604800,
+              "default": 86400
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Playback analytics.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PlaybackAnalyticsResponse" },
+                "examples": {
+                  "analytics": {
+                    "value": {
+                      "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                      "window_started_at": "2026-06-14T09:00:00.000Z",
+                      "window_ended_at": "2026-06-14T10:00:00.000Z",
+                      "request_count": 3,
+                      "bytes_served": 1048576,
+                      "cache_status_counts": { "HIT": 2, "MISS": 1 },
+                      "status_code_counts": { "200": 3 },
+                      "first_seen": "2026-06-14T09:10:00.000Z",
+                      "last_seen": "2026-06-14T09:20:00.000Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "RendApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Rend API key",
+        "description": "Use `Authorization: Bearer <rend_live_...>` in production and `Authorization: Bearer <rend_test_...>` for test keys. Local development may also accept the configured dev key."
+      }
+    },
+    "parameters": {
+      "AssetId": {
+        "name": "assetId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/AssetId" }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": { "badRequest": { "value": { "error": "malformed asset_id" } } }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid API key.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": { "unauthorized": { "value": { "error": "unauthorized" } } }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "API key lacks scope or organization/asset is suspended.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": {
+              "scope": { "value": { "error": "insufficient API key scope" } },
+              "suspended": { "value": { "error": "organization is suspended" } }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Asset was not found.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": { "notFound": { "value": { "error": "asset not found" } } }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Upload exceeds the configured size limit.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": {
+              "tooLarge": {
+                "value": { "error": "content-length exceeds REND_MAX_UPLOAD_BYTES (536870912)" }
+              }
+            }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "Unsupported upload media type.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" }
+          }
+        }
+      },
+      "SiteBadRequest": {
+        "description": "Invalid site playback request.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SiteError" },
+            "examples": {
+              "badBase": {
+                "value": {
+                  "status": "error",
+                  "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                  "message": "Playback edge is not configured"
+                }
+              }
+            }
+          }
+        }
+      },
+      "PlaybackUnavailable": {
+        "description": "Asset is unavailable or cannot be exposed for playback.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/PlaybackUnavailableResponse" },
+            "examples": {
+              "unavailable": {
+                "value": {
+                  "status": "unavailable",
+                  "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                  "message": "Asset is unavailable"
+                }
+              }
+            }
+          }
+        }
+      },
+      "PlaybackNotPlayable": {
+        "description": "Asset exists but has no playable artifact yet.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/PlaybackNotPlayableResponse" },
+            "examples": {
+              "notPlayable": {
+                "value": {
+                  "status": "not_playable",
+                  "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
+                  "source_state": "uploaded",
+                  "playable_state": "not_playable",
+                  "message": "Asset is not playable yet"
+                }
+              }
+            }
+          }
+        }
+      },
+      "SiteError": {
+        "description": "Site playback bootstrap failed.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SiteError" }
+          }
+        }
+      },
+      "TelemetryValidationError": {
+        "description": "Telemetry payload was invalid or too large.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/TelemetryErrorResponse" },
+            "examples": {
+              "invalidJson": { "value": { "status": "error", "error": "invalid_json" } }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AssetId": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "BinaryUploadBody": {
+        "type": "string",
+        "format": "binary"
+      },
+      "AssetState": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "examples": ["uploaded", "not_playable", "hls_ready"]
+      },
+      "IsoTimestamp": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "AssetSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "source_state", "playable_state", "created_at", "updated_at", "artifact_count"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "source_state": { "$ref": "#/components/schemas/AssetState" },
+          "playable_state": { "$ref": "#/components/schemas/AssetState" },
+          "created_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "updated_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "source_byte_size": { "type": "integer", "minimum": 0 },
+          "artifact_count": { "type": "integer", "minimum": 0 },
+          "suspended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "suspension_reason": { "type": "string" },
+          "organization_suspended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "organization_suspension_reason": { "type": "string" }
+        }
+      },
+      "AssetUploadResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["asset_id", "source_state", "playable_state", "byte_size"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "source_state": { "$ref": "#/components/schemas/AssetState" },
+          "playable_state": { "$ref": "#/components/schemas/AssetState" },
+          "byte_size": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "AssetArtifact": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "content_type"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "content_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "byte_size": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "AssetDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "source_state", "playable_state", "created_at", "updated_at", "artifacts"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "source_state": { "$ref": "#/components/schemas/AssetState" },
+          "playable_state": { "$ref": "#/components/schemas/AssetState" },
+          "created_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "updated_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "source_byte_size": { "type": "integer", "minimum": 0 },
+          "suspended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "suspension_reason": { "type": "string" },
+          "organization_suspended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "organization_suspension_reason": { "type": "string" },
+          "artifacts": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AssetArtifact" }
+          }
+        }
+      },
+      "AssetListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assets"],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AssetSummary" }
+          }
+        }
+      },
+      "AssetDeleteResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "deleted", "already_deleted", "origin_objects_deleted", "purge_attempted"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "deleted": { "const": true },
+          "already_deleted": { "type": "boolean" },
+          "origin_objects_deleted": { "type": "integer", "minimum": 0 },
+          "purge_attempted": { "type": "boolean" }
+        }
+      },
+      "AssetEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "asset_id", "sequence", "event_type", "created_at", "metadata"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "created_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "AssetEventsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "events"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AssetEvent" }
+          },
+          "next_after_sequence": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "PlaybackArtifactPath": {
+        "type": "string",
+        "pattern": "^(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts)$"
+      },
+      "PlaybackPrefetchHint": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact_path", "url", "content_type"],
+        "properties": {
+          "artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
+          "url": {
+            "type": "string",
+            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts)(\\?playbackBaseUrl=[^\\s]+)?$"
+          },
+          "content_type": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "PlaybackBootstrapResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "asset_id", "source_state", "playable_state", "playback_token_expires_at", "ttl_seconds", "prefetch_hints"],
+        "properties": {
+          "status": { "const": "ready" },
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "source_state": { "$ref": "#/components/schemas/AssetState" },
+          "playable_state": { "$ref": "#/components/schemas/AssetState" },
+          "playback_url": {
+            "type": "string",
+            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8)(\\?playbackBaseUrl=[^\\s]+)?$"
+          },
+          "playback_content_type": { "type": "string" },
+          "playback_token_expires_at": { "type": "integer", "minimum": 1 },
+          "ttl_seconds": { "type": "integer", "minimum": 1 },
+          "opener_url": {
+            "type": "string",
+            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/opener\\.mp4(\\?playbackBaseUrl=[^\\s]+)?$"
+          },
+          "opener_content_type": { "type": "string" },
+          "manifest_url": {
+            "type": "string",
+            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/hls/master\\.m3u8(\\?playbackBaseUrl=[^\\s]+)?$"
+          },
+          "manifest_content_type": { "type": "string" },
+          "prefetch_hints": {
+            "type": "array",
+            "maxItems": 4,
+            "items": { "$ref": "#/components/schemas/PlaybackPrefetchHint" }
+          }
+        }
+      },
+      "PlaybackUnavailableResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "asset_id", "message"],
+        "properties": {
+          "status": { "const": "unavailable" },
+          "asset_id": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "PlaybackNotPlayableResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "asset_id", "message"],
+        "properties": {
+          "status": { "const": "not_playable" },
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "source_state": { "$ref": "#/components/schemas/AssetState" },
+          "playable_state": { "$ref": "#/components/schemas/AssetState" },
+          "message": { "type": "string" }
+        }
+      },
+      "PlaybackAnalyticsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "window_started_at", "window_ended_at", "request_count", "bytes_served", "cache_status_counts", "status_code_counts"],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "window_started_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "window_ended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "request_count": { "type": "integer", "minimum": 0 },
+          "bytes_served": { "type": "integer", "minimum": 0 },
+          "cache_status_counts": {
+            "type": "object",
+            "additionalProperties": { "type": "integer", "minimum": 0 }
+          },
+          "status_code_counts": {
+            "type": "object",
+            "additionalProperties": { "type": "integer", "minimum": 0 }
+          },
+          "first_seen": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "last_seen": { "$ref": "#/components/schemas/IsoTimestamp" }
+        }
+      },
+      "PlayerTelemetryPhase": {
+        "type": "string",
+        "enum": [
+          "player_load",
+          "bootstrap_complete",
+          "source_selected",
+          "metadata_loaded",
+          "canplay",
+          "first_frame",
+          "bootstrap_failure",
+          "playback_failure"
+        ]
+      },
+      "PlayerTelemetryEvent": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["playback_session_id", "asset_id", "phase", "event_time_ms"],
+        "properties": {
+          "playback_session_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "asset_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "phase": { "$ref": "#/components/schemas/PlayerTelemetryPhase" },
+          "event_time_ms": { "type": "integer", "minimum": 1000000000000 },
+          "bootstrap_duration_ms": { "type": "integer", "minimum": 0 },
+          "bootstrap_http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+          "selected_playback_mode": {
+            "type": "string",
+            "enum": ["native_hls", "hls_js", "opener", "primary"]
+          },
+          "selected_artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
+          "metadata_loaded_ms": { "type": "integer", "minimum": 0 },
+          "canplay_ms": { "type": "integer", "minimum": 0 },
+          "first_frame_ms": { "type": "integer", "minimum": 0 },
+          "playback_failure_reason": { "type": "string", "maxLength": 180 },
+          "playback_failure_code": { "type": "string", "maxLength": 80 },
+          "cache_headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "edge_label": { "type": "string", "maxLength": 80 },
+          "region_label": { "type": "string", "maxLength": 80 },
+          "player_version": { "type": "string", "maxLength": 64 },
+          "app_version": { "type": "string", "maxLength": 64 }
+        }
+      },
+      "PlayerTelemetryBatch": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/PlayerTelemetryEvent" },
+          {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/PlayerTelemetryEvent" }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["events"],
+            "properties": {
+              "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": { "$ref": "#/components/schemas/PlayerTelemetryEvent" }
+              }
+            }
+          }
+        ]
+      },
+      "PlayerTelemetryAccepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "accepted"],
+        "properties": {
+          "status": { "const": "ok" },
+          "accepted": { "type": "integer", "minimum": 1, "maximum": 16 }
+        }
+      },
+      "ControlPlaneError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "minLength": 1 }
+        }
+      },
+      "SiteError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "message"],
+        "properties": {
+          "status": { "const": "error" },
+          "asset_id": { "type": "string" },
+          "error": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "TelemetryErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "error"],
+        "properties": {
+          "status": { "const": "error" },
+          "error": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
