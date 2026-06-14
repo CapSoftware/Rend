@@ -15,7 +15,8 @@ use rend_playback_auth::is_valid_hls_segment_name;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApiScope, AppError, AppState, RequestAuth, asset_row_exists, normalize_asset_id, require_scope,
+    ApiScope, AppError, AppState, RequestAuth, ensure_asset_not_suspended, normalize_asset_id,
+    require_scope,
 };
 
 const DEFAULT_TELEMETRY_MAX_BODY_BYTES: usize = 256 * 1024;
@@ -256,9 +257,7 @@ async fn get_playback_analytics_inner(
 ) -> std::result::Result<PlaybackAnalyticsResponse, AppError> {
     require_scope(&auth, ApiScope::Analytics)?;
     let asset_id = normalize_asset_id(&asset_id)?;
-    if !asset_row_exists(&state.db, &auth.organization_id, &asset_id).await? {
-        return Err(AppError::not_found("asset not found"));
-    }
+    ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
 
     let window =
         normalize_playback_analytics_window(query, &state.config.playback_telemetry, Utc::now())?;
