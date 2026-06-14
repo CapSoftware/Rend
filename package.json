@@ -58,6 +58,7 @@
     "openapi:check": "bun run openapi:lint && node scripts/generate-openapi-client.mjs --check",
     "openapi:contract": "bun run --cwd apps/site test:contract",
     "openapi:sdk-test": "bun run --cwd packages/sdk test",
+    "sdk:integration-smoke": "node scripts/with-root-env.mjs --profile local bun scripts/sdk-integration-smoke.mjs",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
     "clean": "turbo clean"
