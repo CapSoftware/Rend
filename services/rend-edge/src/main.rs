@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::{
     Client as S3Client,
     config::{BehaviorVersion, Credentials, Region, RequestChecksumCalculation},
+    primitives::ByteStream,
 };
 use axum::{
     Json, Router,
@@ -20,6 +21,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use bytes::Bytes;
+use futures_util::stream;
 use rend_config::{
     ExpectedEdges, RendEnv, env_bool, env_duration_secs, env_path, env_socket_addr, env_string,
     env_u64, env_usize, load_dotenv, optional_env_url,
@@ -30,7 +33,12 @@ use rend_playback_auth::{
     SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncWriteExt, net::TcpListener, sync::Notify};
+use tokio::{
+    fs,
+    io::AsyncWriteExt,
+    net::TcpListener,
+    sync::{Notify, mpsc},
+};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -46,6 +54,9 @@ const DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_CACHE_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 const PLAYBACK_COOKIE_NAME: &str = "__rend_playback";
+const CACHE_METADATA_DIR_NAME: &str = ".rend-edge-cache-meta";
+const CACHE_METADATA_VERSION: u8 = 1;
+const FIRST_SEGMENT_KEEP_COUNT: u32 = 2;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -230,6 +241,8 @@ struct AppState {
     http: reqwest::Client,
     s3: S3Client,
     in_flight_fills: Arc<FillRegistry>,
+    active_streams: Arc<ActiveStreamRegistry>,
+    cache_maintenance: Arc<tokio::sync::Mutex<()>>,
     metrics: Arc<EdgeMetrics>,
     telemetry: telemetry::TelemetryHandle,
     started_at: Instant,
@@ -382,7 +395,7 @@ struct PlaybackQuery {
     token: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PlaybackArtifact {
     object_key: String,
     cache_key: String,
@@ -405,11 +418,25 @@ struct FillRegistry {
 }
 
 #[derive(Default)]
+struct ActiveStreamRegistry {
+    streams: std::sync::Mutex<HashMap<String, ActiveStreamEntry>>,
+}
+
+#[derive(Default)]
+struct ActiveStreamEntry {
+    count: u64,
+    reserved_bytes: u64,
+}
+
+#[derive(Default)]
 struct EdgeMetrics {
     cache_hit: std::sync::atomic::AtomicU64,
     cache_miss: std::sync::atomic::AtomicU64,
     cache_coalesced: std::sync::atomic::AtomicU64,
     cache_error: std::sync::atomic::AtomicU64,
+    cache_evictions: std::sync::atomic::AtomicU64,
+    cache_evicted_bytes: std::sync::atomic::AtomicU64,
+    cache_eviction_errors: std::sync::atomic::AtomicU64,
 }
 
 struct InFlightFill {
@@ -433,6 +460,57 @@ struct FillLeaderGuard {
     cache_key: String,
     fill: Arc<InFlightFill>,
     completed: bool,
+}
+
+struct ActiveStreamGuard {
+    registry: Arc<ActiveStreamRegistry>,
+    cache_key: String,
+    reserved_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CacheArtifactType {
+    Opener,
+    Manifest,
+    Segment,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheObjectMetadata {
+    version: u8,
+    cache_key: String,
+    size_bytes: u64,
+    last_access_unix_ms: u64,
+    artifact_type: CacheArtifactType,
+    priority: u16,
+    segment_index: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheEvictionCandidate {
+    cache_key: String,
+    path: PathBuf,
+    metadata_path: PathBuf,
+    size_bytes: u64,
+    last_access_unix_ms: u64,
+    priority: u16,
+    segment_index: Option<u32>,
+}
+
+struct PreparedCacheWrite {
+    cache_path: PathBuf,
+    temp_path: PathBuf,
+    file: fs::File,
+    reserved_bytes: u64,
+    active_guard: Option<ActiveStreamGuard>,
+}
+
+struct OriginCacheStream {
+    body: ByteStream,
+    content_length: Option<u64>,
+    cache_write: PreparedCacheWrite,
 }
 
 impl FillRegistry {
@@ -481,6 +559,52 @@ impl FillRegistry {
     }
 }
 
+impl ActiveStreamRegistry {
+    fn begin(self: &Arc<Self>, cache_key: &str, reserved_bytes: u64) -> ActiveStreamGuard {
+        let mut streams = lock_mutex(&self.streams);
+        let entry = streams.entry(cache_key.to_owned()).or_default();
+        entry.count = entry.count.saturating_add(1);
+        entry.reserved_bytes = entry.reserved_bytes.saturating_add(reserved_bytes);
+
+        ActiveStreamGuard {
+            registry: self.clone(),
+            cache_key: cache_key.to_owned(),
+            reserved_bytes,
+        }
+    }
+
+    fn end(&self, cache_key: &str, reserved_bytes: u64) {
+        let mut streams = lock_mutex(&self.streams);
+        let Some(entry) = streams.get_mut(cache_key) else {
+            return;
+        };
+        entry.count = entry.count.saturating_sub(1);
+        entry.reserved_bytes = entry.reserved_bytes.saturating_sub(reserved_bytes);
+        if entry.count == 0 {
+            streams.remove(cache_key);
+        }
+    }
+
+    fn keys(&self) -> HashSet<String> {
+        lock_mutex(&self.streams).keys().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        lock_mutex(&self.streams)
+            .values()
+            .map(|entry| usize::try_from(entry.count).unwrap_or(usize::MAX))
+            .sum()
+    }
+
+    fn reserved_bytes(&self) -> u64 {
+        lock_mutex(&self.streams)
+            .values()
+            .fold(0u64, |total, entry| {
+                total.saturating_add(entry.reserved_bytes)
+            })
+    }
+}
+
 impl InFlightFill {
     fn new() -> Self {
         Self {
@@ -526,6 +650,12 @@ impl Drop for FillLeaderGuard {
     }
 }
 
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.registry.end(&self.cache_key, self.reserved_bytes);
+    }
+}
+
 fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -563,6 +693,8 @@ async fn main() -> Result<()> {
         http,
         s3,
         in_flight_fills: Arc::new(FillRegistry::default()),
+        active_streams: Arc::new(ActiveStreamRegistry::default()),
+        cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
         started_at: Instant::now(),
@@ -846,6 +978,18 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
          # HELP rend_edge_in_flight_fills Current in-flight origin cache fills.\n\
          # TYPE rend_edge_in_flight_fills gauge\n\
          rend_edge_in_flight_fills{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_active_streamed_fills Current cold MISS fills streaming origin bytes to viewers while writing cache.\n\
+         # TYPE rend_edge_active_streamed_fills gauge\n\
+         rend_edge_active_streamed_fills{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_cache_evictions_total Cache objects evicted to enforce edge disk limits.\n\
+         # TYPE rend_edge_cache_evictions_total counter\n\
+         rend_edge_cache_evictions_total{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_cache_evicted_bytes_total Cache bytes evicted to enforce edge disk limits.\n\
+         # TYPE rend_edge_cache_evicted_bytes_total counter\n\
+         rend_edge_cache_evicted_bytes_total{{edge_id=\"{}\",region=\"{}\"}} {}\n\
+         # HELP rend_edge_cache_eviction_errors_total Cache eviction attempts that failed.\n\
+         # TYPE rend_edge_cache_eviction_errors_total counter\n\
+         rend_edge_cache_eviction_errors_total{{edge_id=\"{}\",region=\"{}\"}} {}\n\
          # HELP rend_edge_telemetry_events_total Playback telemetry events by pipeline state.\n\
          # TYPE rend_edge_telemetry_events_total counter\n\
          rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"queued\"}} {}\n\
@@ -875,6 +1019,18 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         edge_id,
         region,
         state.in_flight_fills.len(),
+        edge_id,
+        region,
+        state.active_streams.len(),
+        edge_id,
+        region,
+        state.metrics.cache_evictions.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.metrics.cache_evicted_bytes.load(Ordering::Relaxed),
+        edge_id,
+        region,
+        state.metrics.cache_eviction_errors.load(Ordering::Relaxed),
         edge_id,
         region,
         telemetry_counters.queued,
@@ -980,7 +1136,7 @@ async fn playback_inner(
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
-    if let Some(bytes) = read_cache_file(&cache_path).await? {
+    if let Some(bytes) = read_cache_artifact(&state, &artifact, &cache_path).await? {
         return Ok(artifact_bytes_response(&artifact, "HIT", bytes));
     }
 
@@ -989,20 +1145,11 @@ async fn playback_inner(
         .acquire(&artifact.cache_key, state.config.max_in_flight_fills)?
     {
         FillSlot::Leader(leader) => {
-            let result = fill_cache_from_origin(&state, &artifact, &cache_path).await;
-            let outcome = match &result {
-                Ok(_) => FillOutcome::Succeeded,
-                Err(error) => FillOutcome::Failed(error.clone()),
-            };
-            leader.complete(outcome);
-
-            result?;
-            let bytes = read_filled_cache_file(&cache_path).await?;
-            Ok(artifact_bytes_response(&artifact, "MISS", bytes))
+            stream_origin_artifact_response(state.clone(), artifact, cache_path, leader).await
         }
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
-            let bytes = read_filled_cache_file(&cache_path).await?;
+            let bytes = read_filled_cache_file(&state, &artifact, &cache_path).await?;
             Ok(artifact_bytes_response(&artifact, "COALESCED", bytes))
         }
     }
@@ -1050,9 +1197,24 @@ fn record_playback_telemetry(
         });
 }
 
-async fn read_cache_file(path: &FsPath) -> std::result::Result<Option<Vec<u8>>, PlaybackError> {
+async fn read_cache_artifact(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    path: &FsPath,
+) -> std::result::Result<Option<Vec<u8>>, PlaybackError> {
     match fs::read(path).await {
-        Ok(bytes) => Ok(Some(bytes)),
+        Ok(bytes) => {
+            if let Err(error) =
+                touch_cache_metadata(state, &artifact.cache_key, bytes.len() as u64).await
+            {
+                tracing::warn!(
+                    cache_key = %artifact.cache_key,
+                    error = %error.log_message(),
+                    "failed to update edge cache metadata after hit",
+                );
+            }
+            Ok(Some(bytes))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(PlaybackError::Io(format!(
             "failed to read cached artifact {}: {error}",
@@ -1061,22 +1223,19 @@ async fn read_cache_file(path: &FsPath) -> std::result::Result<Option<Vec<u8>>, 
     }
 }
 
-async fn read_filled_cache_file(path: &FsPath) -> std::result::Result<Vec<u8>, PlaybackError> {
-    read_cache_file(path).await?.ok_or_else(|| {
-        PlaybackError::Io(format!(
-            "filled cache artifact {} was missing before it could be served",
-            path.display()
-        ))
-    })
-}
-
-async fn fill_cache_from_origin(
+async fn read_filled_cache_file(
     state: &AppState,
     artifact: &PlaybackArtifact,
-    cache_path: &FsPath,
-) -> std::result::Result<(), PlaybackError> {
-    let bytes = fetch_origin_artifact(state, artifact).await?;
-    write_cache_file(state, cache_path, &bytes).await
+    path: &FsPath,
+) -> std::result::Result<Vec<u8>, PlaybackError> {
+    read_cache_artifact(state, artifact, path)
+        .await?
+        .ok_or_else(|| {
+            PlaybackError::Io(format!(
+                "filled cache artifact {} was missing before it could be served",
+                path.display()
+            ))
+        })
 }
 
 async fn wait_for_coalesced_fill(
@@ -1100,6 +1259,175 @@ fn artifact_bytes_response(
         Body::from(bytes),
         content_length,
     )
+}
+
+async fn stream_origin_artifact_response(
+    state: Arc<AppState>,
+    artifact: PlaybackArtifact,
+    cache_path: PathBuf,
+    leader: FillLeaderGuard,
+) -> std::result::Result<Response, PlaybackError> {
+    let stream = match prepare_streamed_origin_fill(&state, &artifact, cache_path).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            leader.complete(FillOutcome::Failed(error.clone()));
+            return Err(error);
+        }
+    };
+
+    let content_length = stream.content_length;
+    let (sender, receiver) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(run_streamed_cache_fill(
+        state,
+        artifact.clone(),
+        stream,
+        sender,
+        leader,
+    ));
+    let body_stream = stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|item| (item, receiver))
+    });
+
+    Ok(artifact_response(
+        artifact.content_type,
+        "MISS",
+        Body::from_stream(body_stream),
+        content_length,
+    ))
+}
+
+async fn prepare_streamed_origin_fill(
+    state: &Arc<AppState>,
+    artifact: &PlaybackArtifact,
+    cache_path: PathBuf,
+) -> std::result::Result<OriginCacheStream, PlaybackError> {
+    let object = state
+        .s3
+        .get_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&artifact.object_key)
+        .send()
+        .await
+        .map_err(|error| origin_get_error(artifact, error))?;
+    let content_length = object
+        .content_length()
+        .map(|value| u64::try_from(value).unwrap_or(u64::MAX));
+    if let Some(content_length) = content_length {
+        ensure_origin_artifact_size_allowed(state, &artifact.object_key, content_length)?;
+        ensure_cache_object_size_allowed(state, content_length)?;
+    }
+
+    let active_guard = state
+        .active_streams
+        .begin(&artifact.cache_key, content_length.unwrap_or(0));
+    let _maintenance = state.cache_maintenance.lock().await;
+    let cache_write = match prepare_cache_write(
+        state,
+        &artifact.cache_key,
+        cache_path,
+        0,
+        content_length.unwrap_or(0),
+        Some(active_guard),
+    )
+    .await
+    {
+        Ok(cache_write) => cache_write,
+        Err(error) => return Err(error),
+    };
+
+    Ok(OriginCacheStream {
+        body: object.body,
+        content_length,
+        cache_write,
+    })
+}
+
+async fn run_streamed_cache_fill(
+    state: Arc<AppState>,
+    artifact: PlaybackArtifact,
+    stream: OriginCacheStream,
+    sender: mpsc::Sender<std::result::Result<Bytes, std::io::Error>>,
+    leader: FillLeaderGuard,
+) {
+    let result = write_streamed_origin_to_cache(&state, &artifact, stream, &sender).await;
+    if let Err(error) = &result {
+        let _ = sender
+            .send(Err(std::io::Error::other(error.log_message())))
+            .await;
+    }
+
+    let outcome = match result {
+        Ok(()) => FillOutcome::Succeeded,
+        Err(error) => FillOutcome::Failed(error),
+    };
+    leader.complete(outcome);
+}
+
+async fn write_streamed_origin_to_cache(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    mut stream: OriginCacheStream,
+    sender: &mpsc::Sender<std::result::Result<Bytes, std::io::Error>>,
+) -> std::result::Result<(), PlaybackError> {
+    let mut bytes_written = 0u64;
+    loop {
+        let chunk = match stream.body.try_next().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                let playback_error = PlaybackError::Origin(format!(
+                    "failed to read artifact {} from origin: {error}",
+                    artifact.object_key
+                ));
+                cleanup_prepared_cache_write(stream.cache_write).await;
+                return Err(playback_error);
+            }
+        };
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let next_size = bytes_written.saturating_add(chunk_len);
+        if let Err(error) =
+            ensure_origin_artifact_size_allowed(state, &artifact.object_key, next_size)
+        {
+            cleanup_prepared_cache_write(stream.cache_write).await;
+            return Err(error);
+        }
+        if let Err(error) =
+            ensure_streamed_cache_size_allowed(state, &stream.cache_write, next_size).await
+        {
+            cleanup_prepared_cache_write(stream.cache_write).await;
+            return Err(error);
+        }
+
+        let _ = sender.send(Ok(chunk.clone())).await;
+        if let Err(error) = stream.cache_write.file.write_all(&chunk).await {
+            let playback_error = PlaybackError::Io(format!(
+                "failed to write cache file {}: {error}",
+                stream.cache_write.cache_path.display()
+            ));
+            cleanup_prepared_cache_write(stream.cache_write).await;
+            return Err(playback_error);
+        }
+        bytes_written = next_size;
+    }
+
+    if let Some(expected) = stream.content_length
+        && bytes_written != expected
+    {
+        let playback_error = PlaybackError::Origin(format!(
+            "artifact {} ended after {bytes_written} bytes, expected {expected}",
+            artifact.object_key
+        ));
+        cleanup_prepared_cache_write(stream.cache_write).await;
+        return Err(playback_error);
+    }
+
+    commit_prepared_cache_write(
+        state,
+        &artifact.cache_key,
+        stream.cache_write,
+        bytes_written,
+    )
+    .await
 }
 
 async fn warm(State(state): State<Arc<AppState>>, Json(request): Json<WarmRequest>) -> Response {
@@ -1301,10 +1629,17 @@ async fn purge_artifact(
 ) {
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
     match fs::remove_file(&cache_path).await {
-        Ok(()) => response.purged.push(PurgeEntryResponse {
-            artifact_path,
-            cache_key: artifact.cache_key,
-        }),
+        Ok(()) => {
+            let _ = fs::remove_file(cache_metadata_path(
+                &state.config.cache_dir,
+                &artifact.cache_key,
+            ))
+            .await;
+            response.purged.push(PurgeEntryResponse {
+                artifact_path,
+                cache_key: artifact.cache_key,
+            });
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             response.missing.push(PurgeEntryResponse {
                 artifact_path,
@@ -1566,22 +1901,7 @@ async fn fetch_origin_artifact(
         .key(&artifact.object_key)
         .send()
         .await
-        .map_err(|error| {
-            if error
-                .as_service_error()
-                .is_some_and(|service_error| service_error.is_no_such_key())
-            {
-                PlaybackError::OriginNotFound(format!(
-                    "artifact {} was not found in origin",
-                    artifact.object_key
-                ))
-            } else {
-                PlaybackError::Origin(format!(
-                    "failed to fetch artifact {} from origin: {error}",
-                    artifact.object_key
-                ))
-            }
-        })?;
+        .map_err(|error| origin_get_error(artifact, error))?;
     if let Some(content_length) = object.content_length() {
         ensure_origin_artifact_size_allowed(
             state,
@@ -1606,6 +1926,26 @@ async fn fetch_origin_artifact(
     Ok(bytes.to_vec())
 }
 
+fn origin_get_error<R>(
+    artifact: &PlaybackArtifact,
+    error: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError, R>,
+) -> PlaybackError {
+    if error
+        .as_service_error()
+        .is_some_and(|service_error| service_error.is_no_such_key())
+    {
+        PlaybackError::OriginNotFound(format!(
+            "artifact {} was not found in origin",
+            artifact.object_key
+        ))
+    } else {
+        PlaybackError::Origin(format!(
+            "failed to fetch artifact {} from origin: {error}",
+            artifact.object_key
+        ))
+    }
+}
+
 fn ensure_origin_artifact_size_allowed(
     state: &AppState,
     object_key: &str,
@@ -1626,10 +1966,72 @@ async fn write_cache_file(
     path: &FsPath,
     bytes: &[u8],
 ) -> std::result::Result<(), PlaybackError> {
-    ensure_cache_write_allowed(state, bytes.len()).await?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| PlaybackError::Io(format!("cache path {} has no parent", path.display())))?;
+    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    ensure_cache_object_size_allowed(state, byte_len)?;
+    let _maintenance = state.cache_maintenance.lock().await;
+    let mut prepared = prepare_cache_write(
+        state,
+        &path_relative_to_cache(&state.config.cache_dir, path),
+        path.to_path_buf(),
+        byte_len,
+        byte_len,
+        None,
+    )
+    .await?;
+    let write_result = async {
+        prepared.file.write_all(bytes).await?;
+        Ok::<_, std::io::Error>(())
+    }
+    .await;
+
+    if let Err(error) = write_result {
+        let display_path = prepared.cache_path.display().to_string();
+        cleanup_prepared_cache_write(prepared).await;
+        return Err(PlaybackError::Io(format!(
+            "failed to write cache file {display_path}: {error}"
+        )));
+    }
+
+    let cache_key = path_relative_to_cache(&state.config.cache_dir, path);
+    commit_prepared_cache_write(state, &cache_key, prepared, byte_len).await
+}
+
+fn ensure_cache_object_size_allowed(
+    state: &AppState,
+    byte_len: u64,
+) -> std::result::Result<(), PlaybackError> {
+    if let Some(max_bytes) = state.config.cache_max_bytes
+        && byte_len > max_bytes
+    {
+        return Err(PlaybackError::Overloaded(format!(
+            "edge cache size guard refused write: artifact {byte_len} bytes exceeds REND_EDGE_CACHE_MAX_BYTES ({max_bytes})"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn prepare_cache_write(
+    state: &AppState,
+    cache_key: &str,
+    cache_path: PathBuf,
+    additional_bytes: u64,
+    reserved_bytes: u64,
+    active_guard: Option<ActiveStreamGuard>,
+) -> std::result::Result<PreparedCacheWrite, PlaybackError> {
+    fs::create_dir_all(&state.config.cache_dir)
+        .await
+        .map_err(|error| {
+            PlaybackError::Io(format!(
+                "failed to create cache directory {}: {error}",
+                state.config.cache_dir.display()
+            ))
+        })?;
+    evict_for_cache_write(state, additional_bytes).await?;
+
+    let parent = cache_path.parent().ok_or_else(|| {
+        PlaybackError::Io(format!("cache path {} has no parent", cache_path.display()))
+    })?;
     fs::create_dir_all(parent).await.map_err(|error| {
         PlaybackError::Io(format!(
             "failed to create cache directory {}: {error}",
@@ -1639,77 +2041,200 @@ async fn write_cache_file(
 
     let temp_path = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name()
+        cache_path
+            .file_name()
             .and_then(|file_name| file_name.to_str())
             .unwrap_or("artifact"),
         temp_file_suffix()
     ));
+    let file = fs::File::create(&temp_path).await.map_err(|error| {
+        PlaybackError::Io(format!(
+            "failed to create cache temp file {} for {}: {error}",
+            temp_path.display(),
+            cache_key
+        ))
+    })?;
 
-    let write_result = async {
-        let mut file = fs::File::create(&temp_path).await?;
-        file.write_all(bytes).await?;
+    Ok(PreparedCacheWrite {
+        cache_path,
+        temp_path,
+        file,
+        reserved_bytes,
+        active_guard,
+    })
+}
+
+async fn ensure_streamed_cache_size_allowed(
+    state: &AppState,
+    prepared: &PreparedCacheWrite,
+    bytes_written: u64,
+) -> std::result::Result<(), PlaybackError> {
+    if prepared.reserved_bytes == 0 {
+        ensure_cache_object_size_allowed(state, bytes_written)?;
+        let _maintenance = state.cache_maintenance.lock().await;
+        evict_for_cache_write(state, bytes_written).await?;
+    }
+
+    Ok(())
+}
+
+async fn cleanup_prepared_cache_write(prepared: PreparedCacheWrite) {
+    let PreparedCacheWrite {
+        temp_path,
+        file,
+        active_guard: _active_guard,
+        ..
+    } = prepared;
+    drop(file);
+    let _ = fs::remove_file(temp_path).await;
+}
+
+async fn commit_prepared_cache_write(
+    state: &AppState,
+    cache_key: &str,
+    prepared: PreparedCacheWrite,
+    byte_len: u64,
+) -> std::result::Result<(), PlaybackError> {
+    let PreparedCacheWrite {
+        cache_path,
+        temp_path,
+        mut file,
+        active_guard: _active_guard,
+        ..
+    } = prepared;
+
+    let commit_result = async {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
-        fs::rename(&temp_path, path).await?;
+        fs::rename(&temp_path, &cache_path).await?;
         Ok::<_, std::io::Error>(())
     }
     .await;
 
-    if let Err(error) = write_result {
+    if let Err(error) = commit_result {
         let _ = fs::remove_file(&temp_path).await;
         return Err(PlaybackError::Io(format!(
             "failed to write cache file {}: {error}",
-            path.display()
+            cache_path.display()
         )));
+    }
+
+    if let Err(error) = write_cache_metadata(state, cache_key, byte_len, now_unix_ms()).await {
+        let _ = fs::remove_file(&cache_path).await;
+        return Err(error);
     }
 
     Ok(())
 }
 
-async fn ensure_cache_write_allowed(
+async fn evict_for_cache_write(
     state: &AppState,
-    byte_len: usize,
+    additional_bytes: u64,
 ) -> std::result::Result<(), PlaybackError> {
-    let byte_len = u64::try_from(byte_len).unwrap_or(u64::MAX);
-    fs::create_dir_all(&state.config.cache_dir)
-        .await
-        .map_err(|error| {
-            PlaybackError::Io(format!(
-                "failed to create cache directory {}: {error}",
-                state.config.cache_dir.display()
-            ))
-        })?;
+    let protected_keys = state.active_streams.keys();
+    let mut current_size = cache_dir_size_bytes(state.config.cache_dir.clone()).await?;
+    let mut available = cache_available_space(&state.config.cache_dir).await?;
+    let future_bytes = state
+        .active_streams
+        .reserved_bytes()
+        .saturating_add(additional_bytes);
+    let mut candidates =
+        collect_cache_eviction_candidates(state.config.cache_dir.clone(), protected_keys).await?;
+    candidates.sort_by(compare_eviction_candidates);
+
+    for candidate in candidates {
+        let projected_size = current_size.saturating_add(future_bytes);
+        let needs_size_eviction = state
+            .config
+            .cache_max_bytes
+            .is_some_and(|max_bytes| projected_size > max_bytes);
+        let needs_free_eviction =
+            available < future_bytes.saturating_add(state.config.cache_min_free_bytes);
+        if !needs_size_eviction && !needs_free_eviction {
+            break;
+        }
+
+        match remove_cache_candidate(state, &candidate).await {
+            Ok(true) => {
+                current_size = current_size.saturating_sub(candidate.size_bytes);
+                available = available.saturating_add(candidate.size_bytes);
+            }
+            Ok(false) => {}
+            Err(error) => return Err(error),
+        }
+    }
 
     if let Some(max_bytes) = state.config.cache_max_bytes {
-        let current_size = cache_dir_size_bytes(state.config.cache_dir.clone()).await?;
-        if current_size.saturating_add(byte_len) > max_bytes {
+        let projected_size = current_size.saturating_add(future_bytes);
+        if projected_size > max_bytes {
             return Err(PlaybackError::Overloaded(format!(
-                "edge cache size guard refused write: current {current_size} bytes + artifact {byte_len} bytes exceeds REND_EDGE_CACHE_MAX_BYTES ({max_bytes})"
+                "edge cache size guard refused write: current {current_size} bytes + reserved {future_bytes} bytes exceeds REND_EDGE_CACHE_MAX_BYTES ({max_bytes})"
             )));
         }
     }
 
-    let cache_dir = state.config.cache_dir.clone();
-    let min_free_bytes = state.config.cache_min_free_bytes;
-    let available = tokio::task::spawn_blocking(move || fs2::available_space(cache_dir))
-        .await
-        .map_err(|error| PlaybackError::Io(format!("failed to join free-space check: {error}")))?
-        .map_err(|error| {
-            PlaybackError::Io(format!("failed to inspect cache free space: {error}"))
-        })?;
-    if available < byte_len.saturating_add(min_free_bytes) {
+    let required_available = future_bytes.saturating_add(state.config.cache_min_free_bytes);
+    if available < required_available {
         return Err(PlaybackError::Overloaded(format!(
-            "edge cache free-space guard refused write: available {available} bytes, artifact {byte_len} bytes, reserve {min_free_bytes} bytes"
+            "edge cache free-space guard refused write: available {available} bytes, required {future_bytes} bytes, reserve {} bytes",
+            state.config.cache_min_free_bytes
         )));
     }
 
     Ok(())
 }
 
+async fn remove_cache_candidate(
+    state: &AppState,
+    candidate: &CacheEvictionCandidate,
+) -> std::result::Result<bool, PlaybackError> {
+    match fs::remove_file(&candidate.path).await {
+        Ok(()) => {
+            let _ = fs::remove_file(&candidate.metadata_path).await;
+            state
+                .metrics
+                .cache_evictions
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .metrics
+                .cache_evicted_bytes
+                .fetch_add(candidate.size_bytes, Ordering::Relaxed);
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            state
+                .metrics
+                .cache_eviction_errors
+                .fetch_add(1, Ordering::Relaxed);
+            Err(PlaybackError::Io(format!(
+                "failed to evict cache file {}: {error}",
+                candidate.path.display()
+            )))
+        }
+    }
+}
+
+fn compare_eviction_candidates(
+    left: &CacheEvictionCandidate,
+    right: &CacheEvictionCandidate,
+) -> std::cmp::Ordering {
+    left.priority
+        .cmp(&right.priority)
+        .then_with(|| left.last_access_unix_ms.cmp(&right.last_access_unix_ms))
+        .then_with(|| {
+            right
+                .segment_index
+                .unwrap_or(0)
+                .cmp(&left.segment_index.unwrap_or(0))
+        })
+        .then_with(|| left.cache_key.cmp(&right.cache_key))
+}
+
 async fn cache_dir_size_bytes(cache_dir: PathBuf) -> std::result::Result<u64, PlaybackError> {
     let display_path = cache_dir.display().to_string();
-    tokio::task::spawn_blocking(move || dir_size_bytes(&cache_dir))
+    tokio::task::spawn_blocking(move || dir_size_bytes(&cache_dir, &cache_dir))
         .await
         .map_err(|error| PlaybackError::Io(format!("failed to join cache size check: {error}")))?
         .map_err(|error| {
@@ -1719,7 +2244,39 @@ async fn cache_dir_size_bytes(cache_dir: PathBuf) -> std::result::Result<u64, Pl
         })
 }
 
-fn dir_size_bytes(path: &FsPath) -> std::io::Result<u64> {
+async fn cache_available_space(cache_dir: &FsPath) -> std::result::Result<u64, PlaybackError> {
+    let cache_dir = cache_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || fs2::available_space(cache_dir))
+        .await
+        .map_err(|error| PlaybackError::Io(format!("failed to join free-space check: {error}")))?
+        .map_err(|error| PlaybackError::Io(format!("failed to inspect cache free space: {error}")))
+}
+
+async fn collect_cache_eviction_candidates(
+    cache_dir: PathBuf,
+    protected_keys: HashSet<String>,
+) -> std::result::Result<Vec<CacheEvictionCandidate>, PlaybackError> {
+    let display_path = cache_dir.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut candidates = Vec::new();
+        collect_cache_eviction_candidates_sync(
+            &cache_dir,
+            &cache_dir,
+            &protected_keys,
+            &mut candidates,
+        )?;
+        Ok::<_, std::io::Error>(candidates)
+    })
+    .await
+    .map_err(|error| PlaybackError::Io(format!("failed to join cache eviction scan: {error}")))?
+    .map_err(|error| {
+        PlaybackError::Io(format!(
+            "failed to inspect cache directory {display_path}: {error}"
+        ))
+    })
+}
+
+fn dir_size_bytes(cache_dir: &FsPath, path: &FsPath) -> std::io::Result<u64> {
     let mut total = 0u64;
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
@@ -1729,15 +2286,248 @@ fn dir_size_bytes(path: &FsPath) -> std::io::Result<u64> {
 
     for entry in entries {
         let entry = entry?;
+        let path = entry.path();
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            total = total.saturating_add(dir_size_bytes(&entry.path())?);
-        } else if metadata.is_file() {
+            if is_cache_metadata_path(cache_dir, &path) {
+                continue;
+            }
+            total = total.saturating_add(dir_size_bytes(cache_dir, &path)?);
+        } else if metadata.is_file() && should_count_cache_file(cache_dir, &path) {
             total = total.saturating_add(metadata.len());
         }
     }
 
     Ok(total)
+}
+
+fn collect_cache_eviction_candidates_sync(
+    cache_dir: &FsPath,
+    path: &FsPath,
+    protected_keys: &HashSet<String>,
+    candidates: &mut Vec<CacheEvictionCandidate>,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            if !is_cache_metadata_path(cache_dir, &path) {
+                collect_cache_eviction_candidates_sync(
+                    cache_dir,
+                    &path,
+                    protected_keys,
+                    candidates,
+                )?;
+            }
+            continue;
+        }
+
+        if !metadata.is_file() || !should_count_cache_file(cache_dir, &path) {
+            continue;
+        }
+
+        let Some(cache_key) = path
+            .strip_prefix(cache_dir)
+            .ok()
+            .and_then(path_to_slash_string)
+        else {
+            continue;
+        };
+        if protected_keys.contains(&cache_key) {
+            continue;
+        }
+
+        let metadata_path = cache_metadata_path(cache_dir, &cache_key);
+        let last_access_unix_ms = file_modified_unix_ms(&metadata).unwrap_or_default();
+        let cache_metadata =
+            read_cache_metadata_sync(&metadata_path, &cache_key).unwrap_or_else(|| {
+                derive_cache_metadata(&cache_key, metadata.len(), last_access_unix_ms)
+            });
+        candidates.push(CacheEvictionCandidate {
+            cache_key,
+            path,
+            metadata_path,
+            size_bytes: metadata.len(),
+            last_access_unix_ms: cache_metadata.last_access_unix_ms,
+            priority: cache_metadata.priority,
+            segment_index: cache_metadata.segment_index,
+        });
+    }
+
+    Ok(())
+}
+
+fn is_cache_metadata_path(cache_dir: &FsPath, path: &FsPath) -> bool {
+    path.starts_with(cache_metadata_root(cache_dir))
+}
+
+fn should_count_cache_file(cache_dir: &FsPath, path: &FsPath) -> bool {
+    !is_cache_metadata_path(cache_dir, path) && !is_hidden_cache_file(path)
+}
+
+fn is_hidden_cache_file(path: &FsPath) -> bool {
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .is_some_and(|file_name| file_name.starts_with('.'))
+}
+
+fn cache_metadata_root(cache_dir: &FsPath) -> PathBuf {
+    cache_dir.join(CACHE_METADATA_DIR_NAME)
+}
+
+fn cache_metadata_path(cache_dir: &FsPath, cache_key: &str) -> PathBuf {
+    cache_metadata_root(cache_dir).join(format!("{cache_key}.json"))
+}
+
+fn read_cache_metadata_sync(path: &FsPath, cache_key: &str) -> Option<CacheObjectMetadata> {
+    let bytes = std::fs::read(path).ok()?;
+    let metadata = serde_json::from_slice::<CacheObjectMetadata>(&bytes).ok()?;
+    (metadata.version == CACHE_METADATA_VERSION && metadata.cache_key == cache_key)
+        .then_some(metadata)
+}
+
+async fn touch_cache_metadata(
+    state: &AppState,
+    cache_key: &str,
+    size_bytes: u64,
+) -> std::result::Result<(), PlaybackError> {
+    write_cache_metadata(state, cache_key, size_bytes, now_unix_ms()).await
+}
+
+async fn write_cache_metadata(
+    state: &AppState,
+    cache_key: &str,
+    size_bytes: u64,
+    last_access_unix_ms: u64,
+) -> std::result::Result<(), PlaybackError> {
+    let metadata = derive_cache_metadata(cache_key, size_bytes, last_access_unix_ms);
+    let metadata_path = cache_metadata_path(&state.config.cache_dir, cache_key);
+    let parent = metadata_path.parent().ok_or_else(|| {
+        PlaybackError::Io(format!(
+            "cache metadata path {} has no parent",
+            metadata_path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).await.map_err(|error| {
+        PlaybackError::Io(format!(
+            "failed to create cache metadata directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        metadata_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("metadata"),
+        temp_file_suffix()
+    ));
+    let bytes = serde_json::to_vec(&metadata).map_err(|error| {
+        PlaybackError::Io(format!("failed to serialize cache metadata: {error}"))
+    })?;
+
+    let write_result = async {
+        let mut file = fs::File::create(&temp_path).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&temp_path, &metadata_path).await?;
+        Ok::<_, std::io::Error>(())
+    }
+    .await;
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(PlaybackError::Io(format!(
+            "failed to write cache metadata {}: {error}",
+            metadata_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn derive_cache_metadata(
+    cache_key: &str,
+    size_bytes: u64,
+    last_access_unix_ms: u64,
+) -> CacheObjectMetadata {
+    let (artifact_type, segment_index) = cache_artifact_type(cache_key);
+    CacheObjectMetadata {
+        version: CACHE_METADATA_VERSION,
+        cache_key: cache_key.to_owned(),
+        size_bytes,
+        last_access_unix_ms,
+        artifact_type,
+        priority: cache_artifact_priority(artifact_type, segment_index),
+        segment_index,
+    }
+}
+
+fn cache_artifact_type(cache_key: &str) -> (CacheArtifactType, Option<u32>) {
+    match cache_key.split('/').collect::<Vec<_>>().as_slice() {
+        ["videos", asset_id, "opener.mp4"] if is_safe_asset_id(asset_id) => {
+            (CacheArtifactType::Opener, None)
+        }
+        ["videos", asset_id, "hls", "master.m3u8"] if is_safe_asset_id(asset_id) => {
+            (CacheArtifactType::Manifest, None)
+        }
+        ["videos", asset_id, "hls", segment_name]
+            if is_safe_asset_id(asset_id) && is_valid_hls_segment_name(segment_name) =>
+        {
+            (
+                CacheArtifactType::Segment,
+                segment_index_from_name(segment_name),
+            )
+        }
+        _ => (CacheArtifactType::Unknown, None),
+    }
+}
+
+fn cache_artifact_priority(artifact_type: CacheArtifactType, segment_index: Option<u32>) -> u16 {
+    match artifact_type {
+        CacheArtifactType::Opener => 1000,
+        CacheArtifactType::Manifest => 900,
+        CacheArtifactType::Segment
+            if segment_index.is_some_and(|index| index < FIRST_SEGMENT_KEEP_COUNT) =>
+        {
+            800
+        }
+        CacheArtifactType::Segment => 400,
+        CacheArtifactType::Unknown => 0,
+    }
+}
+
+fn segment_index_from_name(segment_name: &str) -> Option<u32> {
+    segment_name
+        .strip_prefix("segment_")?
+        .strip_suffix(".ts")?
+        .parse::<u32>()
+        .ok()
+}
+
+fn file_modified_unix_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 fn temp_file_suffix() -> String {
