@@ -132,11 +132,9 @@ wait_for_edge_fanout_event "$asset_id" "edge.warming_succeeded"
 
 bootstrap_response="$tmp_dir/bootstrap.json"
 fetch_playback_bootstrap "$asset_id" "$bootstrap_response"
-playback_url="$(playback_url_from_bootstrap "$bootstrap_response")"
-token="$(playback_token_from_url "$playback_url")"
 
-us_east_url="$edge_us_east_base/v/$asset_id/hls/master.m3u8?token=$token"
-london_url="$edge_london_base/v/$asset_id/hls/master.m3u8?token=$token"
+us_east_url="$edge_us_east_base/v/$asset_id/hls/master.m3u8"
+london_url="$edge_london_base/v/$asset_id/hls/master.m3u8"
 
 fetch_and_expect_cache "us-east-warmed-hit" "$us_east_url" "HIT" "$tmp_dir/us-east.body"
 fetch_and_expect_cache "london-warmed-hit" "$london_url" "HIT" "$tmp_dir/london.body"

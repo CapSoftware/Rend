@@ -168,21 +168,14 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     response = json.load(f)
 opener_url = response.get("opener_url", "")
 if not opener_url:
-    token = response.get("playback_token", "")
-    if not token:
-        playback_url = response.get("playback_url", "")
-        marker = "?token="
-        if marker not in playback_url:
-            raise SystemExit("bootstrap response missing signed opener_url and token")
-        token = playback_url.split(marker, 1)[1]
-    opener_url = f"{sys.argv[2]}/v/{sys.argv[3]}/opener.mp4?token={token}"
+    opener_url = f"{sys.argv[2]}/v/{sys.argv[3]}/opener.mp4"
 print(opener_url)
 PY
 )"
 
-expected_opener_prefix="$edge_base/v/$asset_id/opener.mp4?token="
-if [[ "$opener_url" != "$expected_opener_prefix"* ]]; then
-  echo "expected signed opener_url at $expected_opener_prefix" >&2
+expected_opener_url="$edge_base/v/$asset_id/opener.mp4"
+if [[ "$opener_url" != "$expected_opener_url" ]]; then
+  echo "expected tokenless opener_url at $expected_opener_url" >&2
   echo "got $opener_url" >&2
   exit 1
 fi
@@ -235,7 +228,7 @@ fetch_concurrent_batch() {
   local -a pids=()
   for index in $(seq 1 "$count"); do
     (
-      curl -sS -D "$batch_dir/$index.headers" -o "$batch_dir/$index.body" \
+      curl -sS -b "$(playback_cookie_jar)" -D "$batch_dir/$index.headers" -o "$batch_dir/$index.body" \
         -w "%{http_code}" "$opener_url" >"$batch_dir/$index.code"
     ) &
     pids+=("$!")
@@ -328,7 +321,7 @@ fi
 
 later_headers="$tmp_dir/later-hit.headers"
 later_body="$tmp_dir/later-hit.body"
-later_code="$(curl -sS -D "$later_headers" -o "$later_body" -w "%{http_code}" "$opener_url")"
+later_code="$(curl -sS -b "$(playback_cookie_jar)" -D "$later_headers" -o "$later_body" -w "%{http_code}" "$opener_url")"
 if [[ "$later_code" != "200" ]]; then
   echo "later opener fetch expected HTTP 200, got $later_code" >&2
   cat "$later_body" >&2 || true

@@ -49,7 +49,7 @@ Options:
   --api-base URL              API base URL. Default: http://127.0.0.1:4000.
   --edge-base URL             Public edge base URL. May be repeated. Defaults to REND_EXPECTED_EDGES when set, else http://127.0.0.1:4100.
   --edge-internal-base URL    Private edge base URL for readyz, warm, and metrics. May be repeated in the same order as --edge-base.
-  --asset-id ID               Existing hls_ready asset id for signed playback smoke.
+  --asset-id ID               Existing hls_ready asset id for playback smoke.
   --dev-api-key KEY           API bearer key for asset and analytics endpoints.
   --database-url URL          Optional Postgres URL for edge registry visibility.
   --edge-id ID                Edge id to verify in registry.
@@ -65,7 +65,7 @@ Options:
   --rewrite-playback-base     Rewrite API playback URL host to --edge-base before fetching.
   --skip-registration         Skip edge registration visibility check.
   --skip-public-deny          Skip public deny-surface checks for local direct-edge verification.
-  --skip-playback             Skip signed playback and analytics checks.
+  --skip-playback             Skip playback and analytics checks.
   --skip-analytics            Skip analytics increase check after playback.
   -h, --help                  Show this help.
 
@@ -650,15 +650,15 @@ fetch_edge_metrics() {
 
 check_playback_and_analytics() {
   if [[ "$skip_playback" == "true" ]]; then
-    operator_warn "skipping signed playback and analytics checks"
+    operator_warn "skipping playback and analytics checks"
     return 0
   fi
   if [[ -z "$asset_id" ]]; then
-    operator_fail "signed playback smoke requires --asset-id"
+    operator_fail "playback smoke requires --asset-id"
     return 0
   fi
   if [[ -z "$dev_api_key" ]]; then
-    operator_fail "signed playback smoke requires --dev-api-key or --api-env"
+    operator_fail "playback smoke requires --dev-api-key or --api-env"
     return 0
   fi
   if [[ -z "$edge_internal_token" ]]; then
@@ -666,20 +666,28 @@ check_playback_and_analytics() {
     return 0
   fi
 
-  local before_count bootstrap_file status_code playback_url artifact_path analytics_file
+  local before_count bootstrap_file cookie_file playback_cookie_header status_code playback_url artifact_path analytics_file
   local index edge_label public_base private_base payload body_file headers_file cache_header playback_target
   local successes expected_count after_count metrics_file dropped_before dropped_after spool_bytes
   analytics_file="$tmp_dir/analytics-before.json"
   before_count="$(analytics_count "$asset_id" "$analytics_file")"
 
   bootstrap_file="$tmp_dir/playback-bootstrap.json"
+  cookie_file="$tmp_dir/playback.cookies"
   status_code="$(
-    curl -sS --max-time 15 -o "$bootstrap_file" -w "%{http_code}" \
+    curl -sS --max-time 15 -c "$cookie_file" -o "$bootstrap_file" -w "%{http_code}" \
       "$api_base/v1/assets/$asset_id/playback" \
       -H "authorization: Bearer $dev_api_key"
   )"
   if [[ "$status_code" != "200" ]]; then
     operator_fail "playback bootstrap failed with HTTP $status_code: $(cat "$bootstrap_file")"
+    return 0
+  fi
+  playback_cookie_header="$(
+    awk '$6 == "__rend_playback" { print "Cookie: __rend_playback=" $7; exit }' "$cookie_file"
+  )"
+  if [[ -z "$playback_cookie_header" ]]; then
+    operator_fail "playback bootstrap did not set playback cookie"
     return 0
   fi
 
@@ -725,13 +733,13 @@ check_playback_and_analytics() {
 
     headers_file="$tmp_dir/playback-$index.headers"
     body_file="$tmp_dir/playback-$index.body"
-    status_code="$(curl -sS --max-time 20 -D "$headers_file" -o "$body_file" -w "%{http_code}" "$playback_target" || true)"
+    status_code="$(curl -sS --max-time 20 -H "$playback_cookie_header" -D "$headers_file" -o "$body_file" -w "%{http_code}" "$playback_target" || true)"
     if [[ "$status_code" != "200" ]]; then
-      operator_fail "$edge_label signed playback fetch failed with HTTP $status_code"
+      operator_fail "$edge_label playback fetch failed with HTTP $status_code"
       continue
     fi
     if [[ ! -s "$body_file" ]]; then
-      operator_fail "$edge_label signed playback response body was empty"
+      operator_fail "$edge_label playback response body was empty"
       continue
     fi
     cache_header="$(header_value "$headers_file" "x-rend-cache")"
@@ -739,7 +747,7 @@ check_playback_and_analytics() {
       operator_fail "$edge_label warmed playback expected X-Rend-Cache=HIT, got ${cache_header:-missing}"
       continue
     fi
-    operator_ok "$edge_label warmed signed playback HIT passed"
+    operator_ok "$edge_label warmed playback HIT passed"
     successes=$((successes + 1))
 
     for _ in $(seq 1 90); do

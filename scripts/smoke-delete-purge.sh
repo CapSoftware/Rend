@@ -194,15 +194,16 @@ playback_url="$(
   playback_url_from_bootstrap "$bootstrap_response"
 )"
 
-expected_playback_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
-if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
-  echo "expected signed HLS playback_url for asset $asset_id at the edge manifest path" >&2
+expected_playback_url="$edge_base/v/$asset_id/hls/master.m3u8"
+if [[ "$playback_url" != "$expected_playback_url" ]]; then
+  echo "expected tokenless HLS playback_url for asset $asset_id at the edge manifest path" >&2
+  echo "got $playback_url" >&2
   exit 1
 fi
 
 manifest_cache_path="$edge_cache_root/videos/$asset_id/hls/master.m3u8"
 manifest_body="$tmp_dir/manifest.body"
-status_code="$(curl -sS -o "$manifest_body" -w "%{http_code}" "$playback_url")"
+status_code="$(curl -sS -b "$(playback_cookie_jar)" -o "$manifest_body" -w "%{http_code}" "$playback_url")"
 if [[ "$status_code" != "200" ]]; then
   echo "edge playback fetch expected HTTP 200, got $status_code" >&2
   cat "$manifest_body" >&2 || true
@@ -212,11 +213,10 @@ if ! edge_cache_exists "$manifest_cache_path"; then
   echo "expected edge playback fetch to populate $manifest_cache_path" >&2
   exit 1
 fi
-token="${playback_url#*token=}"
-opener_url="$edge_base/v/$asset_id/opener.mp4?token=$token"
+opener_url="$edge_base/v/$asset_id/opener.mp4"
 opener_cache_path="$edge_cache_root/videos/$asset_id/opener.mp4"
 opener_body="$tmp_dir/opener.body"
-status_code="$(curl -sS -o "$opener_body" -w "%{http_code}" "$opener_url")"
+status_code="$(curl -sS -b "$(playback_cookie_jar)" -o "$opener_body" -w "%{http_code}" "$opener_url")"
 if [[ "$status_code" != "200" ]]; then
   echo "edge opener fetch expected HTTP 200, got $status_code" >&2
   cat "$opener_body" >&2 || true
@@ -240,10 +240,10 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 raise SystemExit("manifest did not contain a local .ts segment")
 PY
 )"
-segment_url="$edge_base/v/$asset_id/hls/$segment_name?token=$token"
+segment_url="$edge_base/v/$asset_id/hls/$segment_name"
 segment_cache_path="$edge_cache_root/videos/$asset_id/hls/$segment_name"
 segment_body="$tmp_dir/segment.body"
-status_code="$(curl -sS -o "$segment_body" -w "%{http_code}" "$segment_url")"
+status_code="$(curl -sS -b "$(playback_cookie_jar)" -o "$segment_body" -w "%{http_code}" "$segment_url")"
 if [[ "$status_code" != "200" ]]; then
   echo "edge segment fetch expected HTTP 200, got $status_code" >&2
   cat "$segment_body" >&2 || true

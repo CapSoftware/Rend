@@ -162,15 +162,16 @@ playback_url="$(
   playback_url_from_bootstrap "$bootstrap_response"
 )"
 
-expected_playback_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
-if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
-  echo "expected signed HLS playback_url for asset $asset_id at the edge manifest path" >&2
+expected_playback_url="$edge_base/v/$asset_id/hls/master.m3u8"
+if [[ "$playback_url" != "$expected_playback_url" ]]; then
+  echo "expected tokenless HLS playback_url for asset $asset_id at the edge manifest path" >&2
+  echo "got $playback_url" >&2
   exit 1
 fi
 
-token="${playback_url#*\?token=}"
-if [[ "$token" == "$playback_url" || -z "$token" ]]; then
-  echo "playback_url did not include a token query parameter" >&2
+token="$(awk '$6 == "__rend_playback" { print $7; exit }' "$(playback_cookie_jar)")"
+if [[ -z "$token" ]]; then
+  echo "playback cookie jar did not include a playback token" >&2
   exit 1
 fi
 
@@ -199,7 +200,7 @@ fetch_once() {
   local headers_file="$tmp_dir/$label-$expected_cache.headers"
 
   local http_code
-  http_code="$(curl -sS -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
+  http_code="$(curl -sS -b "$(playback_cookie_jar)" -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
   if [[ "$http_code" != "200" ]]; then
     echo "$label fetch expected HTTP 200, got $http_code" >&2
     cat "$body_file" >&2 || true
@@ -264,7 +265,7 @@ tamper_token() {
   printf '%s%s' "${value:0:${#value}-1}" "$replacement"
 }
 
-opener_url="$edge_base/v/$asset_id/opener.mp4?token=$token"
+opener_url="$edge_base/v/$asset_id/opener.mp4"
 manifest_url="$playback_url"
 manifest_body="$tmp_dir/manifest-first.body"
 
@@ -287,7 +288,7 @@ raise SystemExit("manifest did not contain a local .ts segment")
 PY
 )"
 
-segment_url="$edge_base/v/$asset_id/hls/$segment_name?token=$token"
+segment_url="$edge_base/v/$asset_id/hls/$segment_name"
 fetch_twice "segment" "$segment_url" "video/mp2t"
 
 unsigned_manifest_url="$edge_base/v/$asset_id/hls/master.m3u8"
@@ -296,4 +297,4 @@ expect_rejected "missing-token" "$unsigned_manifest_url"
 expect_rejected "tampered-token" "$unsigned_manifest_url?token=$tampered_token"
 expect_rejected "wrong-asset-token" "$edge_base/v/00000000-0000-0000-0000-000000000000/hls/master.m3u8?token=$token"
 
-echo "signed playback edge cache smoke passed for asset $asset_id with segment $segment_name"
+echo "cookie playback edge cache smoke passed for asset $asset_id with segment $segment_name"

@@ -219,18 +219,21 @@ if response["playable_state"] != "hls_ready":
     raise SystemExit(f"expected playable_state hls_ready, got {response['playable_state']}")
 if response["ttl_seconds"] <= 0 or response["playback_token_expires_at"] <= 0:
     raise SystemExit("expected positive playback token ttl and expiry")
+encoded = json.dumps(response)
+if "?token=" in encoded or "playback_token" in response:
+    raise SystemExit("bootstrap response exposed a playback token")
 
-expected_manifest_prefix = f"{edge_base}/v/{asset_id}/hls/master.m3u8?token="
-if not response["playback_url"].startswith(expected_manifest_prefix):
-    raise SystemExit("playback_url did not use the signed rend-edge manifest shape")
+expected_manifest_url = f"{edge_base}/v/{asset_id}/hls/master.m3u8"
+if response["playback_url"] != expected_manifest_url:
+    raise SystemExit("playback_url did not use the tokenless rend-edge manifest shape")
 if response["manifest_url"] != response["playback_url"]:
     raise SystemExit("expected primary playback_url to match manifest_url for hls_ready asset")
 if response["playback_content_type"] != "application/vnd.apple.mpegurl":
     raise SystemExit(f"unexpected playback content type {response['playback_content_type']}")
 if response["manifest_content_type"] != "application/vnd.apple.mpegurl":
     raise SystemExit(f"unexpected manifest content type {response['manifest_content_type']}")
-if not response["opener_url"].startswith(f"{edge_base}/v/{asset_id}/opener.mp4?token="):
-    raise SystemExit("opener_url did not use the signed rend-edge opener shape")
+if response["opener_url"] != f"{edge_base}/v/{asset_id}/opener.mp4":
+    raise SystemExit("opener_url did not use the tokenless rend-edge opener shape")
 if response["opener_content_type"] != "video/mp4":
     raise SystemExit(f"unexpected opener content type {response['opener_content_type']}")
 
@@ -245,9 +248,9 @@ for hint in hints:
             raise SystemExit(f"prefetch hint missing {key}: {hint}")
     if not hint["artifact_path"].startswith("hls/segment_") or not hint["artifact_path"].endswith(".ts"):
         raise SystemExit(f"unexpected prefetch artifact path: {hint['artifact_path']}")
-    expected_prefix = f"{edge_base}/v/{asset_id}/{hint['artifact_path']}?token="
-    if not hint["url"].startswith(expected_prefix):
-        raise SystemExit(f"prefetch hint did not use signed rend-edge shape: {hint['url']}")
+    expected_url = f"{edge_base}/v/{asset_id}/{hint['artifact_path']}"
+    if hint["url"] != expected_url:
+        raise SystemExit(f"prefetch hint did not use tokenless rend-edge shape: {hint['url']}")
     if hint["content_type"] != "video/mp2t":
         raise SystemExit(f"unexpected prefetch content type: {hint['content_type']}")
 
@@ -269,9 +272,9 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 PY
 )"
 
-token="${playback_url#*\?token=}"
-if [[ "$token" == "$playback_url" || -z "$token" ]]; then
-  echo "playback_url did not include a token query parameter" >&2
+token="$(awk '$6 == "__rend_playback" { print $7; exit }' "$(playback_cookie_jar)")"
+if [[ -z "$token" ]]; then
+  echo "playback cookie jar did not include a playback token" >&2
   exit 1
 fi
 
@@ -300,7 +303,7 @@ fetch_artifact() {
   local body_file="$tmp_dir/$safe_label.body"
 
   local http_code
-  http_code="$(curl -sS -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
+  http_code="$(curl -sS -b "$(playback_cookie_jar)" -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
   if [[ "$http_code" != "200" ]]; then
     echo "$label fetch expected HTTP 200, got $http_code" >&2
     cat "$body_file" >&2 || true
@@ -354,9 +357,9 @@ tamper_token() {
   printf '%s%s' "${value:0:${#value}-1}" "$replacement"
 }
 
-unsigned_playback_url="${playback_url%%\?token=*}"
+unsigned_playback_url="$playback_url"
 tampered_token="$(tamper_token "$token")"
-tampered_playback_url="${playback_url//$token/$tampered_token}"
+tampered_playback_url="$playback_url?token=$tampered_token"
 
 expect_rejected "missing-token" "$unsigned_playback_url"
 expect_rejected "tampered-token" "$tampered_playback_url"

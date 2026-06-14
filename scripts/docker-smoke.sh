@@ -39,9 +39,9 @@ wait_for_asset_event "$asset_id" "edge.warming_succeeded"
 bootstrap_response="$tmp_dir/bootstrap.json"
 fetch_playback_bootstrap "$asset_id" "$bootstrap_response"
 playback_url="$(playback_url_from_bootstrap "$bootstrap_response")"
-expected_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
-if [[ "$playback_url" != "$expected_prefix"* ]]; then
-  echo "expected bootstrap playback_url to start with $expected_prefix" >&2
+expected_url="$edge_base/v/$asset_id/hls/master.m3u8"
+if [[ "$playback_url" != "$expected_url" ]]; then
+  echo "expected bootstrap playback_url to be $expected_url" >&2
   echo "got $playback_url" >&2
   exit 1
 fi

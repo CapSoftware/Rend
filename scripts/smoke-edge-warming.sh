@@ -166,15 +166,16 @@ playback_url="$(
   playback_url_from_bootstrap "$bootstrap_response"
 )"
 
-expected_playback_prefix="$edge_base/v/$asset_id/hls/master.m3u8?token="
-if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
-  echo "expected signed HLS playback_url for asset $asset_id at the edge manifest path" >&2
+expected_playback_url="$edge_base/v/$asset_id/hls/master.m3u8"
+if [[ "$playback_url" != "$expected_playback_url" ]]; then
+  echo "expected tokenless HLS playback_url for asset $asset_id at the edge manifest path" >&2
+  echo "got $playback_url" >&2
   exit 1
 fi
 
-token="${playback_url#*\?token=}"
-if [[ "$token" == "$playback_url" || -z "$token" ]]; then
-  echo "playback_url did not include a token query parameter" >&2
+token="$(awk '$6 == "__rend_playback" { print $7; exit }' "$(playback_cookie_jar)")"
+if [[ -z "$token" ]]; then
+  echo "playback cookie jar did not include a playback token" >&2
   exit 1
 fi
 
@@ -268,7 +269,7 @@ fetch_once() {
   local headers_file="$tmp_dir/$label-$expected_cache.headers"
 
   local http_code
-  http_code="$(curl -sS -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
+  http_code="$(curl -sS -b "$(playback_cookie_jar)" -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
   if [[ "$http_code" != "200" ]]; then
     echo "$label fetch expected HTTP 200, got $http_code" >&2
     cat "$body_file" >&2 || true
@@ -301,7 +302,7 @@ fetch_once() {
 expect_warm_rejected "missing-token" ""
 expect_warm_rejected "wrong-token" "wrong-token"
 
-opener_url="$edge_base/v/$asset_id/opener.mp4?token=$token"
+opener_url="$edge_base/v/$asset_id/opener.mp4"
 manifest_url="$playback_url"
 manifest_body="$tmp_dir/manifest-first.body"
 
@@ -325,7 +326,7 @@ PY
 )"
 
 warm_artifacts "segment" "hls/$segment_name"
-segment_url="$edge_base/v/$asset_id/hls/$segment_name?token=$token"
+segment_url="$edge_base/v/$asset_id/hls/$segment_name"
 fetch_once "segment-first" "$segment_url" "HIT" "video/mp2t" "$tmp_dir/segment-first.body"
 
 echo "edge warming smoke passed for asset $asset_id with warmed segment $segment_name"

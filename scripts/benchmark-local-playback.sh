@@ -158,6 +158,7 @@ fetch_timed() {
   local timing_file="$4"
 
   curl -sS --max-time "$curl_max_time_secs" \
+    -b "$(playback_cookie_jar)" \
     -D "$headers_file" \
     -o "$body_file" \
     -w "$curl_timing_format" \
@@ -642,9 +643,9 @@ artifacts = [
 ]
 
 for artifact in artifacts:
-    expected_prefix = f"{edge_base}/v/{asset_id}/{artifact['artifact_path']}?token="
-    if not artifact["url"].startswith(expected_prefix):
-        raise SystemExit(f"{artifact['label']} URL did not use signed edge playback shape")
+    expected_url = f"{edge_base}/v/{asset_id}/{artifact['artifact_path']}"
+    if artifact["url"] != expected_url:
+        raise SystemExit(f"{artifact['label']} URL did not use tokenless edge playback shape")
 
 with open(output_path, "w", encoding="utf-8") as f:
     json.dump({"playback_url": response["playback_url"], "artifacts": artifacts}, f, sort_keys=True)
@@ -724,6 +725,7 @@ fetch_bootstrap_ready() {
 
   while [[ "$(now_ms)" -lt "$deadline_ms" ]]; do
     curl -sS --max-time "$curl_max_time_secs" \
+      -c "$(playback_cookie_jar)" \
       -o "$bootstrap_response" \
       -w "$curl_timing_format" \
       "$api_base/v1/assets/$asset_id/playback" \
