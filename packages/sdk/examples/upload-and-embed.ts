@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { RendClient } from "@rend/sdk";
 
-const apiKey = process.env.REND_API_KEY ?? process.env.REND_DEV_API_KEY;
-if (!apiKey) throw new Error("Set REND_API_KEY or REND_DEV_API_KEY");
+const apiKey = process.env.REND_API_KEY;
+if (!apiKey) throw new Error("Set REND_API_KEY");
 
 const apiBaseUrl = process.env.REND_API_BASE_URL ?? "http://127.0.0.1:4000";
 const siteBaseUrl = process.env.REND_SITE_BASE_URL ?? "http://127.0.0.1:3000";
