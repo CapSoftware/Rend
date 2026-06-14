@@ -105,13 +105,14 @@ test("POST rejects bounded body and event-count violations", async () => {
   assert.equal((await responseJson(tooManyEvents)).error, "event_batch_too_large");
 });
 
-test("recent endpoint is production-disabled unless beta debug is enabled", async () => {
+test("recent endpoint is production-disabled unless telemetry debug is enabled", async () => {
+  const env = process.env as Record<string, string | undefined>;
   const previousNodeEnv = process.env.NODE_ENV;
   const previousDebug = process.env.REND_PLAYER_TELEMETRY_DEBUG;
 
   try {
-    process.env.NODE_ENV = "production";
-    delete process.env.REND_PLAYER_TELEMETRY_DEBUG;
+    env.NODE_ENV = "production";
+    delete env.REND_PLAYER_TELEMETRY_DEBUG;
 
     const disabled = await GET(
       new Request("https://rend.example/api/player/telemetry/recent")
@@ -119,7 +120,7 @@ test("recent endpoint is production-disabled unless beta debug is enabled", asyn
     assert.equal(disabled.status, 404);
     assert.equal((await responseJson(disabled)).status, "disabled");
 
-    process.env.REND_PLAYER_TELEMETRY_DEBUG = "1";
+    env.REND_PLAYER_TELEMETRY_DEBUG = "1";
     const enabled = await GET(
       new Request("https://rend.example/api/player/telemetry/recent?limit=1")
     );
@@ -127,15 +128,15 @@ test("recent endpoint is production-disabled unless beta debug is enabled", asyn
     assert.equal((await responseJson(enabled)).status, "ok");
   } finally {
     if (previousNodeEnv === undefined) {
-      delete process.env.NODE_ENV;
+      delete env.NODE_ENV;
     } else {
-      process.env.NODE_ENV = previousNodeEnv;
+      env.NODE_ENV = previousNodeEnv;
     }
 
     if (previousDebug === undefined) {
-      delete process.env.REND_PLAYER_TELEMETRY_DEBUG;
+      delete env.REND_PLAYER_TELEMETRY_DEBUG;
     } else {
-      process.env.REND_PLAYER_TELEMETRY_DEBUG = previousDebug;
+      env.REND_PLAYER_TELEMETRY_DEBUG = previousDebug;
     }
   }
 });
