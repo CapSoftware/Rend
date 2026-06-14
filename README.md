@@ -26,7 +26,7 @@ Rend's bare-metal edge. And we're open source.
 
 ## What is Rend?
 
-Rend is the video platform for developers. POST a video, get back a playback URL. Upload, encoding, storage, delivery, signed playback, analytics, player and SDKs, one coherent surface instead of five services taped together.
+Rend is the video platform for developers. POST a video, get back a playback URL. Upload, encoding, storage, delivery, cookie-backed signed playback, analytics, player and SDKs, one coherent surface instead of five services taped together.
 
 Our thesis is simple: latency is round trips, not server time. So Rend deletes round trips, places bytes physically near viewers before they ask, and owns the playback path from cache to viewer.
 
@@ -137,11 +137,12 @@ dedupe by `event_id` because ClickHouse does not enforce uniqueness.
 ```bash
 cp .env.local.example .env.local
 bun run env:local
-bun run backend:up
+bun dev
 cargo check --workspace
 ```
 
-Run the services in separate terminals:
+`bun dev` starts the local Docker backend and then the site. To run the Rust
+services directly instead of Docker, use separate terminals:
 
 ```bash
 bun run backend:api
@@ -179,7 +180,7 @@ needed, uploads the fixture with `Authorization: Bearer <REND_DEV_API_KEY>`, and
 verifies:
 
 - the API upload response is honest with `source_state = uploaded`,
-  `playable_state = not_playable`, and no signed playback URL
+  `playable_state = not_playable`, and no playback URL before media processing
 - a queued `rend.media_jobs` row is claimed by the local media worker
 - Postgres has source, opener, thumbnail, manifest, and segment artifact rows
 - the media job ends in `succeeded` after artifact generation
@@ -251,9 +252,10 @@ REND_BENCHMARK_COALESCING_CONCURRENCY=32 bun run backend:benchmark:local
 
 Edge cache behavior:
 
-- `rend-edge` validates signed playback tokens locally before cache lookup,
-  coalescing, origin fetch, or cache file I/O. The playback hot path does not
-  call Postgres or the control plane.
+- `rend-edge` validates signed playback tokens from an HttpOnly playback cookie
+  or legacy query token locally before cache lookup, coalescing, origin fetch,
+  or cache file I/O. The playback hot path does not call Postgres or the
+  control plane.
 - `X-Rend-Cache: HIT` means the response was served from an existing local
   cache file.
 - `X-Rend-Cache: MISS` means this request led the cold fill, fetched from the
@@ -374,8 +376,8 @@ curl -s -X POST http://127.0.0.1:4100/internal/purge \
 
 # Deletion blocks new bootstrap responses and future token issuance, removes
 # Rend-owned origin objects, and purges local edge-cache bytes. Already-issued
-# signed playback URLs should fail after successful delete instead of refilling
-# edge cache from origin.
+# playback cookies or legacy signed URLs should fail after successful delete
+# instead of refilling edge cache from origin.
 
 open "http://127.0.0.1:4000/player?asset_id=$asset_id"
 
