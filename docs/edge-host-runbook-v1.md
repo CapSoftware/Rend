@@ -422,6 +422,8 @@ scripts/check-docker-image-versions.sh --running
 Metrics auth check. The first command should return `401`; the second should
 return Prometheus text including `rend_edge_up`, `rend_edge_ready`,
 `rend_edge_cache_requests_total`, `rend_edge_in_flight_fills`,
+`rend_edge_active_streamed_fills`, `rend_edge_cache_evictions_total`,
+`rend_edge_cache_evicted_bytes_total`, `rend_edge_cache_eviction_errors_total`,
 `rend_edge_telemetry_events_total`, and `rend_edge_telemetry_spool_bytes`.
 
 ```sh
@@ -614,6 +616,10 @@ Current metric and counter signals:
 - Edge cache counters:
   `rend_edge_cache_requests_total{cache_status="HIT|MISS|COALESCED|error"}`
   and `rend_edge_in_flight_fills`
+- Edge cache eviction and streaming signals:
+  `rend_edge_active_streamed_fills`, `rend_edge_cache_evictions_total`,
+  `rend_edge_cache_evicted_bytes_total`, and
+  `rend_edge_cache_eviction_errors_total`
 - Edge telemetry counters:
   `rend_edge_telemetry_events_total{state="queued|sent|spooled|dropped"}`
   and `rend_edge_telemetry_spool_bytes`
@@ -632,10 +638,12 @@ For initial production deployments, alert manually on any sustained `rend_edge_r
 spool size, `not_found` or `failed` warm summaries, elevated playback 5xx/401,
 or a cache mix that stays mostly `MISS` after warm operations.
 
-The production cache safety gate bounds upload size, origin artifact buffering,
-cache free-space reserve, and optional cache size. It does not implement full
-LRU eviction or stream-while-write cold fills yet; keep those as follow-up work
-unless production traffic proves the guards block useful playback.
+The production cache safety gate bounds upload size, origin artifact size,
+cache free-space reserve, and optional cache size. Cold playback misses use
+stream-while-write: origin bytes go to the viewer while the edge writes an
+atomic cache file. Cache pressure evicts lower-priority old deep-tail artifacts
+before opener and first segments. `HIT`, `MISS`, and `COALESCED` response
+header semantics are unchanged.
 
 ## Local Validation
 
