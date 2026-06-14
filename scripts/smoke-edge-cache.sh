@@ -230,6 +230,43 @@ fetch_once() {
   fi
 }
 
+purge_artifact() {
+  local artifact_path="$1"
+  local body_file="$tmp_dir/purge-request.json"
+  local response_file="$tmp_dir/purge-response.json"
+
+  python3 - "$asset_id" "$artifact_path" >"$body_file" <<'PY'
+import json
+import sys
+
+print(json.dumps({"asset_id": sys.argv[1], "artifact_paths": [sys.argv[2]]}))
+PY
+
+  local http_code
+  http_code="$(
+    curl -sS -o "$response_file" -w "%{http_code}" \
+      -X POST "$edge_base/internal/purge" \
+      -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
+      -H "content-type: application/json" \
+      --data-binary @"$body_file"
+  )"
+  if [[ "$http_code" != "200" ]]; then
+    echo "edge purge for $artifact_path expected HTTP 200, got $http_code" >&2
+    cat "$response_file" >&2 || true
+    exit 1
+  fi
+
+  python3 - "$response_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    body = json.load(f)
+if body.get("rejected") or body.get("errors"):
+    raise SystemExit(f"purge returned rejected/errors: {body}")
+PY
+}
+
 fetch_twice() {
   local label="$1"
   local url="$2"
@@ -269,7 +306,9 @@ opener_url="$edge_base/v/$asset_id/opener.mp4"
 manifest_url="$playback_url"
 manifest_body="$tmp_dir/manifest-first.body"
 
+purge_artifact "opener.mp4"
 fetch_twice "opener" "$opener_url" "video/mp4"
+purge_artifact "hls/master.m3u8"
 fetch_once "manifest-first" "$manifest_url" "MISS" "application/vnd.apple.mpegurl" "$manifest_body"
 fetch_once "manifest-second" "$manifest_url" "HIT" "application/vnd.apple.mpegurl" "$tmp_dir/manifest-second.body"
 
@@ -289,6 +328,7 @@ PY
 )"
 
 segment_url="$edge_base/v/$asset_id/hls/$segment_name"
+purge_artifact "hls/$segment_name"
 fetch_twice "segment" "$segment_url" "video/mp2t"
 
 unsigned_manifest_url="$edge_base/v/$asset_id/hls/master.m3u8"
