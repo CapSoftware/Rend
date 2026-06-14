@@ -49,6 +49,10 @@ export default function ApiKeysClient({
 
   async function createKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (readOnlyReason) {
+      setError(readOnlyReason);
+      return;
+    }
     setSubmitting(true);
     setError("");
     setCreatedSecret("");
@@ -76,6 +80,10 @@ export default function ApiKeysClient({
 
   async function revokeKey(keyId: string) {
     setError("");
+    if (readOnlyReason) {
+      setError(readOnlyReason);
+      return;
+    }
     const response = await fetch(`/api/api-keys/${encodeURIComponent(keyId)}`, {
       method: "DELETE",
       cache: "no-store",
@@ -153,12 +161,18 @@ export default function ApiKeysClient({
           </section>
         ) : null}
 
+        {readOnlyReason ? (
+          <section className="app-callout app-callout-error">
+            <span>{readOnlyReason}</span>
+          </section>
+        ) : null}
+
         <section className="app-panel app-form-panel">
           <h2>Create key</h2>
           <form className="app-key-form" onSubmit={createKey}>
             <label htmlFor="api-key-name">Name</label>
             <input
-              disabled={submitting}
+              disabled={submitting || Boolean(readOnlyReason)}
               id="api-key-name"
               maxLength={80}
               onChange={(event) => setName(event.currentTarget.value)}
@@ -170,7 +184,7 @@ export default function ApiKeysClient({
                 <label key={scope}>
                   <input
                     checked={scopes.includes(scope)}
-                    disabled={submitting}
+                    disabled={submitting || Boolean(readOnlyReason)}
                     onChange={() => toggleScope(scope)}
                     type="checkbox"
                   />
@@ -178,7 +192,7 @@ export default function ApiKeysClient({
                 </label>
               ))}
             </div>
-            <button disabled={submitting || !name.trim() || scopes.length === 0} type="submit">
+            <button disabled={submitting || Boolean(readOnlyReason) || !name.trim() || scopes.length === 0} type="submit">
               {submitting ? "Creating..." : "Create key"}
             </button>
           </form>
@@ -217,7 +231,7 @@ export default function ApiKeysClient({
                       <td>
                         <button
                           className="app-danger"
-                          disabled={Boolean(key.revoked_at)}
+                          disabled={Boolean(key.revoked_at) || Boolean(readOnlyReason)}
                           onClick={() => revokeKey(key.id)}
                           type="button"
                         >
