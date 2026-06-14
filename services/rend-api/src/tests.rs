@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use tower::ServiceExt;
 
 const NOW: u64 = 1_800_000_000;
+const LOCAL_ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000010";
 
 #[derive(Clone)]
 struct WarmRecorder {
@@ -167,6 +168,10 @@ fn asset_state_record(playable_state: &str) -> AssetStateRecord {
         playable_state: playable_state.to_owned(),
         created_at: "2026-06-13T12:00:00.000Z".to_owned(),
         updated_at: "2026-06-13T12:01:00.000Z".to_owned(),
+        suspended_at: None,
+        suspension_reason: None,
+        organization_suspended_at: None,
+        organization_suspension_reason: None,
     }
 }
 
@@ -279,6 +284,27 @@ async fn post_internal_edge_register(
         .unwrap()
 }
 
+async fn post_internal_operator(
+    app: Router,
+    path: &str,
+    body: impl Into<Body>,
+    token: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-rend-operator-user-id", LOCAL_ADMIN_USER_ID)
+        .header("x-rend-operator-email", "admin@rend.test");
+    if let Some(token) = token {
+        builder = builder.header("x-rend-site-token", token);
+    }
+
+    app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
 async fn post_video_with_headers(
     app: Router,
     body: impl Into<Body>,
@@ -339,6 +365,7 @@ fn request_auth_scope_checks_gate_mutations() {
     let read_only = RequestAuth {
         organization_id: LOCAL_ORG_ID.to_owned(),
         scopes: [ApiScope::Read].into_iter().collect(),
+        credential: RequestCredential::ApiKey,
     };
 
     assert!(require_scope(&read_only, ApiScope::Read).is_ok());
@@ -346,6 +373,15 @@ fn request_auth_scope_checks_gate_mutations() {
         panic!("read-only auth unexpectedly had delete scope");
     };
     assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn site_internal_auth_can_read_suspended_state_for_dashboard() {
+    let site_auth = RequestAuth::all(LOCAL_ORG_ID, RequestCredential::SiteInternal);
+    let api_auth = RequestAuth::all(LOCAL_ORG_ID, RequestCredential::ApiKey);
+
+    assert!(site_auth.allows_suspended_reads());
+    assert!(!api_auth.allows_suspended_reads());
 }
 
 #[test]
@@ -536,6 +572,19 @@ async fn internal_edge_registration_requires_internal_token() {
 }
 
 #[tokio::test]
+async fn internal_operator_routes_require_site_internal_token() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let body = serde_json::json!({"reason":"abuse report"}).to_string();
+    let path = "/internal/operator/assets/00000000-0000-0000-0000-000000000001/suspend";
+
+    let response = post_internal_operator(app.clone(), path, body.clone(), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post_internal_operator(app, path, body, Some("wrong-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn internal_playback_telemetry_rejects_unknown_secret_fields() {
     let app = build_app(test_state(), Duration::from_secs(10));
     let body = serde_json::json!({
@@ -597,6 +646,34 @@ fn current_asset_returns_artifact_summary() {
     assert_eq!(response.artifacts[0].kind, "opener");
     assert_eq!(response.artifacts[0].content_type, "video/mp4");
     assert_eq!(response.artifacts[0].byte_size, Some(123));
+}
+
+#[test]
+fn current_asset_rejects_suspended_state_for_api_reads() {
+    let mut asset = asset_state_record("hls_ready");
+    asset.suspended_at = Some("2026-06-14T10:00:00.000Z".to_owned());
+    asset.suspension_reason = Some("abuse".to_owned());
+
+    let Err(error) = ensure_asset_state_record_not_suspended(Some(&asset)) else {
+        panic!("suspended asset unexpectedly passed read guard");
+    };
+
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "asset is suspended");
+}
+
+#[test]
+fn operator_reasons_are_normalized_and_redacted_before_audit() {
+    let reason = normalize_operator_reason(
+        " unsafe URL https://edge.example/v/asset/opener.mp4?token=secret\nAuthorization: Bearer abc ",
+    )
+    .unwrap();
+
+    assert!(reason.contains("[redacted-url]"));
+    assert!(reason.contains("[redacted-secret]"));
+    assert!(!reason.contains("edge.example"));
+    assert!(!reason.contains("token=secret"));
+    assert!(!reason.contains("Bearer abc"));
 }
 
 #[test]
