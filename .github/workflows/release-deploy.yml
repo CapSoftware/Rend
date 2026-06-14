@@ -1,0 +1,296 @@
+name: Release and Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-deploy.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "clickhouse/**"
+      - "crates/**"
+      - "docs/env/**"
+      - "docs/templates/**"
+      - "migrations/**"
+      - "scripts/**"
+      - "services/**"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional Docker release tag. Defaults to production-<short-sha>."
+        required: false
+        type: string
+      image_platform:
+        description: "Docker platform for production hosts."
+        required: false
+        default: "linux/amd64"
+        type: string
+      deploy_control_plane:
+        description: "Deploy rend-api and rend-media-worker after the image release."
+        required: true
+        default: true
+        type: boolean
+      deploy_edges:
+        description: "Deploy configured edge hosts after the control plane."
+        required: true
+        default: true
+        type: boolean
+      run_readiness:
+        description: "Run the synthetic playback readiness gate after deploy."
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rend-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  release-images:
+    name: Build and push release images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-platform: ${{ steps.release.outputs.image_platform }}
+      manifest-path: ${{ steps.release.outputs.manifest_path }}
+      release-tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push images
+        id: release
+        env:
+          IMAGE_PLATFORM_INPUT: ${{ inputs.image_platform || 'linux/amd64' }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+
+          image_prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rend"
+          short_sha="${GITHUB_SHA::12}"
+          release_tag="${RELEASE_TAG_INPUT:-production-$short_sha}"
+          image_platform="${IMAGE_PLATFORM_INPUT:-linux/amd64}"
+          manifest_path=".rend/releases/rend-images-$release_tag.json"
+
+          scripts/release-images.sh \
+            --tag "$release_tag" \
+            --registry "$image_prefix" \
+            --platform "$image_platform" \
+            --manifest "$manifest_path" \
+            --artifact-dir ".rend/release-artifacts" \
+            --push
+
+          {
+            echo "image_platform=$image_platform"
+            echo "manifest_path=$manifest_path"
+            echo "release_tag=$release_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: rend-release-manifest
+          path: ${{ steps.release.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    name: Deploy production hosts
+    runs-on: ubuntu-latest
+    needs: release-images
+    if: ${{ github.event_name == 'push' || inputs.deploy_control_plane || inputs.deploy_edges }}
+    environment:
+      name: Production
+      url: ${{ vars.REND_API_BASE_URL || 'https://api.rend.so' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DEPLOY_CONTROL_PLANE: ${{ github.event_name == 'push' || inputs.deploy_control_plane }}
+      DEPLOY_EDGES: ${{ github.event_name == 'push' || inputs.deploy_edges }}
+      RUN_READINESS: ${{ github.event_name == 'push' || inputs.run_readiness }}
+      IMAGE_PLATFORM: ${{ needs.release-images.outputs.image-platform }}
+      REND_API_BASE_URL: ${{ vars.REND_API_BASE_URL || 'https://api.rend.so' }}
+      REND_READINESS_EDGES: ${{ vars.REND_READINESS_EDGES }}
+      REND_READINESS_API_KEY: ${{ secrets.REND_READINESS_API_KEY }}
+      REND_EDGE_INTERNAL_TOKEN: ${{ secrets.REND_EDGE_INTERNAL_TOKEN }}
+      REND_SSH_PRIVATE_KEY: ${{ secrets.REND_SSH_PRIVATE_KEY }}
+      REND_SSH_KNOWN_HOSTS: ${{ secrets.REND_SSH_KNOWN_HOSTS }}
+      REND_CONTROL_PLANE_SSH_HOST: ${{ secrets.REND_CONTROL_PLANE_SSH_HOST }}
+      REND_CONTROL_PLANE_SSH_USER: ${{ secrets.REND_CONTROL_PLANE_SSH_USER }}
+      REND_CONTROL_PLANE_SSH_PORT: ${{ secrets.REND_CONTROL_PLANE_SSH_PORT }}
+      REND_EDGE_ASH_SSH_HOST: ${{ secrets.REND_EDGE_ASH_SSH_HOST }}
+      REND_EDGE_ASH_SSH_USER: ${{ secrets.REND_EDGE_ASH_SSH_USER }}
+      REND_EDGE_ASH_SSH_PORT: ${{ secrets.REND_EDGE_ASH_SSH_PORT }}
+      REND_EDGE_AMS_SSH_HOST: ${{ secrets.REND_EDGE_AMS_SSH_HOST }}
+      REND_EDGE_AMS_SSH_USER: ${{ secrets.REND_EDGE_AMS_SSH_USER }}
+      REND_EDGE_AMS_SSH_PORT: ${{ secrets.REND_EDGE_AMS_SSH_PORT }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: rend-release-manifest
+          path: .rend/deploy
+
+      - name: Resolve release manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          manifest="$(find .rend/deploy -type f -name 'rend-images-*.json' | sort | head -n 1)"
+          if [[ -z "$manifest" ]]; then
+            echo "release manifest was not downloaded" >&2
+            exit 1
+          fi
+          python3 -m json.tool "$manifest" >/dev/null
+          echo "path=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          SSH_KEY_PATH: ${{ runner.temp }}/rend_deploy_key
+        run: |
+          set -euo pipefail
+          if [[ -z "$REND_SSH_PRIVATE_KEY" ]]; then
+            echo "REND_SSH_PRIVATE_KEY is required" >&2
+            exit 1
+          fi
+          if [[ -z "$REND_SSH_KNOWN_HOSTS" ]]; then
+            echo "REND_SSH_KNOWN_HOSTS is required" >&2
+            exit 1
+          fi
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$REND_SSH_PRIVATE_KEY" > "$SSH_KEY_PATH"
+          chmod 600 "$SSH_KEY_PATH"
+          printf '%s\n' "$REND_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "REND_SSH_KEY_PATH=$SSH_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Deploy control plane
+        if: env.DEPLOY_CONTROL_PLANE == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_CONTROL_PLANE_SSH_HOST:?REND_CONTROL_PLANE_SSH_HOST is required}"
+          : "${REND_CONTROL_PLANE_SSH_USER:?REND_CONTROL_PLANE_SSH_USER is required}"
+
+          scripts/deploy-release-over-ssh.sh \
+            --role control-plane \
+            --host "$REND_CONTROL_PLANE_SSH_HOST" \
+            --user "$REND_CONTROL_PLANE_SSH_USER" \
+            --port "${REND_CONTROL_PLANE_SSH_PORT:-22}" \
+            --expected-platform "$IMAGE_PLATFORM" \
+            --remote-dir "/tmp/rend-deploy-${GITHUB_RUN_ID}-${GITHUB_SHA::12}-control-plane" \
+            --manifest "${{ steps.manifest.outputs.path }}"
+
+      - name: Deploy edge hosts
+        if: env.DEPLOY_EDGES == 'true'
+        run: |
+          set -euo pipefail
+
+          deploy_edge() {
+            local label="$1"
+            local host="$2"
+            local user="$3"
+            local port="${4:-22}"
+
+            if [[ -z "$host" && -z "$user" ]]; then
+              echo "Skipping $label edge: SSH host/user secrets are not configured"
+              return 0
+            fi
+            if [[ -z "$host" || -z "$user" ]]; then
+              echo "$label edge requires both host and user secrets" >&2
+              return 1
+            fi
+
+            scripts/deploy-release-over-ssh.sh \
+              --role edge \
+              --host "$host" \
+              --user "$user" \
+              --port "${port:-22}" \
+              --expected-platform "$IMAGE_PLATFORM" \
+              --remote-dir "/tmp/rend-deploy-${GITHUB_RUN_ID}-${GITHUB_SHA::12}-$label" \
+              --manifest "${{ steps.manifest.outputs.path }}"
+          }
+
+          deployed=0
+          if [[ -n "$REND_EDGE_ASH_SSH_HOST$REND_EDGE_ASH_SSH_USER" ]]; then
+            deploy_edge "ash" "$REND_EDGE_ASH_SSH_HOST" "$REND_EDGE_ASH_SSH_USER" "${REND_EDGE_ASH_SSH_PORT:-22}"
+            deployed=$((deployed + 1))
+          fi
+          if [[ -n "$REND_EDGE_AMS_SSH_HOST$REND_EDGE_AMS_SSH_USER" ]]; then
+            deploy_edge "ams" "$REND_EDGE_AMS_SSH_HOST" "$REND_EDGE_AMS_SSH_USER" "${REND_EDGE_AMS_SSH_PORT:-22}"
+            deployed=$((deployed + 1))
+          fi
+
+          if [[ "$deployed" == "0" ]]; then
+            echo "DEPLOY_EDGES=true but no edge SSH targets were configured" >&2
+            exit 1
+          fi
+
+      - name: Verify public API readiness
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "$REND_API_BASE_URL/readyz"
+
+          internal_status="$(curl -sS -o /dev/null -w '%{http_code}' "$REND_API_BASE_URL/internal/edges/heartbeat")"
+          if [[ "$internal_status" != "404" ]]; then
+            echo "public API must not expose /internal/*; got HTTP $internal_status" >&2
+            exit 1
+          fi
+
+          assets_status="$(curl -sS -o /dev/null -w '%{http_code}' "$REND_API_BASE_URL/v1/assets")"
+          case "$assets_status" in
+            401 | 403) ;;
+            *)
+              echo "public /v1/assets route should require auth; got HTTP $assets_status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install playback readiness dependencies
+        if: env.RUN_READINESS == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Run playback readiness gate
+        if: env.RUN_READINESS == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_READINESS_API_KEY:?REND_READINESS_API_KEY is required when RUN_READINESS=true}"
+          : "${REND_EDGE_INTERNAL_TOKEN:?REND_EDGE_INTERNAL_TOKEN is required when RUN_READINESS=true}"
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required when RUN_READINESS=true}"
+
+          node scripts/playback-readiness-gate.mjs \
+            --target configured \
+            --skip-local-stack \
+            --output ".rend/readiness/playback-readiness-${GITHUB_RUN_ID}.json" \
+            --latest-output ".rend/readiness/playback-readiness-latest.json"
+
+      - name: Upload readiness artifact
+        if: always() && env.RUN_READINESS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rend-playback-readiness
+          path: .rend/readiness/*.json
+          if-no-files-found: ignore
+          retention-days: 14
