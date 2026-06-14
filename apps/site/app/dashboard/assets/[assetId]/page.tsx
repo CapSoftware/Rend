@@ -7,6 +7,10 @@ import {
   fetchAssetPlaybackAnalytics,
   normalizeAssetId,
 } from "../../../../lib/asset-api.ts";
+import {
+  organizationIsSuspended,
+  organizationSuspendedMessage,
+} from "../../../../lib/dashboard-auth.ts";
 import { requireDashboardAccess } from "../../../../lib/dashboard-auth-next.ts";
 import { recentPlayerTelemetryEvents } from "../../../../lib/player-telemetry.ts";
 
@@ -29,6 +33,9 @@ export default async function AssetPage({ params }: AssetPageProps) {
   const assetId = normalizeAssetId(rawAssetId);
   if (!assetId) notFound();
   const access = await requireDashboardAccess(`/dashboard/assets/${assetId}`);
+  const readOnlyReason = organizationIsSuspended(access)
+    ? organizationSuspendedMessage(access)
+    : undefined;
 
   let asset;
   try {
@@ -46,6 +53,7 @@ export default async function AssetPage({ params }: AssetPageProps) {
       initialAnalytics={analytics}
       initialAsset={asset}
       initialTelemetry={telemetry}
+      readOnlyReason={readOnlyReason}
     />
   );
 }
