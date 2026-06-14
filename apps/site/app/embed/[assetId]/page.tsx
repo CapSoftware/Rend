@@ -6,6 +6,7 @@ type EmbedPageProps = {
   searchParams: Promise<{
     autoplay?: string | string[];
     playbackBaseUrl?: string | string[];
+    telemetry?: string | string[];
   }>;
 };
 
@@ -23,6 +24,14 @@ function playerBootstrapUrl(assetId: string, playbackBaseUrl: string | string[] 
   return `${url}?playbackBaseUrl=${encodeURIComponent(playbackBaseUrl)}`;
 }
 
+function telemetryAppVersion() {
+  return (
+    process.env.NEXT_PUBLIC_REND_APP_VERSION ||
+    process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ||
+    "0.1.0"
+  );
+}
+
 export default async function EmbedPage({ params, searchParams }: EmbedPageProps) {
   const [{ assetId }, query] = await Promise.all([params, searchParams]);
 
@@ -38,6 +47,9 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
           autoPlay={query.autoplay === "1"}
           bootstrapUrl={playerBootstrapUrl(assetId, query.playbackBaseUrl)}
           maxPrefetchHints={2}
+          telemetryAppVersion={telemetryAppVersion()}
+          telemetryEnabled={query.telemetry !== "0"}
+          telemetryUrl="/api/player/telemetry"
         />
       </section>
     </main>
