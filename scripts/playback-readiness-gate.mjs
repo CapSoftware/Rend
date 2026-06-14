@@ -1085,6 +1085,10 @@ async function runFixture(config, fixtureName, thresholds, warnings, failures, c
           artifact: artifact.label,
           name: "edge_ttfb_miss_ms",
           value_ms: miss.ttfb_ms,
+          total_ms: miss.total_ms,
+          byte_size: miss.byte_size,
+          first_byte_before_complete: miss.ttfb_ms < miss.total_ms,
+          first_byte_to_complete_ms: roundMs(Math.max(0, miss.total_ms - miss.ttfb_ms)),
           cache_status: miss.cache_status,
         });
         evaluateMetric(metrics[metrics.length - 1], "edge_ttfb_miss_ms", thresholds, warnings, failures);
