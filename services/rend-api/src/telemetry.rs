@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use axum::{
     Json,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Extension, Path as AxumPath, Query, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -14,7 +14,9 @@ use rend_config::{env_string, env_usize};
 use rend_playback_auth::is_valid_hls_segment_name;
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, AppState, asset_row_exists, normalize_asset_id};
+use crate::{
+    ApiScope, AppError, AppState, RequestAuth, asset_row_exists, normalize_asset_id, require_scope,
+};
 
 const DEFAULT_TELEMETRY_MAX_BODY_BYTES: usize = 256 * 1024;
 const HARD_TELEMETRY_MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -236,10 +238,11 @@ async fn post_playback_telemetry_inner(
 
 pub(crate) async fn get_playback_analytics(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     AxumPath(asset_id): AxumPath<String>,
     Query(query): Query<PlaybackAnalyticsQuery>,
 ) -> Response {
-    match get_playback_analytics_inner(state, asset_id, query).await {
+    match get_playback_analytics_inner(state, auth, asset_id, query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -247,11 +250,13 @@ pub(crate) async fn get_playback_analytics(
 
 async fn get_playback_analytics_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     asset_id: String,
     query: PlaybackAnalyticsQuery,
 ) -> std::result::Result<PlaybackAnalyticsResponse, AppError> {
+    require_scope(&auth, ApiScope::Analytics)?;
     let asset_id = normalize_asset_id(&asset_id)?;
-    if !asset_row_exists(&state.db, &asset_id).await? {
+    if !asset_row_exists(&state.db, &auth.organization_id, &asset_id).await? {
         return Err(AppError::not_found("asset not found"));
     }
 
