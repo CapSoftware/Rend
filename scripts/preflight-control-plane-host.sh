@@ -10,6 +10,7 @@ worker_env="${REND_MEDIA_WORKER_ENV_FILE:-/etc/rend/rend-media-worker.env}"
 compose_file="${REND_CONTROL_PLANE_COMPOSE_FILE:-/opt/rend/control-plane.compose.yml}"
 publish_addr="${REND_API_PUBLISH_ADDR:-127.0.0.1}"
 publish_port="${REND_API_PUBLISH_PORT:-4000}"
+expected_platform="${REND_EXPECTED_IMAGE_PLATFORM:-linux/amd64}"
 allow_dev_defaults=false
 allow_placeholders=false
 allow_local_image_refs=false
@@ -30,6 +31,8 @@ Options:
   --compose-file FILE         Compose file. Default: /opt/rend/control-plane.compose.yml.
   --publish-addr ADDR         Host publish address to probe. Default: 127.0.0.1.
   --publish-port PORT         Host publish port to probe. Default: 4000.
+  --expected-platform PLATFORM
+                              Expected host image platform. Default: linux/amd64.
   --dry-run                   Skip network and bind-port probes; validate local inputs only.
   --skip-connectivity         Skip managed dependency connectivity probes.
   --skip-bind-port-check      Skip bind-port probe.
@@ -70,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --publish-port)
       publish_port="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --expected-platform)
+      expected_platform="${2:?missing value for $1}"
       shift 2
       ;;
     --dry-run)
@@ -123,13 +130,13 @@ operator_validate_api_env "$api_env" "$allow_dev_defaults" "$allow_placeholders"
 operator_validate_worker_env "$worker_env" "$allow_dev_defaults" "$allow_placeholders"
 
 operator_info "validating release manifest image refs"
-operator_validate_manifest_services "$manifest" "$allow_local_image_refs" rend-api rend-media-worker
+operator_validate_manifest_services "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
 
 if [[ "$dry_run" == "true" ]]; then
   operator_warn "skipping manifest image pull readiness check"
 else
   operator_info "checking manifest image pull readiness"
-  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" rend-api rend-media-worker
+  operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
 fi
 
 if [[ "$dry_run" == "true" || "$skip_bind_port_check" == "true" ]]; then
@@ -145,11 +152,16 @@ fi
 
 probe_postgres() {
   local database_url="$1"
+  local psql_url
   if ! command -v psql >/dev/null 2>&1; then
     operator_warn "psql is not installed; skipping Postgres connectivity probe"
     return 0
   fi
-  if PGCONNECT_TIMEOUT=8 psql "$database_url" -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then
+  psql_url="$(operator_psql_database_url "$database_url")"
+  if [[ "$psql_url" != "$database_url" ]]; then
+    operator_info "normalized DATABASE_URL for psql by removing sslrootcert=system"
+  fi
+  if PGCONNECT_TIMEOUT=8 psql "$psql_url" -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then
     operator_ok "Postgres connectivity probe passed"
   else
     operator_fail "Postgres connectivity probe failed"
