@@ -21,6 +21,10 @@
       ],
       "env": [
         "NEXT_PUBLIC_*",
+        "REND_API_BASE_URL",
+        "REND_DEV_API_KEY",
+        "REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS",
+        "REND_PLAYER_PLAYBACK_BASE_URL",
         "KV_REST_API_URL",
         "KV_REST_API_TOKEN",
         "UPSTASH_REDIS_REST_URL",
@@ -38,6 +42,10 @@
       "persistent": true,
       "env": [
         "NEXT_PUBLIC_*",
+        "REND_API_BASE_URL",
+        "REND_DEV_API_KEY",
+        "REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS",
+        "REND_PLAYER_PLAYBACK_BASE_URL",
         "KV_REST_API_URL",
         "KV_REST_API_TOKEN",
         "UPSTASH_REDIS_REST_URL",
@@ -49,6 +57,10 @@
       "persistent": true,
       "env": [
         "NEXT_PUBLIC_*",
+        "REND_API_BASE_URL",
+        "REND_DEV_API_KEY",
+        "REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS",
+        "REND_PLAYER_PLAYBACK_BASE_URL",
         "KV_REST_API_URL",
         "KV_REST_API_TOKEN",
         "UPSTASH_REDIS_REST_URL",
