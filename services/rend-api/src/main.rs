@@ -1681,7 +1681,7 @@ async fn get_asset_events_inner(
 ) -> Result<AssetEventsResponse, AppError> {
     require_scope(&auth, ApiScope::Read)?;
     if !auth.allows_suspended_reads() {
-        ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
+        ensure_asset_events_readable(&state.db, &auth.organization_id, &asset_id).await?;
     }
     let asset_exists = asset_row_exists(&state.db, &auth.organization_id, &asset_id).await?;
     let query = normalize_asset_events_query(query);
@@ -2185,6 +2185,37 @@ pub(crate) async fn ensure_asset_not_suspended(
         Some((true, _, _)) | None => Err(AppError::not_found("asset not found")),
         Some((_, _, true)) => Err(AppError::forbidden("organization is suspended")),
         Some((_, true, _)) => Err(AppError::forbidden("asset is suspended")),
+    }
+}
+
+async fn ensure_asset_events_readable(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+) -> Result<(), AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
+    let row: Option<(bool, bool)> = sqlx::query_as(
+        "
+        SELECT asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+          AND asset.organization_id = $2::uuid
+        ",
+    )
+    .bind(asset_id)
+    .bind(organization_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    match row {
+        Some((false, false)) => Ok(()),
+        None => Err(AppError::not_found("asset not found")),
+        Some((_, true)) => Err(AppError::forbidden("organization is suspended")),
+        Some((true, _)) => Err(AppError::forbidden("asset is suspended")),
     }
 }
 
