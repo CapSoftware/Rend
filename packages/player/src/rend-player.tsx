@@ -234,7 +234,7 @@ function signedHlsLine(line: string, baseUrl: URL, token: string | null) {
 }
 
 async function signedHlsManifestObjectUrl(manifestUrl: string) {
-  const parsedManifestUrl = new URL(manifestUrl);
+  const parsedManifestUrl = new URL(manifestUrl, window.location.href);
   const token = parsedManifestUrl.searchParams.get("token");
   const response = await fetch(parsedManifestUrl.toString(), { cache: "no-store" });
   const cacheHeaders = readableTelemetryHeaders(response.headers);
