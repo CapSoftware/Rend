@@ -9,9 +9,59 @@ export default function LoginForm({
   configured: boolean;
   nextPath: string;
 }) {
-  const [token, setToken] = useState("");
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
   const [error, setError] = useState(configured ? "" : "Dashboard authentication is not configured.");
   const [submitting, setSubmitting] = useState(false);
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedCode = code.trim();
+
+  async function postAuth(path: string, body: Record<string, string>, fallbackMessage: string) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(
+          typeof payload?.message === "string" && payload.message ? payload.message : fallbackMessage
+        );
+      }
+      return response;
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") {
+        throw new Error("Sign-in request timed out. Check the local dev server and try again.");
+      }
+      throw requestError;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function sendCode() {
+    await postAuth(
+      "/api/auth/email-otp/send-verification-otp",
+      { email: normalizedEmail, type: "sign-in" },
+      "Unable to send sign-in code"
+    );
+    setCodeSent(true);
+  }
+
+  async function verifyCode() {
+    await postAuth(
+      "/api/auth/sign-in/email-otp",
+      { email: normalizedEmail, otp: normalizedCode },
+      "Invalid or expired sign-in code"
+    );
+    window.location.assign(nextPath);
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -20,16 +70,12 @@ export default function LoginForm({
     setSubmitting(true);
     setError("");
     try {
-      const response = await fetch("/api/session", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token }),
-      });
-      const body = (await response.json().catch(() => ({}))) as { message?: string };
-      if (!response.ok) {
-        throw new Error(body.message || "Sign in failed");
+      if (codeSent) {
+        await verifyCode();
+      } else {
+        await sendCode();
+        setSubmitting(false);
       }
-      window.location.assign(nextPath);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Sign in failed");
       setSubmitting(false);
@@ -42,18 +88,56 @@ export default function LoginForm({
         <img src="/rend-logo.svg" alt="Rend" className="app-login-logo" />
         <h1>Sign in</h1>
         <form className="app-login-form" onSubmit={onSubmit}>
-          <label htmlFor="operator-token">Operator token</label>
+          <label htmlFor="email">Email</label>
           <input
-            autoComplete="current-password"
-            disabled={!configured || submitting}
-            id="operator-token"
-            onChange={(event) => setToken(event.currentTarget.value)}
-            type="password"
-            value={token}
+            autoComplete="email"
+            disabled={!configured || submitting || codeSent}
+            id="email"
+            inputMode="email"
+            onChange={(event) => setEmail(event.currentTarget.value)}
+            type="email"
+            value={email}
           />
-          <button disabled={!configured || submitting || token.trim().length === 0} type="submit">
-            {submitting ? "Signing in..." : "Sign in"}
+          {codeSent ? (
+            <>
+              <label htmlFor="code">Code</label>
+              <input
+                autoComplete="one-time-code"
+                disabled={!configured || submitting}
+                id="code"
+                inputMode="numeric"
+                maxLength={6}
+                onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
+                pattern="[0-9]{6}"
+                type="text"
+                value={code}
+              />
+            </>
+          ) : null}
+          <button
+            disabled={
+              !configured ||
+              submitting ||
+              !normalizedEmail ||
+              (codeSent && normalizedCode.length !== 6)
+            }
+            type="submit"
+          >
+            {submitting ? "Working..." : codeSent ? "Verify code" : "Send code"}
           </button>
+          {codeSent ? (
+            <button
+              disabled={submitting}
+              onClick={() => {
+                setCode("");
+                setCodeSent(false);
+                setError("");
+              }}
+              type="button"
+            >
+              Use another email
+            </button>
+          ) : null}
           {error ? <p>{error}</p> : null}
         </form>
       </section>
