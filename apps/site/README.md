@@ -11,6 +11,10 @@ bun dev
 
 Then visit http://localhost:3000.
 
+From the repo root, `bun dev` starts the local Docker backend and then the
+Next.js site. Use `bun run dev:site` when the backend is already running or you
+intentionally want the site only.
+
 For production builds, run `bun run build` from the repo root. Site commands
 use the root env wrapper: `next dev` loads the `local` profile, while
 `next build` and `next start` load the `production` profile and never read
@@ -45,9 +49,18 @@ debug session.
 ## Dashboard assets
 
 Sign in at `/login`, then use the asset dashboard at `/dashboard/assets`.
-Dashboard routes and `/api/assets/*` require `REND_SITE_OPERATOR_TOKEN`; the
-site keeps all Rend API calls server-side, and the browser receives only
-sanitized asset, analytics, and startup telemetry data. The local full-flow
+Dashboard routes use Better Auth email OTP sessions backed by Postgres. Local
+development seeds `admin@rend.test` into a local organization, allows new email
+OTP sign-ups, auto-creates a workspace on first dashboard access, and logs OTP
+codes to the server console when `RESEND_API_KEY` is not configured. Production must
+set `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` or `REND_AUTH_BASE_URL`,
+`RESEND_API_KEY`, `REND_AUTH_EMAIL_FROM`, and `REND_SITE_INTERNAL_TOKEN`.
+
+The site keeps all Rend API calls server-side, scopes dashboard data by active
+organization, and exposes only sanitized asset, analytics, startup telemetry,
+and tokenless playback proxy data to the browser. Owner/admin users can manage
+org API keys at `/dashboard/api-keys`; API keys are shown once, stored hashed,
+and scoped to upload/read/delete/analytics permissions. The local full-flow
 check is:
 
 ```bash
