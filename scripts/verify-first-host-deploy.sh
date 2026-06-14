@@ -15,7 +15,7 @@ expected_edges="${REND_EXPECTED_EDGES:-}"
 edge_internal_token="${REND_EDGE_INTERNAL_TOKEN:-}"
 control_plane_url="${REND_CONTROL_PLANE_URL:-}"
 clickhouse_url="${CLICKHOUSE_URL:-}"
-clickhouse_database="${CLICKHOUSE_DATABASE:-rend}"
+clickhouse_database="${CLICKHOUSE_DATABASE:-}"
 clickhouse_user="${CLICKHOUSE_USER:-}"
 clickhouse_password="${CLICKHOUSE_PASSWORD:-}"
 api_env=""
@@ -57,10 +57,10 @@ Options:
   --edge-internal-token TOKEN Internal edge token for heartbeat fallback.
   --control-plane-url URL     Internal API/control-plane URL for heartbeat fallback.
   --clickhouse-url URL        ClickHouse HTTP URL for telemetry health.
-  --clickhouse-database NAME  ClickHouse database. Default: rend.
+  --clickhouse-database NAME  ClickHouse database. Required unless --api-env provides CLICKHOUSE_DATABASE.
   --clickhouse-user USER      ClickHouse user.
   --clickhouse-password PASS  ClickHouse password.
-  --api-env FILE              Read REND_DEV_API_KEY and DATABASE_URL defaults from file.
+  --api-env FILE              Read API, Postgres, and ClickHouse defaults from file.
   --edge-env FILE             Read edge id/token/control-plane/base URL defaults from file.
   --rewrite-playback-base     Rewrite API playback URL host to --edge-base before fetching.
   --skip-registration         Skip edge registration visibility check.
@@ -382,9 +382,13 @@ check_registration() {
       operator_fail "expected edge registry check requires --database-url/--api-env and psql"
       return 0
     fi
-    local rows sql
+    local rows sql psql_url
     sql="$(registry_sql_for_expected_edges "$expected_edges")"
-    rows="$(PGCONNECT_TIMEOUT=8 psql "$database_url" -F $'\t' -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
+    psql_url="$(operator_psql_database_url "$database_url")"
+    if [[ "$psql_url" != "$database_url" ]]; then
+      operator_info "normalized DATABASE_URL for psql by removing sslrootcert=system"
+    fi
+    rows="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -F $'\t' -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
     if validate_expected_edge_rows "$expected_edges" "$rows" 2>/tmp/rend-edge-registry-error.$$; then
       operator_ok "all expected edges are registered healthy"
     else
@@ -400,9 +404,13 @@ check_registration() {
   fi
 
   if [[ -n "$database_url" ]] && command -v psql >/dev/null 2>&1; then
-    local result sql
+    local result sql psql_url
     sql="$(registry_sql_for_edge "$edge_id")"
-    result="$(PGCONNECT_TIMEOUT=8 psql "$database_url" -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
+    psql_url="$(operator_psql_database_url "$database_url")"
+    if [[ "$psql_url" != "$database_url" ]]; then
+      operator_info "normalized DATABASE_URL for psql by removing sslrootcert=system"
+    fi
+    result="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
     if [[ -n "$result" ]]; then
       operator_ok "edge registration is visible in Postgres: $result"
       rm -f /tmp/rend-psql-error.$$
@@ -443,8 +451,12 @@ check_clickhouse_telemetry() {
     operator_fail "ClickHouse telemetry health requires --clickhouse-url or --api-env"
     return 0
   fi
+  if [[ -z "$clickhouse_database" ]]; then
+    operator_fail "ClickHouse telemetry health requires --clickhouse-database or CLICKHOUSE_DATABASE from --api-env"
+    return 0
+  fi
   if [[ -z "$clickhouse_user" || -z "$clickhouse_password" ]]; then
-    operator_fail "ClickHouse telemetry health requires clickhouse user and password"
+    operator_fail "ClickHouse telemetry health requires --clickhouse-user/--clickhouse-password or CLICKHOUSE_USER/CLICKHOUSE_PASSWORD from --api-env"
     return 0
   fi
 
