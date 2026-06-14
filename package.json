@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "REND_ENV_PROFILE=local turbo dev --filter=@rend/site",
-    "dev:local": "REND_ENV_PROFILE=local turbo dev --filter=@rend/site",
+    "dev": "bun run backend:up && REND_ENV_PROFILE=local turbo dev --filter=@rend/site",
+    "dev:local": "bun run backend:up && REND_ENV_PROFILE=local turbo dev --filter=@rend/site",
     "dev:site": "REND_ENV_PROFILE=local turbo dev --filter=@rend/site",
     "build": "turbo build",
     "build:site": "turbo build --filter=@rend/site",
