@@ -21,7 +21,7 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ assetId: string }> }
 ) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
 
   const { assetId } = await context.params;
@@ -30,6 +30,7 @@ export async function GET(
     return assetJsonResponse({
       status: "ok",
       analytics: await fetchAssetPlaybackAnalytics(
+        access.context,
         assetId,
         numericWindow(url.searchParams.get("windowSeconds"))
       ),

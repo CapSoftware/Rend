@@ -1,4 +1,9 @@
-import { assetErrorResponse, assetJsonResponse } from "../../../../../lib/asset-api.ts";
+import {
+  assetApiErrorResponse,
+  assetErrorResponse,
+  assetJsonResponse,
+  fetchAssetDetail,
+} from "../../../../../lib/asset-api.ts";
 import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
@@ -22,7 +27,7 @@ function numericLimit(value: string | null) {
 }
 
 export async function GET(request: Request) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
 
   const url = new URL(request.url);
@@ -30,6 +35,15 @@ export async function GET(request: Request) {
   const playbackSessionId = safeTelemetryId(url.searchParams.get("playbackSessionId"));
   if (assetId === null || playbackSessionId === null) {
     return assetErrorResponse(400, "invalid_query", "Telemetry query contains an invalid id");
+  }
+  if (!assetId) {
+    return assetErrorResponse(400, "invalid_query", "Telemetry query requires an asset id");
+  }
+
+  try {
+    await fetchAssetDetail(access.context, assetId);
+  } catch (error) {
+    return assetApiErrorResponse(error);
   }
 
   return assetJsonResponse({

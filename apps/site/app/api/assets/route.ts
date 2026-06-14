@@ -7,6 +7,7 @@ import {
 import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
+  canUploadAssets,
 } from "../../../lib/dashboard-auth.ts";
 
 export const dynamic = "force-dynamic";
@@ -19,23 +20,28 @@ function numericLimit(value: string | null) {
 }
 
 export async function GET(request: Request) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
 
   try {
     const url = new URL(request.url);
-    return assetJsonResponse(await listAssets(numericLimit(url.searchParams.get("limit"))));
+    return assetJsonResponse(
+      await listAssets(access.context, numericLimit(url.searchParams.get("limit")))
+    );
   } catch (error) {
     return assetApiErrorResponse(error);
   }
 }
 
 export async function POST(request: Request) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
+  if (!canUploadAssets(access.context)) {
+    return dashboardAccessErrorResponse({ ok: false, reason: "forbidden" });
+  }
 
   try {
-    return assetJsonResponse(await uploadAsset(request), { status: 201 });
+    return assetJsonResponse(await uploadAsset(access.context, request), { status: 201 });
   } catch (error) {
     return assetApiErrorResponse(error);
   }

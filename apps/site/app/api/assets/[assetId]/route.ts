@@ -7,6 +7,7 @@ import {
 import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
+  canDeleteAssets,
 } from "../../../../lib/dashboard-auth.ts";
 
 export const dynamic = "force-dynamic";
@@ -16,14 +17,14 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ assetId: string }> }
 ) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
 
   const { assetId } = await context.params;
   try {
     return assetJsonResponse({
       status: "ok",
-      asset: await fetchAssetDetail(assetId),
+      asset: await fetchAssetDetail(access.context, assetId),
     });
   } catch (error) {
     return assetApiErrorResponse(error);
@@ -34,12 +35,15 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ assetId: string }> }
 ) {
-  const access = dashboardAccessFromRequest(request);
+  const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
+  if (!canDeleteAssets(access.context)) {
+    return dashboardAccessErrorResponse({ ok: false, reason: "forbidden" });
+  }
 
   const { assetId } = await context.params;
   try {
-    return assetJsonResponse(await deleteAsset(assetId));
+    return assetJsonResponse(await deleteAsset(access.context, assetId));
   } catch (error) {
     return assetApiErrorResponse(error);
   }
