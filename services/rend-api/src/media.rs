@@ -476,11 +476,15 @@ async fn persist_artifacts_and_state(
         .await
         .context("failed to start artifact transaction")?;
     let mut opener_artifact_id = None;
-    let row: Option<(String, bool)> = sqlx::query_as(
+    let row: Option<(String, bool, bool, bool)> = sqlx::query_as(
         "
-        SELECT playable_state, deleted_at IS NOT NULL
-        FROM rend.assets
-        WHERE id = $1::uuid
+        SELECT asset.playable_state,
+               asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
         FOR UPDATE
         ",
     )
@@ -489,17 +493,17 @@ async fn persist_artifacts_and_state(
     .await
     .context("failed to lock asset playable state")?;
 
-    let Some((previous_playable_state, deleted)) = row else {
+    let Some((previous_playable_state, deleted, asset_suspended, org_suspended)) = row else {
         tx.commit()
             .await
             .context("failed to commit missing-asset artifact transaction")?;
         return Ok(false);
     };
 
-    if deleted {
+    if deleted || asset_suspended || org_suspended {
         tx.commit()
             .await
-            .context("failed to commit deleted-asset artifact transaction")?;
+            .context("failed to commit unavailable-asset artifact transaction")?;
         return Ok(false);
     }
 
@@ -535,6 +539,13 @@ async fn persist_artifacts_and_state(
             current_opener_artifact_id = $3::uuid
         WHERE id = $1::uuid
           AND deleted_at IS NULL
+          AND suspended_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM rend_auth.organization org
+            WHERE org.id = rend.assets.organization_id
+              AND org.suspended_at IS NOT NULL
+          )
         ",
     )
     .bind(asset_id)
@@ -589,11 +600,15 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
         .begin()
         .await
         .context("failed to start failed-state transaction")?;
-    let row: Option<(String, bool)> = sqlx::query_as(
+    let row: Option<(String, bool, bool, bool)> = sqlx::query_as(
         "
-        SELECT playable_state, deleted_at IS NOT NULL
-        FROM rend.assets
-        WHERE id = $1::uuid
+        SELECT asset.playable_state,
+               asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
         FOR UPDATE
         ",
     )
@@ -602,17 +617,17 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
     .await
     .context("failed to lock asset playable state")?;
 
-    let Some((previous_playable_state, deleted)) = row else {
+    let Some((previous_playable_state, deleted, asset_suspended, org_suspended)) = row else {
         tx.commit()
             .await
             .context("failed to commit missing-asset failed-state transaction")?;
         return Ok(());
     };
 
-    if deleted {
+    if deleted || asset_suspended || org_suspended {
         tx.commit()
             .await
-            .context("failed to commit deleted-asset failed-state transaction")?;
+            .context("failed to commit unavailable-asset failed-state transaction")?;
         return Ok(());
     }
 
@@ -624,6 +639,13 @@ async fn set_failed_playable_state(db: &PgPool, asset_id: &str) -> Result<()> {
             current_opener_artifact_id = NULL
         WHERE id = $1::uuid
           AND deleted_at IS NULL
+          AND suspended_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM rend_auth.organization org
+            WHERE org.id = rend.assets.organization_id
+              AND org.suspended_at IS NOT NULL
+          )
         ",
     )
     .bind(asset_id)
