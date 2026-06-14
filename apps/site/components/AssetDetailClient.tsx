@@ -43,7 +43,9 @@ function formatBytes(value: number | undefined) {
 function formatTimestamp(value: string | undefined) {
   if (!value) return "-";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
 function countRows(counts: Record<string, number>) {

@@ -16,15 +16,19 @@ type ListResponse =
 function formatTimestamp(value: string | undefined) {
   if (!value) return "-";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
 export default function ApiKeysClient({
   initialKeys,
   initialError,
+  readOnlyReason,
 }: {
   initialKeys: ApiKeyRecord[];
   initialError?: string;
+  readOnlyReason?: string;
 }) {
   const [keys, setKeys] = useState(initialKeys);
   const [name, setName] = useState("");
