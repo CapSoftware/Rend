@@ -1108,7 +1108,7 @@ fn strict_edge_registry_requires_https_base_urls() {
         internal_token: "internal".to_owned(),
         active_heartbeat_window: Duration::from_secs(120),
         expected_edges: ExpectedEdges::default(),
-        rend_env: RendEnv::Trial,
+        rend_env: RendEnv::Production,
         allow_insecure_edge_urls: false,
     };
 
@@ -1122,7 +1122,7 @@ fn strict_edge_registry_requires_https_base_urls() {
 fn expected_edge_registration_rejects_unknown_or_changed_edges() {
     let expected_edges = ExpectedEdges::parse(
         "edge-a=us-east=https://edge-a.example.com",
-        RendEnv::Trial,
+        RendEnv::Production,
         false,
     )
     .unwrap();
@@ -1130,7 +1130,7 @@ fn expected_edge_registration_rejects_unknown_or_changed_edges() {
         internal_token: "internal".to_owned(),
         active_heartbeat_window: Duration::from_secs(120),
         expected_edges,
-        rend_env: RendEnv::Trial,
+        rend_env: RendEnv::Production,
         allow_insecure_edge_urls: false,
     };
 
@@ -1170,7 +1170,7 @@ fn expected_edge_registration_rejects_unknown_or_changed_edges() {
 fn fanout_skips_untrusted_registry_rows() {
     let expected_edges = ExpectedEdges::parse(
         "edge-a=us-east=https://edge-a.example.com",
-        RendEnv::Trial,
+        RendEnv::Production,
         false,
     )
     .unwrap();
@@ -1178,7 +1178,7 @@ fn fanout_skips_untrusted_registry_rows() {
         internal_token: "internal".to_owned(),
         active_heartbeat_window: Duration::from_secs(120),
         expected_edges,
-        rend_env: RendEnv::Trial,
+        rend_env: RendEnv::Production,
         allow_insecure_edge_urls: false,
     };
 
