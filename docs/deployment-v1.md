@@ -3,10 +3,11 @@
 This document defines the V1 production shape and the local Docker topology. It
 does not provision cloud resources.
 
-For first real us-east and london edge host trials, use the operational runbook
-and production-style examples in [`docs/edge-host-runbook-v1.md`](edge-host-runbook-v1.md).
+For initial us-east and london production edge host deployments, use the
+operational runbook and production-style examples in
+[`docs/edge-host-runbook-v1.md`](edge-host-runbook-v1.md).
 Use the image release workflow in [`docs/release-images-v1.md`](release-images-v1.md)
-to build trial images and deploy immutable digest refs from the release
+to build production images and deploy immutable digest refs from the release
 manifest.
 
 ## Service Topology
@@ -85,7 +86,7 @@ the manifest `image_digest` values, for example
 
 API:
 
-- `REND_ENV=local|trial|production`
+- `REND_ENV=local|production`
 - `DATABASE_URL`
 - `REND_REDIS_URL`
 - `CLICKHOUSE_URL`
@@ -115,9 +116,8 @@ API:
 `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional single-edge
 fallbacks for local/dev environments when no healthy registry entries exist.
 `REND_EXPECTED_EDGES` uses comma-separated
-`edge_id=region=base_url` entries. In `trial` and `production`, edge base URLs
-must be HTTPS unless `REND_ALLOW_INSECURE_EDGE_URLS=true` is set for a local
-dry-run.
+`edge_id=region=base_url` entries. In `production`, edge base URLs must be
+HTTPS.
 
 Worker:
 
@@ -133,7 +133,7 @@ Worker:
 
 Edge:
 
-- `REND_ENV=local|trial|production`
+- `REND_ENV=local|production`
 - `REND_EDGE_BIND_ADDR`
 - `REND_EDGE_ID`
 - `REND_EDGE_REGION`
@@ -167,15 +167,27 @@ Edge:
 - `REND_PLAYBACK_SIGNING_KEY_ID`
 - `REND_PLAYBACK_SIGNING_SECRET`
 
-Use `.env.example` for host development and `.env.docker.example` for Docker
-service-name defaults. Production secrets must come from the deployment
-platform, not checked-in env files.
+Use `.env.local.example` for host development and `.env.docker.example` for
+Docker service-name defaults. Production secrets must come from
+`.env.production.local` for local production-targeted checks or from the
+deployment platform for real deploys, not from `.env.local`.
 
-`trial` and `production` mode reject empty required secrets, checked-in dev
+Production mode rejects empty required secrets, checked-in dev
 defaults, and local service URLs such as `localhost`, `127.0.0.1`, `minio`,
 `rend-api`, or `rend-edge`. Full cache LRU eviction and stream-while-write cold
-fills remain later work unless trial data shows these resource guards block the
-first hosted trials.
+fills remain later work unless production data shows these resource guards block the
+initial hosted production deployments.
+
+Local validation and production-profile validation are separate:
+
+```sh
+bun run env:local
+bun run env:production
+bun run verify:production-local
+```
+
+Production-profile commands load `.env.production` and `.env.production.local`
+or host/platform env vars. They do not load `.env.local`.
 
 ## Volumes
 
@@ -226,7 +238,7 @@ service. Production object storage should be provisioned outside this repo.
 
 ## Operator Harness
 
-Use the checked-in operator scripts for first-host trials. They do not provision
+Use the checked-in operator scripts for first-host production deployments. They do not provision
 cloud resources, DNS, TLS, proxies, registry credentials, image signing, or
 SBOMs.
 
@@ -255,10 +267,10 @@ intentional architecture change:
 
 ```sh
 scripts/preflight-control-plane-host.sh \
-  --manifest .rend/releases/trial-001.json
+  --manifest .rend/releases/production-001.json
 
 scripts/preflight-edge-host.sh \
-  --manifest .rend/releases/trial-001.json
+  --manifest .rend/releases/production-001.json
 ```
 
 The control-plane preflight checks Docker/Compose, compose/env files, manifest
@@ -276,11 +288,11 @@ with manifest image refs:
 
 ```sh
 scripts/deploy-control-plane-host.sh \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --dry-run
 
 scripts/deploy-edge-host.sh \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --dry-run
 ```
 
@@ -314,7 +326,7 @@ runs. For `psql` probes only, it normalizes hosted Postgres URLs by removing
 1. Provision managed Postgres, Redis, S3-compatible storage, and ClickHouse.
 2. Apply or confirm ClickHouse schema.
 3. From a clean git worktree, build and optionally push images with
-   `bun run release:images -- --tag trial-001 --registry <registry-prefix>
+   `bun run release:images -- --tag production-001 --registry <registry-prefix>
    --platform linux/amd64 --push`. Pushed releases require the git SHA to be
    reachable from a pushed branch or tag and copy the accepted manifest to
    `docs/releases/`.
