@@ -526,6 +526,24 @@ fn delete_asset_normalizes_uuid_and_rejects_malformed_id() {
 }
 
 #[test]
+fn delete_origin_cleanup_only_accepts_rend_owned_asset_prefix() {
+    let asset_id = "00000000-0000-0000-0000-0000000000ab";
+
+    assert!(is_rend_owned_asset_object_key(
+        asset_id,
+        "videos/00000000-0000-0000-0000-0000000000ab/hls/master.m3u8"
+    ));
+    assert!(!is_rend_owned_asset_object_key(
+        asset_id,
+        "videos/00000000-0000-0000-0000-0000000000ac/hls/master.m3u8"
+    ));
+    assert!(!is_rend_owned_asset_object_key(
+        asset_id,
+        "videos/00000000-0000-0000-0000-0000000000ab/../other"
+    ));
+}
+
+#[test]
 fn asset_events_unknown_asset_returns_404() {
     let Err(error) = asset_events_response(false, "asset-123".to_owned(), Vec::new()) else {
         panic!("unknown asset unexpectedly returned lifecycle events");
