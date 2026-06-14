@@ -55,6 +55,15 @@ shell_quote() {
   printf "%q" "$1"
 }
 
+remote_sudo() {
+  local command="$1"
+  # Production env files under /etc/rend are root-only, and root may own the
+  # Docker credentials used for GHCR pulls. Keep file upload as the SSH user,
+  # then run the actual host checks and deploy through passwordless sudo.
+  # shellcheck disable=SC2029 # remote command is intentionally built and quoted locally.
+  ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$command")"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --role)
@@ -158,13 +167,11 @@ ssh "${ssh_args[@]}" "$target" "tar -xzf $(shell_quote "$remote_bundle") -C $rem
 
 if [[ "$role" == "control-plane" ]]; then
   echo "Deploying control-plane on $target"
-  # shellcheck disable=SC2029 # remote command uses validated, shell-quoted local values.
-  ssh "${ssh_args[@]}" "$target" \
+  remote_sudo \
     "cd $remote_dir_q && scripts/preflight-control-plane-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --skip-bind-port-check && scripts/deploy-control-plane-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --dry-run && scripts/deploy-control-plane-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") && curl -fsS http://127.0.0.1:4000/readyz && curl -fsS http://127.0.0.1:4000/healthz"
 else
   echo "Deploying edge on $target"
-  # shellcheck disable=SC2029 # remote command uses validated, shell-quoted local values.
-  ssh "${ssh_args[@]}" "$target" \
+  remote_sudo \
     "cd $remote_dir_q && scripts/preflight-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --skip-bind-port-check && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --dry-run && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") && curl -fsS http://127.0.0.1:4100/readyz && curl -fsS http://127.0.0.1:4100/healthz"
 fi
 
