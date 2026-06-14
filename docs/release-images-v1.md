@@ -43,6 +43,7 @@ Production release build:
 bun run release:images -- \
   --tag trial-001 \
   --registry registry.example.com/rend \
+  --platform linux/amd64 \
   --push
 ```
 
@@ -58,14 +59,23 @@ sudo docker login ghcr.io
 Each image is tagged with the full git SHA. When `--tag` is provided, the same
 image also receives the human release tag, for example `trial-001`.
 
-The script writes a manifest under `.rend/releases/` by default. Override it
-with `--manifest`:
+The release workflow is platform-explicit. Hosted trial releases default to
+`linux/amd64`; pass `--platform` only when the target hosts intentionally change.
+The script validates Docker's built image OS/architecture before it writes the
+manifest.
+
+The script writes a local manifest under `.rend/releases/` by default. For
+pushed releases it also writes a non-secret accepted manifest artifact under
+`docs/releases/` by default so the exact digest refs and platform metadata can
+be recovered later even though `.rend/` is ignored. Override paths with
+`--manifest` and `--artifact-dir`:
 
 ```sh
 bun run release:images -- \
   --tag trial-001 \
   --registry registry.example.com/rend \
   --manifest .rend/releases/trial-001.json \
+  --artifact-dir docs/releases \
   --push
 ```
 
@@ -89,10 +99,13 @@ commands still work. Those defaults are not accepted by the release workflow.
   dry run;
 - `--push` is refused when the worktree is dirty;
 - `--push` requires `--registry` or `--prefix`;
+- `--push` requires the git SHA used for `org.opencontainers.image.revision` to
+  be reachable from a pushed branch or tag;
 - source, revision, version, and created labels must be real values, not
   `unknown`;
 - built image labels must match the requested service, source, git SHA,
   version, and build time;
+- built image OS/architecture must match `--platform`;
 - pushed builds must resolve registry digest refs before the manifest is
   written.
 
@@ -107,6 +120,9 @@ The manifest maps each service to its tag, digest, git SHA, and build time:
       "image_tag": "registry.example.com/rend/rend-api:<git-sha>",
       "digest": "sha256:...",
       "image_digest": "registry.example.com/rend/rend-api@sha256:...",
+      "platform": "linux/amd64",
+      "os": "linux",
+      "architecture": "amd64",
       "git_sha": "<git-sha>",
       "build_time": "2026-06-13T12:00:00Z"
     }
@@ -117,6 +133,10 @@ The manifest maps each service to its tag, digest, git SHA, and build time:
 For local dry-run builds, `digest_kind` is `local-image-id` and `image_digest`
 is `null`. For pushed builds, `digest_kind` is `registry-manifest` and
 `image_digest` is the immutable deploy reference.
+
+Accepted pushed manifests are durable release artifacts in `docs/releases/`.
+They are non-secret: they contain image repositories, digest refs, git SHA,
+build time, and platform metadata, but no env values or credentials.
 
 ## Deploy From Manifest
 
@@ -140,7 +160,9 @@ PY
 Before deploy or rollback, run the relevant host preflight without `--dry-run`.
 It validates the manifest and pulls each `image_digest` ref, which proves the
 host user and Docker daemon context can read the registry before Compose
-touches running services.
+touches running services. It also verifies the pulled image platform matches the
+host expectation, `linux/amd64` by default. Pass `--expected-platform` only when
+the host fleet intentionally changes architecture.
 
 Control-plane deploy:
 
