@@ -14,10 +14,10 @@ export const metadata: Metadata = {
 };
 
 export default async function AssetsPage() {
-  await requireDashboardAccess("/dashboard/assets");
+  const access = await requireDashboardAccess("/dashboard/assets");
 
   try {
-    const { assets } = await listAssets();
+    const { assets } = await listAssets(access);
     return <AssetsClient initialAssets={assets} />;
   } catch (error) {
     const message =

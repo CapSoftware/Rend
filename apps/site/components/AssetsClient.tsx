@@ -97,7 +97,7 @@ export default function AssetsClient({
   }
 
   async function signOut() {
-    await fetch("/api/session", { method: "DELETE", cache: "no-store" }).catch(() => undefined);
+    await fetch("/api/auth/sign-out", { method: "POST", cache: "no-store" }).catch(() => undefined);
     window.location.assign("/login");
   }
 
@@ -128,6 +128,7 @@ export default function AssetsClient({
           <img src="/rend-logo.svg" alt="Rend" className="app-logo" />
         </a>
         <nav>
+          <Link href="/dashboard/api-keys">API keys</Link>
           <button onClick={refreshAssets} disabled={refreshing} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>

@@ -190,7 +190,7 @@ export default function AssetDetailClient({
   }
 
   async function signOut() {
-    await fetch("/api/session", { method: "DELETE", cache: "no-store" }).catch(() => undefined);
+    await fetch("/api/auth/sign-out", { method: "POST", cache: "no-store" }).catch(() => undefined);
     window.location.assign("/login");
   }
 
@@ -206,6 +206,7 @@ export default function AssetDetailClient({
           Assets
         </Link>
         <nav>
+          <Link href="/dashboard/api-keys">API keys</Link>
           <a href={watchPath} rel="noreferrer" target="_blank">
             Open watch
           </a>

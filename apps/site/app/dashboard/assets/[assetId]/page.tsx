@@ -28,17 +28,17 @@ export default async function AssetPage({ params }: AssetPageProps) {
   const { assetId: rawAssetId } = await params;
   const assetId = normalizeAssetId(rawAssetId);
   if (!assetId) notFound();
-  await requireDashboardAccess(`/dashboard/assets/${assetId}`);
+  const access = await requireDashboardAccess(`/dashboard/assets/${assetId}`);
 
   let asset;
   try {
-    asset = await fetchAssetDetail(assetId);
+    asset = await fetchAssetDetail(access, assetId);
   } catch (error) {
     if (error instanceof AssetApiError && [400, 404].includes(error.status)) notFound();
     throw error;
   }
 
-  const analytics = await fetchAssetPlaybackAnalytics(assetId).catch(() => null);
+  const analytics = await fetchAssetPlaybackAnalytics(access, assetId).catch(() => null);
   const telemetry = recentPlayerTelemetryEvents({ assetId, limit: 20 });
 
   return (
