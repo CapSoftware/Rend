@@ -6,6 +6,7 @@
     "dev": "node ../../scripts/with-root-env.mjs next dev",
     "build": "node ../../scripts/with-root-env.mjs next build",
     "start": "node ../../scripts/with-root-env.mjs next start",
+    "test": "node --test --experimental-strip-types lib/player-telemetry.test.mts lib/dashboard-auth.test.mts lib/asset-api.test.mts lib/asset-routes.test.mts app/api/player/telemetry/route.test.mts",
     "test:telemetry": "node --test --experimental-strip-types lib/player-telemetry.test.mts app/api/player/telemetry/route.test.mts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"
