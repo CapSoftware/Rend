@@ -29,6 +29,8 @@ skip_public_deny=false
 skip_playback=false
 skip_analytics=false
 rewrite_playback_base=false
+run_readiness_gate=false
+readiness_output="${REND_READINESS_OUTPUT:-}"
 edge_labels=()
 edge_public_bases=()
 edge_private_bases=()
@@ -63,6 +65,8 @@ Options:
   --api-env FILE              Read API, Postgres, and ClickHouse defaults from file.
   --edge-env FILE             Read edge id/token/control-plane/base URL defaults from file.
   --rewrite-playback-base     Rewrite API playback URL host to --edge-base before fetching.
+  --run-readiness-gate        Run the synthetic playback readiness gate after verifier smokes.
+  --readiness-output PATH     Readiness run artifact path.
   --skip-registration         Skip edge registration visibility check.
   --skip-public-deny          Skip public deny-surface checks for local direct-edge verification.
   --skip-playback             Skip playback and analytics checks.
@@ -150,6 +154,14 @@ while [[ $# -gt 0 ]]; do
     --rewrite-playback-base)
       rewrite_playback_base=true
       shift
+      ;;
+    --run-readiness-gate)
+      run_readiness_gate=true
+      shift
+      ;;
+    --readiness-output)
+      readiness_output="${2:?missing value for $1}"
+      shift 2
       ;;
     --skip-registration)
       skip_registration=true
@@ -648,6 +660,72 @@ fetch_edge_metrics() {
   return 1
 }
 
+edge_region_for_label() {
+  python3 - "$expected_edges" "$1" <<'PY'
+import sys
+
+expected_edges, wanted = sys.argv[1:3]
+for raw in expected_edges.split(","):
+    parts = raw.strip().split("=", 2)
+    if len(parts) == 3 and parts[0].strip() == wanted:
+        print(parts[1].strip() or "unknown")
+        raise SystemExit(0)
+print("unknown")
+PY
+}
+
+readiness_edges_env_value() {
+  local entries=()
+  local index edge_label region public_base private_base
+  for index in "${!edge_public_bases[@]}"; do
+    edge_label="${edge_labels[$index]}"
+    region="$(edge_region_for_label "$edge_label")"
+    public_base="${edge_public_bases[$index]}"
+    private_base="${edge_private_bases[$index]}"
+    entries+=("$edge_label=$region=$public_base=$private_base")
+  done
+  local IFS=,
+  printf '%s' "${entries[*]}"
+}
+
+run_playback_readiness_gate() {
+  if [[ "$run_readiness_gate" != "true" ]]; then
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    operator_fail "node is required for the playback readiness gate"
+    return 0
+  fi
+  if [[ -z "$dev_api_key" ]]; then
+    operator_fail "playback readiness gate requires --dev-api-key or --api-env"
+    return 0
+  fi
+  if [[ -z "$edge_internal_token" ]]; then
+    operator_fail "playback readiness gate requires --edge-internal-token or --edge-env"
+    return 0
+  fi
+
+  local readiness_edges
+  readiness_edges="$(readiness_edges_env_value)"
+  local env_vars=(
+    "REND_READINESS_TARGET=configured"
+    "REND_API_BASE_URL=$api_base"
+    "REND_READINESS_API_KEY=$dev_api_key"
+    "REND_EDGE_INTERNAL_TOKEN=$edge_internal_token"
+    "REND_READINESS_EDGES=$readiness_edges"
+    "REND_READINESS_SKIP_LOCAL_STACK=1"
+  )
+  if [[ -n "$readiness_output" ]]; then
+    env_vars+=("REND_READINESS_OUTPUT=$readiness_output")
+  fi
+
+  if env "${env_vars[@]}" node "$root_dir/scripts/playback-readiness-gate.mjs" --target configured --skip-local-stack; then
+    operator_ok "playback readiness gate passed"
+  else
+    operator_fail "playback readiness gate failed"
+  fi
+}
+
 check_playback_and_analytics() {
   if [[ "$skip_playback" == "true" ]]; then
     operator_warn "skipping playback and analytics checks"
@@ -827,6 +905,7 @@ check_registration
 check_clickhouse_telemetry
 check_public_deny_surface
 check_playback_and_analytics
+run_playback_readiness_gate
 
 operator_finish
 echo "First-host post-deploy verification passed"
