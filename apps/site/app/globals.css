@@ -355,7 +355,8 @@
   }
 
   .app-state-failed,
-  .app-state-deleted {
+  .app-state-deleted,
+  .app-state-suspended {
     border-color: #f2b8b5;
     background: #fff4f2;
     color: #9f1f17;
@@ -423,6 +424,10 @@
     display: grid;
     max-width: 520px;
     gap: 12px;
+  }
+
+  .app-form-spacer {
+    height: 18px;
   }
 
   .app-key-form label {
