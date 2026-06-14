@@ -174,9 +174,9 @@ deployment platform for real deploys, not from `.env.local`.
 
 Production mode rejects empty required secrets, checked-in dev
 defaults, and local service URLs such as `localhost`, `127.0.0.1`, `minio`,
-`rend-api`, or `rend-edge`. Full cache LRU eviction and stream-while-write cold
-fills remain later work unless production data shows these resource guards block the
-initial hosted production deployments.
+`rend-api`, or `rend-edge`. `rend-edge` streams cold playback misses while writing
+atomic cache files and enforces cache size/free-space bounds with deterministic
+priority eviction.
 
 Local validation and production-profile validation are separate:
 
