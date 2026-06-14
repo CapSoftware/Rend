@@ -1,8 +1,8 @@
-import { cookies } from "next/headers";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import {
-  DASHBOARD_SESSION_COOKIE,
-  dashboardAccessFromCookieValue,
+  dashboardAccessFromHeaders,
+  type DashboardAccessContext,
 } from "./dashboard-auth.ts";
 
 export function safeDashboardNextPath(value: string | string[] | undefined) {
@@ -13,11 +13,12 @@ export function safeDashboardNextPath(value: string | string[] | undefined) {
 }
 
 export async function dashboardSessionIsValid() {
-  const cookieStore = await cookies();
-  return dashboardAccessFromCookieValue(cookieStore.get(DASHBOARD_SESSION_COOKIE)?.value).ok;
+  const access = await dashboardAccessFromHeaders(new Headers(await headers()));
+  return access.ok;
 }
 
-export async function requireDashboardAccess(nextPath = "/dashboard/assets") {
-  if (await dashboardSessionIsValid()) return;
+export async function requireDashboardAccess(nextPath = "/dashboard/assets"): Promise<DashboardAccessContext> {
+  const access = await dashboardAccessFromHeaders(new Headers(await headers()));
+  if (access.ok) return access.context;
   redirect(`/login?next=${encodeURIComponent(nextPath)}`);
 }
