@@ -1,126 +1,258 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { and, asc, eq } from "drizzle-orm";
+import { ensureLocalAuthSeed } from "./auth-seed.ts";
+import { getAuth } from "./auth.ts";
+import { member, organization } from "./db/schema.ts";
+import { getSiteDb } from "./server-db.ts";
 
-export const DASHBOARD_SESSION_COOKIE = "rend_dashboard_session";
-
-const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
-const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
+const LOCAL_AUTH_SECRET = "local-better-auth-secret-only-for-rend-development";
+const LOCAL_AUTH_URL = "http://localhost:3000";
 
 type Env = Record<string, string | undefined>;
 
+export type DashboardRole = "owner" | "admin" | "member";
+
+export type DashboardAccessContext = {
+  userId: string;
+  userEmail: string;
+  organizationId: string;
+  organizationName: string;
+  organizationSlug: string;
+  role: DashboardRole;
+};
+
 export type DashboardAccessResult =
-  | { ok: true }
-  | { ok: false; reason: "not_configured" | "unauthorized" | "expired" };
+  | { ok: true; context: DashboardAccessContext }
+  | { ok: false; reason: "not_configured" | "unauthorized" | "forbidden" };
+
+type BetterAuthSessionResult = {
+  user?: {
+    id?: unknown;
+    email?: unknown;
+  };
+  session?: {
+    activeOrganizationId?: unknown;
+    active_organization_id?: unknown;
+  };
+};
 
 function envString(name: string, env: Env = process.env) {
   return (env[name] || "").trim();
 }
 
-function operatorToken(env: Env = process.env) {
-  return envString("REND_SITE_OPERATOR_TOKEN", env);
+function envBoolean(name: string, env: Env = process.env) {
+  const value = envString(name, env).toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
 }
 
-function signingSecret(env: Env = process.env) {
-  return envString("REND_SITE_AUTH_SECRET", env) || operatorToken(env);
+function isProductionProfile(env: Env = process.env) {
+  const profile = envString("REND_ENV_PROFILE", env) || envString("REND_ENV", env) || env.NODE_ENV || "local";
+  return ["production", "prod"].includes(profile.toLowerCase());
 }
 
-function constantTimeEqual(left: string, right: string) {
-  const key = "rend-dashboard-compare";
-  const leftDigest = createHmac("sha256", key).update(left).digest();
-  const rightDigest = createHmac("sha256", key).update(right).digest();
-  return timingSafeEqual(leftDigest, rightDigest);
-}
-
-function sessionSignature(payload: string, env: Env = process.env) {
-  return createHmac("sha256", signingSecret(env)).update(payload).digest("base64url");
-}
-
-function cookieValue(cookieHeader: string, name: string) {
-  for (const part of cookieHeader.split(";")) {
-    const [rawName, ...rawValue] = part.trim().split("=");
-    if (rawName === name) return rawValue.join("=");
+function isLocalUrl(value: string) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "localhost" || host === "0.0.0.0" || host === "::1" || host.startsWith("127.");
+  } catch {
+    return true;
   }
-  return null;
 }
 
 export function dashboardAuthConfigured(env: Env = process.env) {
-  return Boolean(operatorToken(env));
-}
+  if (!isProductionProfile(env)) return true;
 
-export function operatorTokenMatches(provided: string | null | undefined, env: Env = process.env) {
-  const expected = operatorToken(env);
-  const candidate = (provided || "").trim();
-  return Boolean(expected && candidate && constantTimeEqual(candidate, expected));
-}
-
-export function createDashboardSessionCookieValue(nowMs = Date.now(), env: Env = process.env) {
-  if (!dashboardAuthConfigured(env)) throw new Error("dashboard_auth_not_configured");
-
-  const expiresAtMs = nowMs + SESSION_MAX_AGE_MS;
-  const payload = `${expiresAtMs}.${randomBytes(16).toString("base64url")}`;
-  return `${payload}.${sessionSignature(payload, env)}`;
-}
-
-export function dashboardSessionCookieAttributes(env: Env = process.env) {
-  const secure = envString("NODE_ENV", env) === "production" ? "; Secure" : "";
-  return `Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax${secure}`;
-}
-
-export function expiredDashboardSessionCookieAttributes(env: Env = process.env) {
-  const secure = envString("NODE_ENV", env) === "production" ? "; Secure" : "";
-  return `Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure}`;
-}
-
-export function dashboardAccessFromCookieValue(
-  rawCookieValue: string | null | undefined,
-  nowMs = Date.now(),
-  env: Env = process.env
-): DashboardAccessResult {
-  if (!dashboardAuthConfigured(env)) return { ok: false, reason: "not_configured" };
-  if (!rawCookieValue) return { ok: false, reason: "unauthorized" };
-
-  const parts = rawCookieValue.split(".");
-  if (parts.length !== 3) return { ok: false, reason: "unauthorized" };
-
-  const [rawExpiresAtMs, nonce, signature] = parts;
-  const expiresAtMs = Number(rawExpiresAtMs);
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= 0 || !nonce || !signature) {
-    return { ok: false, reason: "unauthorized" };
+  const secret = envString("BETTER_AUTH_SECRET", env) || envString("AUTH_SECRET", env);
+  const baseUrl = envString("BETTER_AUTH_URL", env) || envString("REND_AUTH_BASE_URL", env);
+  if (!secret || secret === LOCAL_AUTH_SECRET) return false;
+  if (!baseUrl || baseUrl === LOCAL_AUTH_URL || isLocalUrl(baseUrl)) return false;
+  if (!envBoolean("REND_AUTH_EMAIL_DISABLED", env)) {
+    if (!envString("RESEND_API_KEY", env) || !envString("REND_AUTH_EMAIL_FROM", env)) {
+      return false;
+    }
   }
-  if (expiresAtMs <= nowMs) return { ok: false, reason: "expired" };
-
-  const payload = `${rawExpiresAtMs}.${nonce}`;
-  return constantTimeEqual(signature, sessionSignature(payload, env))
-    ? { ok: true }
-    : { ok: false, reason: "unauthorized" };
+  return true;
 }
 
-export function dashboardAccessFromRequest(
-  request: Request,
-  env: Env = process.env
-): DashboardAccessResult {
-  if (!dashboardAuthConfigured(env)) return { ok: false, reason: "not_configured" };
+function safeString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
-  const authorization = request.headers.get("authorization") || "";
-  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (operatorTokenMatches(bearer, env)) return { ok: true };
+function activeOrganizationId(session: BetterAuthSessionResult["session"]) {
+  return safeString(session?.activeOrganizationId) ?? safeString(session?.active_organization_id);
+}
 
-  return dashboardAccessFromCookieValue(
-    cookieValue(request.headers.get("cookie") || "", DASHBOARD_SESSION_COOKIE),
-    Date.now(),
-    env
-  );
+function normalizeRole(value: string): DashboardRole {
+  return value === "owner" || value === "admin" || value === "member" ? value : "member";
+}
+
+function defaultOrganizationSlug(userId: string) {
+  return `user-${userId.replace(/-/g, "").slice(0, 16)}`;
+}
+
+function defaultOrganizationName(email: string) {
+  const localPart = email.split("@")[0]?.trim() || "Rend";
+  return `${localPart} workspace`;
+}
+
+async function provisionDefaultOrganization(userId: string, userEmail: string) {
+  const db = getSiteDb();
+  const now = new Date();
+  const slug = defaultOrganizationSlug(userId);
+  const name = defaultOrganizationName(userEmail);
+
+  const [insertedOrg] = await db
+    .insert(organization)
+    .values({
+      name,
+      slug,
+      metadata: { provisioned: "email-otp-signup" },
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoNothing({ target: organization.slug })
+    .returning({
+      organizationId: organization.id,
+      organizationName: organization.name,
+      organizationSlug: organization.slug,
+    });
+
+  const [existingOrg] = insertedOrg
+    ? [insertedOrg]
+    : await db
+        .select({
+          organizationId: organization.id,
+          organizationName: organization.name,
+          organizationSlug: organization.slug,
+        })
+        .from(organization)
+        .where(eq(organization.slug, slug))
+        .limit(1);
+
+  if (!existingOrg) return null;
+
+  await db
+    .insert(member)
+    .values({
+      organization_id: existingOrg.organizationId,
+      user_id: userId,
+      role: "owner",
+      created_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [member.user_id, member.organization_id],
+      set: { role: "owner" },
+    });
+
+  return {
+    ...existingOrg,
+    role: "owner" as const,
+  };
+}
+
+export function canManageApiKeys(context: DashboardAccessContext) {
+  return context.role === "owner" || context.role === "admin";
+}
+
+export function canDeleteAssets(context: DashboardAccessContext) {
+  return context.role === "owner" || context.role === "admin";
+}
+
+export function canUploadAssets(context: DashboardAccessContext) {
+  return context.role === "owner" || context.role === "admin";
+}
+
+export async function dashboardAccessFromHeaders(headers: Headers): Promise<DashboardAccessResult> {
+  if (!dashboardAuthConfigured()) return { ok: false, reason: "not_configured" };
+
+  await ensureLocalAuthSeed();
+
+  const auth = getAuth() as {
+    api: { getSession: (input: { headers: Headers }) => Promise<unknown> };
+  };
+  const sessionResult = (await auth.api.getSession({ headers })) as BetterAuthSessionResult | null;
+  const userId = safeString(sessionResult?.user?.id);
+  const userEmail = safeString(sessionResult?.user?.email);
+  if (!userId || !userEmail) return { ok: false, reason: "unauthorized" };
+
+  const selectedOrgId = activeOrganizationId(sessionResult?.session);
+  const db = getSiteDb();
+  const where = selectedOrgId
+    ? and(eq(member.user_id, userId), eq(member.organization_id, selectedOrgId))
+    : eq(member.user_id, userId);
+
+  const [row] = await db
+    .select({
+      organizationId: organization.id,
+      organizationName: organization.name,
+      organizationSlug: organization.slug,
+      role: member.role,
+    })
+    .from(member)
+    .innerJoin(organization, eq(member.organization_id, organization.id))
+    .where(where)
+    .orderBy(asc(member.created_at))
+    .limit(1);
+
+  if (!row) {
+    if (selectedOrgId) return { ok: false, reason: "forbidden" };
+
+    const provisioned = await provisionDefaultOrganization(userId, userEmail);
+    if (!provisioned) return { ok: false, reason: "unauthorized" };
+
+    return {
+      ok: true,
+      context: {
+        userId,
+        userEmail,
+        organizationId: provisioned.organizationId,
+        organizationName: provisioned.organizationName,
+        organizationSlug: provisioned.organizationSlug,
+        role: provisioned.role,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    context: {
+      userId,
+      userEmail,
+      organizationId: row.organizationId,
+      organizationName: row.organizationName,
+      organizationSlug: row.organizationSlug,
+      role: normalizeRole(row.role),
+    },
+  };
+}
+
+export function dashboardAccessFromRequest(request: Request) {
+  return dashboardAccessFromHeaders(request.headers);
 }
 
 export function dashboardAccessErrorResponse(access: Exclude<DashboardAccessResult, { ok: true }>) {
-  const isNotConfigured = access.reason === "not_configured";
+  const status =
+    access.reason === "not_configured" ? 503 : access.reason === "forbidden" ? 403 : 401;
+  const error =
+    access.reason === "not_configured"
+      ? "dashboard_auth_not_configured"
+      : access.reason === "forbidden"
+        ? "forbidden"
+        : "unauthorized";
+  const message =
+    access.reason === "not_configured"
+      ? "Dashboard authentication is not configured"
+      : access.reason === "forbidden"
+        ? "Insufficient organization permissions"
+        : "Authentication required";
+
   return Response.json(
     {
       status: "error",
-      error: isNotConfigured ? "dashboard_auth_not_configured" : "unauthorized",
-      message: isNotConfigured ? "Dashboard authentication is not configured" : "Authentication required",
+      error,
+      message,
     },
     {
-      status: isNotConfigured ? 503 : 401,
+      status,
       headers: {
         "cache-control": "no-store",
         "content-type": "application/json",
