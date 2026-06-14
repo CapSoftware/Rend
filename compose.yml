@@ -30,6 +30,7 @@ x-rend-common-env: &rend-common-env
   AWS_ACCESS_KEY_ID: rend_minio
   AWS_SECRET_ACCESS_KEY: rend_minio_password
   REND_DEV_API_KEY: dev-api-key
+  REND_SITE_INTERNAL_TOKEN: local-site-internal-token
   REND_EDGE_INTERNAL_TOKEN: dev-internal-token
   REND_INTERNAL_TELEMETRY_TOKEN: dev-internal-token
   REND_PLAYBACK_SIGNING_KEY_ID: local-dev-playback-key
