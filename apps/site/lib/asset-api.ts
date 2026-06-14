@@ -176,7 +176,7 @@ export function normalizeAssetId(value: string) {
 }
 
 function unsupportedUpstreamStatus(status: number) {
-  return ![400, 404, 409, 413, 415].includes(status);
+  return ![400, 403, 404, 409, 413, 415].includes(status);
 }
 
 async function upstreamError(upstream: Response): Promise<AssetApiError> {
@@ -336,6 +336,10 @@ function sanitizeAssetSummary(value: unknown): AssetSummary | null {
     updated_at: updatedAt,
     source_byte_size: safeOptionalPositiveInteger(value.source_byte_size),
     artifact_count: artifactCount ?? 0,
+    suspended_at: safeTimestamp(value.suspended_at),
+    suspension_reason: safeString(value.suspension_reason, 1000),
+    organization_suspended_at: safeTimestamp(value.organization_suspended_at),
+    organization_suspension_reason: safeString(value.organization_suspension_reason, 1000),
   };
 }
 
