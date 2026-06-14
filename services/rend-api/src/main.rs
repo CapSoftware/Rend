@@ -20,7 +20,7 @@ use aws_sdk_s3::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path as AxumPath, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -40,6 +40,7 @@ use rend_playback_auth::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::{net::TcpListener, sync::mpsc};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
@@ -72,6 +73,9 @@ const INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: u64 = 120;
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
+const LOCAL_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
+const LOCAL_SITE_INTERNAL_TOKEN: &str = "local-site-internal-token";
+const PLAYBACK_COOKIE_NAME: &str = "__rend_playback";
 
 #[derive(Clone)]
 struct ApiConfig {
@@ -80,6 +84,7 @@ struct ApiConfig {
     redis_url: String,
     object_store_health_url: String,
     dev_api_key: String,
+    site_internal_token: String,
     s3_endpoint: String,
     s3_region: String,
     s3_bucket: String,
@@ -141,7 +146,12 @@ impl ApiConfig {
             "OBJECT_STORE_HEALTH_URL",
             "http://localhost:9100/minio/health/ready",
         );
-        let dev_api_key = env_string("REND_DEV_API_KEY", "dev-api-key");
+        let dev_api_key = if rend_env.is_strict() {
+            env_string("REND_DEV_API_KEY", "")
+        } else {
+            env_string("REND_DEV_API_KEY", "dev-api-key")
+        };
+        let site_internal_token = env_string("REND_SITE_INTERNAL_TOKEN", LOCAL_SITE_INTERNAL_TOKEN);
         let s3_endpoint = env_string("S3_ENDPOINT", "http://localhost:9100");
         let s3_region = env_string("S3_REGION", "us-east-1");
         let s3_bucket = env_string("S3_BUCKET", "rend-local");
@@ -206,19 +216,30 @@ impl ApiConfig {
             ("REND_REDIS_URL", &redis_url),
             ("CLICKHOUSE_URL", &clickhouse_url),
             ("OBJECT_STORE_HEALTH_URL", &object_store_health_url),
-            ("REND_DEV_API_KEY", &dev_api_key),
             ("S3_ENDPOINT", &s3_endpoint),
             ("S3_REGION", &s3_region),
             ("S3_BUCKET", &s3_bucket),
             ("AWS_ACCESS_KEY_ID", &aws_access_key_id),
             ("AWS_SECRET_ACCESS_KEY", &aws_secret_access_key),
+            ("REND_SITE_INTERNAL_TOKEN", &site_internal_token),
         ] {
             anyhow::ensure!(!value.trim().is_empty(), "{key} must not be empty");
         }
-        validate_required_secret(rend_env, "REND_DEV_API_KEY", &dev_api_key)?;
+        if rend_env.is_strict() {
+            anyhow::ensure!(
+                dev_api_key.trim().is_empty(),
+                "REND_DEV_API_KEY is local/dev only and must not be set in production"
+            );
+        } else {
+            anyhow::ensure!(
+                !dev_api_key.trim().is_empty(),
+                "REND_DEV_API_KEY must not be empty in local profile"
+            );
+        }
         validate_required_secret(rend_env, "AWS_ACCESS_KEY_ID", &aws_access_key_id)?;
         validate_required_secret(rend_env, "AWS_SECRET_ACCESS_KEY", &aws_secret_access_key)?;
         validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
+        validate_required_secret(rend_env, "REND_SITE_INTERNAL_TOKEN", &site_internal_token)?;
         let telemetry_secret_for_validation = if rend_env.is_strict() {
             internal_telemetry_token.as_str()
         } else {
@@ -271,6 +292,7 @@ impl ApiConfig {
             redis_url,
             object_store_health_url,
             dev_api_key,
+            site_internal_token,
             s3_endpoint,
             s3_region,
             s3_bucket,
@@ -323,6 +345,40 @@ struct AppState {
     http: reqwest::Client,
     s3: S3Client,
     started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ApiScope {
+    Upload,
+    Read,
+    Delete,
+    Analytics,
+}
+
+#[derive(Clone, Debug)]
+struct RequestAuth {
+    organization_id: String,
+    scopes: BTreeSet<ApiScope>,
+}
+
+impl RequestAuth {
+    fn all(organization_id: impl Into<String>) -> Self {
+        Self {
+            organization_id: organization_id.into(),
+            scopes: [
+                ApiScope::Upload,
+                ApiScope::Read,
+                ApiScope::Delete,
+                ApiScope::Analytics,
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn has_scope(&self, scope: ApiScope) -> bool {
+        self.scopes.contains(&scope)
+    }
 }
 
 #[derive(Serialize)]
@@ -457,6 +513,8 @@ struct PlaybackBootstrapResponse {
     asset_id: String,
     source_state: String,
     playable_state: String,
+    #[serde(skip)]
+    playback_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     playback_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -796,7 +854,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            require_dev_api_key,
+            require_api_auth,
         ));
     let telemetry_routes = Router::new()
         .route("/playback", post(telemetry::post_playback_telemetry))
@@ -1126,10 +1184,11 @@ async fn heartbeat_edge(
 
 async fn create_video(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    match create_video_inner(state, headers, body).await {
+    match create_video_inner(state, auth, headers, body).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1137,9 +1196,10 @@ async fn create_video(
 
 async fn list_assets(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     Query(query): Query<AssetListQuery>,
 ) -> Response {
-    match list_assets_inner(state, query).await {
+    match list_assets_inner(state, auth, query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1147,19 +1207,22 @@ async fn list_assets(
 
 async fn list_assets_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     query: AssetListQuery,
 ) -> Result<AssetListResponse, AppError> {
+    require_scope(&auth, ApiScope::Read)?;
     let limit = normalize_asset_list_limit(query.limit);
-    let assets = fetch_asset_list_items(&state.db, limit).await?;
+    let assets = fetch_asset_list_items(&state.db, &auth.organization_id, limit).await?;
 
     Ok(AssetListResponse { assets })
 }
 
 async fn get_asset_current(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     AxumPath(asset_id): AxumPath<String>,
 ) -> Response {
-    match get_asset_current_inner(state, asset_id).await {
+    match get_asset_current_inner(state, auth, asset_id).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1167,11 +1230,13 @@ async fn get_asset_current(
 
 async fn get_asset_current_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     asset_id: String,
 ) -> Result<AssetCurrentResponse, AppError> {
-    let asset = fetch_asset_state_record(&state.db, &asset_id).await?;
+    require_scope(&auth, ApiScope::Read)?;
+    let asset = fetch_asset_state_record(&state.db, &auth.organization_id, &asset_id).await?;
     let artifacts = if asset.is_some() {
-        fetch_asset_artifact_summaries(&state.db, &asset_id).await?
+        fetch_asset_artifact_summaries(&state.db, &auth.organization_id, &asset_id).await?
     } else {
         Vec::new()
     };
@@ -1181,9 +1246,10 @@ async fn get_asset_current_inner(
 
 async fn delete_asset(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     AxumPath(asset_id): AxumPath<String>,
 ) -> Response {
-    match delete_asset_inner(state, asset_id).await {
+    match delete_asset_inner(state, auth, asset_id).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1191,10 +1257,12 @@ async fn delete_asset(
 
 async fn delete_asset_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     asset_id: String,
 ) -> Result<DeleteAssetResponse, AppError> {
+    require_scope(&auth, ApiScope::Delete)?;
     let asset_id = normalize_asset_id(&asset_id)?;
-    let already_deleted = mark_asset_deleted(&state.db, &asset_id).await?;
+    let already_deleted = mark_asset_deleted(&state.db, &auth.organization_id, &asset_id).await?;
     let origin_object_keys =
         list_asset_origin_object_keys(&state.s3, &state.config.s3_bucket, &asset_id).await?;
     let origin_objects_deleted = delete_asset_origin_objects(
@@ -1226,10 +1294,11 @@ async fn delete_asset_inner(
 
 async fn get_asset_events(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     AxumPath(asset_id): AxumPath<String>,
     Query(query): Query<AssetEventsQuery>,
 ) -> Response {
-    match get_asset_events_inner(state, asset_id, query).await {
+    match get_asset_events_inner(state, auth, asset_id, query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1237,13 +1306,22 @@ async fn get_asset_events(
 
 async fn get_asset_events_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     asset_id: String,
     query: AssetEventsQuery,
 ) -> Result<AssetEventsResponse, AppError> {
-    let asset_exists = asset_row_exists(&state.db, &asset_id).await?;
+    require_scope(&auth, ApiScope::Read)?;
+    let asset_exists = asset_row_exists(&state.db, &auth.organization_id, &asset_id).await?;
     let query = normalize_asset_events_query(query);
     let events = if asset_exists {
-        fetch_asset_events(&state.db, &asset_id, query.after_sequence, query.limit).await?
+        fetch_asset_events(
+            &state.db,
+            &auth.organization_id,
+            &asset_id,
+            query.after_sequence,
+            query.limit,
+        )
+        .await?
     } else {
         Vec::new()
     };
@@ -1253,32 +1331,51 @@ async fn get_asset_events_inner(
 
 async fn get_event_stream(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     headers: HeaderMap,
     Query(query): Query<EventStreamQuery>,
 ) -> Response {
+    if let Err(error) = require_scope(&auth, ApiScope::Read) {
+        return error.into_response();
+    }
     match normalize_event_stream_query(&headers, query) {
-        Ok(query) => event_stream_response(state, query),
+        Ok(query) => event_stream_response(state, auth, query),
         Err(error) => error.into_response(),
     }
 }
 
 async fn get_asset_playback(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
     AxumPath(asset_id): AxumPath<String>,
 ) -> Response {
-    match get_asset_playback_inner(state, asset_id).await {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+    match get_asset_playback_inner(state.clone(), auth, asset_id).await {
+        Ok(response) => {
+            let mut headers = HeaderMap::new();
+            if let Ok(cookie) = playback_cookie_header(
+                &response.playback_token,
+                response.ttl_seconds,
+                &state.config.playback_base_url,
+            )
+            .parse()
+            {
+                headers.insert(header::SET_COOKIE, cookie);
+            }
+            (StatusCode::OK, headers, Json(response)).into_response()
+        }
         Err(error) => error.into_response(),
     }
 }
 
 async fn get_asset_playback_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     asset_id: String,
 ) -> Result<PlaybackBootstrapResponse, AppError> {
-    let asset = fetch_asset_playback_record(&state.db, &asset_id).await?;
+    require_scope(&auth, ApiScope::Read)?;
+    let asset = fetch_asset_playback_record(&state.db, &auth.organization_id, &asset_id).await?;
     let artifacts = if asset.is_some() {
-        fetch_playback_artifacts(&state.db, &asset_id).await?
+        fetch_playback_artifacts(&state.db, &auth.organization_id, &asset_id).await?
     } else {
         Vec::new()
     };
@@ -1296,8 +1393,11 @@ async fn get_asset_playback_inner(
 
 async fn fetch_asset_state_record(
     db: &PgPool,
+    organization_id: &str,
     asset_id: &str,
 ) -> Result<Option<AssetStateRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let row: Option<(String, String, String, String, String)> = sqlx::query_as(
         "
         SELECT id::text,
@@ -1306,11 +1406,13 @@ async fn fetch_asset_state_record(
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
         FROM rend.assets
-        WHERE id::text = $1
+        WHERE id = $1::uuid
+          AND organization_id = $2::uuid
           AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_optional(db)
     .await
     .map_err(AppError::internal)?;
@@ -1326,7 +1428,12 @@ async fn fetch_asset_state_record(
     ))
 }
 
-async fn fetch_asset_list_items(db: &PgPool, limit: usize) -> Result<Vec<AssetListItem>, AppError> {
+async fn fetch_asset_list_items(
+    db: &PgPool,
+    organization_id: &str,
+    limit: usize,
+) -> Result<Vec<AssetListItem>, AppError> {
+    let organization_id = normalize_org_id(organization_id)?;
     let limit = i64::try_from(limit).map_err(AppError::internal)?;
     let rows: Vec<(String, String, String, String, String, Option<i64>, i64)> = sqlx::query_as(
         "
@@ -1339,12 +1446,14 @@ async fn fetch_asset_list_items(db: &PgPool, limit: usize) -> Result<Vec<AssetLi
                count(artifact.id)::bigint AS artifact_count
         FROM rend.assets asset
         LEFT JOIN rend.artifacts artifact ON artifact.asset_id = asset.id
-        WHERE asset.deleted_at IS NULL
+        WHERE asset.organization_id = $1::uuid
+          AND asset.deleted_at IS NULL
         GROUP BY asset.id
         ORDER BY asset.created_at DESC, asset.id DESC
-        LIMIT $1
+        LIMIT $2
         ",
     )
+    .bind(organization_id)
     .bind(limit)
     .fetch_all(db)
     .await
@@ -1376,17 +1485,23 @@ async fn fetch_asset_list_items(db: &PgPool, limit: usize) -> Result<Vec<AssetLi
 
 async fn fetch_asset_artifact_summaries(
     db: &PgPool,
+    organization_id: &str,
     asset_id: &str,
 ) -> Result<Vec<AssetArtifactSummary>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
         "
-        SELECT kind, content_type, byte_size
-        FROM rend.artifacts
-        WHERE asset_id::text = $1
-        ORDER BY kind, object_key
+        SELECT artifact.kind, artifact.content_type, artifact.byte_size
+        FROM rend.artifacts artifact
+        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
+        WHERE artifact.asset_id = $1::uuid
+          AND asset.organization_id = $2::uuid
+        ORDER BY artifact.kind, artifact.object_key
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_all(db)
     .await
     .map_err(AppError::internal)?;
@@ -1410,17 +1525,24 @@ fn normalize_asset_id(asset_id: &str) -> Result<String, AppError> {
     Ok(asset_id.to_ascii_lowercase())
 }
 
-async fn mark_asset_deleted(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
+async fn mark_asset_deleted(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+) -> Result<bool, AppError> {
+    let organization_id = normalize_org_id(organization_id)?;
     let mut tx = db.begin().await.map_err(AppError::internal)?;
     let row: Option<(String, String, bool)> = sqlx::query_as(
         "
         SELECT source_state, playable_state, deleted_at IS NOT NULL
         FROM rend.assets
         WHERE id = $1::uuid
+          AND organization_id = $2::uuid
         FOR UPDATE
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::internal)?;
@@ -1544,17 +1666,25 @@ async fn delete_asset_origin_objects(
     Ok(deleted)
 }
 
-async fn asset_row_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError> {
+async fn asset_row_exists(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+) -> Result<bool, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let exists: bool = sqlx::query_scalar(
         "
         SELECT EXISTS (
           SELECT 1
           FROM rend.assets
-          WHERE id::text = $1
+          WHERE id = $1::uuid
+            AND organization_id = $2::uuid
         )
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_one(db)
     .await
     .map_err(AppError::internal)?;
@@ -1564,27 +1694,33 @@ async fn asset_row_exists(db: &PgPool, asset_id: &str) -> Result<bool, AppError>
 
 async fn fetch_asset_events(
     db: &PgPool,
+    organization_id: &str,
     asset_id: &str,
     after_sequence: i64,
     limit: usize,
 ) -> Result<Vec<AssetEventRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let limit = i64::try_from(limit).map_err(AppError::internal)?;
     let rows: Vec<(String, String, i64, String, String, String)> = sqlx::query_as(
         "
-        SELECT id::text,
-               asset_id::text,
-               sequence,
-               event_type,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
-               metadata::text
-        FROM rend.asset_events
-        WHERE asset_id::text = $1
-          AND sequence > $2
-        ORDER BY sequence
-        LIMIT $3
+        SELECT event.id::text,
+               event.asset_id::text,
+               event.sequence,
+               event.event_type,
+               to_char(event.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               event.metadata::text
+        FROM rend.asset_events event
+        INNER JOIN rend.assets asset ON asset.id = event.asset_id
+        WHERE event.asset_id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND event.sequence > $3
+        ORDER BY event.sequence
+        LIMIT $4
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .bind(after_sequence)
     .bind(limit)
     .fetch_all(db)
@@ -1608,28 +1744,34 @@ async fn fetch_asset_events(
 
 async fn fetch_event_stream_batch(
     db: &PgPool,
+    organization_id: &str,
     asset_id: Option<&str>,
     after_sequence: i64,
 ) -> Result<Vec<AssetEventRecord>, AppError> {
+    let organization_id = normalize_org_id(organization_id)?;
     let limit = i64::try_from(DEFAULT_EVENT_STREAM_BATCH_LIMIT).map_err(AppError::internal)?;
     let rows: Vec<(String, String, i64, String, String, String)> = if let Some(asset_id) = asset_id
     {
+        let asset_id = normalize_asset_id(asset_id)?;
         sqlx::query_as(
             "
-            SELECT id::text,
-                   asset_id::text,
-                   sequence,
-                   event_type,
-                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
-                   metadata::text
-            FROM rend.asset_events
-            WHERE asset_id::text = $1
-              AND sequence > $2
-            ORDER BY sequence
-            LIMIT $3
+            SELECT event.id::text,
+                   event.asset_id::text,
+                   event.sequence,
+                   event.event_type,
+                   to_char(event.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+                   event.metadata::text
+            FROM rend.asset_events event
+            INNER JOIN rend.assets asset ON asset.id = event.asset_id
+            WHERE event.asset_id = $1::uuid
+              AND asset.organization_id = $2::uuid
+              AND event.sequence > $3
+            ORDER BY event.sequence
+            LIMIT $4
             ",
         )
         .bind(asset_id)
+        .bind(&organization_id)
         .bind(after_sequence)
         .bind(limit)
         .fetch_all(db)
@@ -1638,18 +1780,21 @@ async fn fetch_event_stream_batch(
     } else {
         sqlx::query_as(
             "
-            SELECT id::text,
-                   asset_id::text,
-                   sequence,
-                   event_type,
-                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
-                   metadata::text
-            FROM rend.asset_events
-            WHERE sequence > $1
-            ORDER BY sequence
-            LIMIT $2
+            SELECT event.id::text,
+                   event.asset_id::text,
+                   event.sequence,
+                   event.event_type,
+                   to_char(event.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+                   event.metadata::text
+            FROM rend.asset_events event
+            INNER JOIN rend.assets asset ON asset.id = event.asset_id
+            WHERE asset.organization_id = $1::uuid
+              AND event.sequence > $2
+            ORDER BY event.sequence
+            LIMIT $3
             ",
         )
+        .bind(&organization_id)
         .bind(after_sequence)
         .bind(limit)
         .fetch_all(db)
@@ -1680,17 +1825,22 @@ async fn fetch_event_stream_batch(
 
 async fn fetch_asset_playback_record(
     db: &PgPool,
+    organization_id: &str,
     asset_id: &str,
 ) -> Result<Option<AssetPlaybackRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let row: Option<(String, String, String)> = sqlx::query_as(
         "
         SELECT id::text, source_state, playable_state
         FROM rend.assets
-        WHERE id::text = $1
+        WHERE id = $1::uuid
+          AND organization_id = $2::uuid
           AND deleted_at IS NULL
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_optional(db)
     .await
     .map_err(AppError::internal)?;
@@ -1706,18 +1856,24 @@ async fn fetch_asset_playback_record(
 
 async fn fetch_playback_artifacts(
     db: &PgPool,
+    organization_id: &str,
     asset_id: &str,
 ) -> Result<Vec<PlaybackArtifactRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "
-        SELECT kind, object_key, content_type
-        FROM rend.artifacts
-        WHERE asset_id::text = $1
-          AND kind IN ('opener', 'manifest', 'segment')
-        ORDER BY kind, object_key
+        SELECT artifact.kind, artifact.object_key, artifact.content_type
+        FROM rend.artifacts artifact
+        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
+        WHERE artifact.asset_id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND artifact.kind IN ('opener', 'manifest', 'segment')
+        ORDER BY artifact.kind, artifact.object_key
         ",
     )
     .bind(asset_id)
+    .bind(organization_id)
     .fetch_all(db)
     .await
     .map_err(AppError::internal)?;
@@ -1856,11 +2012,16 @@ fn asset_events_response(
     })
 }
 
-fn event_stream_response(state: Arc<AppState>, query: NormalizedEventStreamQuery) -> Response {
+fn event_stream_response(
+    state: Arc<AppState>,
+    auth: RequestAuth,
+    query: NormalizedEventStreamQuery,
+) -> Response {
     let (sender, receiver) = mpsc::channel(EVENT_STREAM_CHANNEL_CAPACITY);
     let db = state.db.clone();
+    let organization_id = auth.organization_id;
     tokio::spawn(async move {
-        stream_event_lifecycle(db, query, sender).await;
+        stream_event_lifecycle(db, organization_id, query, sender).await;
     });
 
     Response::builder()
@@ -1875,6 +2036,7 @@ fn event_stream_response(state: Arc<AppState>, query: NormalizedEventStreamQuery
 
 async fn stream_event_lifecycle(
     db: PgPool,
+    organization_id: String,
     query: NormalizedEventStreamQuery,
     sender: mpsc::Sender<Bytes>,
 ) {
@@ -1890,7 +2052,9 @@ async fn stream_event_lifecycle(
     }
 
     loop {
-        match fetch_event_stream_batch(&db, query.asset_id.as_deref(), cursor).await {
+        match fetch_event_stream_batch(&db, &organization_id, query.asset_id.as_deref(), cursor)
+            .await
+        {
             Ok(records) if !records.is_empty() => {
                 for record in records {
                     cursor = record.sequence;
@@ -2053,30 +2217,20 @@ fn playback_bootstrap_response(
     }
 
     let token = issue_playback_token(issuer, &asset.asset_id, now).map_err(AppError::internal)?;
-    let (playback_url, playback_content_type) = signed_artifact_fields(
-        playback_base_url,
-        &asset.asset_id,
-        primary_artifact,
-        &token.token,
-    );
-    let (opener_url, opener_content_type) = signed_artifact_fields(
-        playback_base_url,
-        &asset.asset_id,
-        opener_artifact.as_ref(),
-        &token.token,
-    );
-    let (manifest_url, manifest_content_type) = signed_artifact_fields(
+    let (playback_url, playback_content_type) =
+        artifact_fields(playback_base_url, &asset.asset_id, primary_artifact);
+    let (opener_url, opener_content_type) =
+        artifact_fields(playback_base_url, &asset.asset_id, opener_artifact.as_ref());
+    let (manifest_url, manifest_content_type) = artifact_fields(
         playback_base_url,
         &asset.asset_id,
         manifest_artifact.as_ref(),
-        &token.token,
     );
     let prefetch_hints = if asset.playable_state == "hls_ready" {
         first_segment_prefetch_hints(
             playback_base_url,
             &asset.asset_id,
             &playback_artifacts,
-            &token.token,
             prefetch_segment_limit,
         )
     } else {
@@ -2087,6 +2241,7 @@ fn playback_bootstrap_response(
         asset_id: asset.asset_id,
         source_state: asset.source_state,
         playable_state: asset.playable_state,
+        playback_token: token.token,
         playback_url,
         playback_content_type,
         playback_token_expires_at: token.expires_at,
@@ -2151,22 +2306,20 @@ fn primary_playback_artifact<'a>(
     }
 }
 
-fn signed_artifact_fields(
+fn artifact_fields(
     playback_base_url: &str,
     asset_id: &str,
     artifact: Option<&PlaybackArtifact>,
-    token: &str,
 ) -> (Option<String>, Option<String>) {
     let Some(artifact) = artifact else {
         return (None, None);
     };
 
     (
-        Some(signed_artifact_url(
+        Some(artifact_url(
             playback_base_url,
             asset_id,
             &artifact.artifact_path,
-            token,
         )),
         Some(artifact.content_type.clone()),
     )
@@ -2176,7 +2329,6 @@ fn first_segment_prefetch_hints(
     playback_base_url: &str,
     asset_id: &str,
     artifacts: &[PlaybackArtifact],
-    token: &str,
     limit: usize,
 ) -> Vec<PlaybackPrefetchHint> {
     artifacts
@@ -2185,7 +2337,7 @@ fn first_segment_prefetch_hints(
         .take(limit)
         .map(|artifact| PlaybackPrefetchHint {
             artifact_path: artifact.artifact_path.clone(),
-            url: signed_artifact_url(playback_base_url, asset_id, &artifact.artifact_path, token),
+            url: artifact_url(playback_base_url, asset_id, &artifact.artifact_path),
             content_type: artifact.content_type.clone(),
         })
         .collect()
@@ -2209,28 +2361,45 @@ fn issue_playback_token(
     })
 }
 
-fn signed_artifact_url(base_url: &str, asset_id: &str, artifact_path: &str, token: &str) -> String {
+fn playback_cookie_header(token: &str, ttl_seconds: u64, playback_base_url: &str) -> String {
+    let mut parts = vec![
+        format!("{PLAYBACK_COOKIE_NAME}={token}"),
+        "Path=/v/".to_owned(),
+        format!("Max-Age={ttl_seconds}"),
+        "HttpOnly".to_owned(),
+        "SameSite=Lax".to_owned(),
+    ];
+    if playback_base_url.starts_with("https://") {
+        parts.push("Secure".to_owned());
+    }
+    parts.join("; ")
+}
+
+fn artifact_url(base_url: &str, asset_id: &str, artifact_path: &str) -> String {
     format!(
-        "{}/v/{asset_id}/{artifact_path}?token={token}",
+        "{}/v/{asset_id}/{artifact_path}",
         base_url.trim_end_matches('/')
     )
 }
 
 async fn create_video_inner(
     state: Arc<AppState>,
+    auth: RequestAuth,
     headers: HeaderMap,
     body: Body,
 ) -> Result<CreateVideoResponse, AppError> {
+    require_scope(&auth, ApiScope::Upload)?;
     let content_type = request_content_type(&headers);
     let content_length = request_content_length(&headers, state.config.max_upload_bytes)?;
     let mut tx = state.db.begin().await.map_err(AppError::internal)?;
     let asset_id: String = sqlx::query_scalar(
         "
-        INSERT INTO rend.assets (source_state, playable_state)
-        VALUES ('uploading', 'not_playable')
+        INSERT INTO rend.assets (organization_id, source_state, playable_state)
+        VALUES ($1::uuid, 'uploading', 'not_playable')
         RETURNING id::text
         ",
     )
+    .bind(&auth.organization_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(AppError::internal)?;
@@ -2811,14 +2980,9 @@ fn playback_url(
     let Some(artifact_path) = playback_artifact_path(playable_state) else {
         return Ok(None);
     };
-    let token = issue_playback_token(issuer, asset_id, now)?;
+    let _token = issue_playback_token(issuer, asset_id, now)?;
 
-    Ok(Some(signed_artifact_url(
-        base_url,
-        asset_id,
-        artifact_path,
-        &token.token,
-    )))
+    Ok(Some(artifact_url(base_url, asset_id, artifact_path)))
 }
 
 fn playback_artifact_path(playable_state: &str) -> Option<&'static str> {
@@ -3399,21 +3563,128 @@ async fn mark_asset_failed(state: &AppState, asset_id: &str) {
     }
 }
 
-async fn require_dev_api_key(
+async fn require_api_auth(
     State(state): State<Arc<AppState>>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if is_authorized(request.headers(), &state.config.dev_api_key) {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".to_owned(),
-            }),
+    match authenticate_request(&state, request.headers()).await {
+        Ok(Some(auth)) => {
+            request.extensions_mut().insert(auth);
+            next.run(request).await
+        }
+        Ok(None) => unauthorized_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn authenticate_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<RequestAuth>, AppError> {
+    if let Some(provided) = header_string(headers, "x-rend-site-token") {
+        if !secret_matches(provided, &state.config.site_internal_token) {
+            return Ok(None);
+        }
+        let Some(organization_id) = header_string(headers, "x-rend-organization-id") else {
+            return Ok(None);
+        };
+        let organization_id = normalize_org_id(organization_id)?;
+        return Ok(Some(RequestAuth::all(organization_id)));
+    }
+
+    let Some(token) = bearer_token(headers) else {
+        return Ok(None);
+    };
+
+    if !state.config.dev_api_key.is_empty()
+        && secret_matches(token, state.config.dev_api_key.as_str())
+    {
+        return Ok(Some(RequestAuth::all(LOCAL_ORG_ID)));
+    }
+
+    if !looks_like_api_key(token) {
+        return Ok(None);
+    }
+
+    lookup_api_key_auth(&state.db, token).await
+}
+
+async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestAuth>, AppError> {
+    let key_hash = hash_api_key(token);
+    let row: Option<(String, Vec<String>, bool)> = sqlx::query_as(
+        "
+        SELECT organization_id::text,
+               scopes,
+               (last_used_update_after IS NULL OR last_used_update_after <= now())
+        FROM rend.api_keys
+        WHERE key_hash = $1
+          AND revoked_at IS NULL
+        ",
+    )
+    .bind(&key_hash)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    let Some((organization_id, scope_values, should_update_last_used)) = row else {
+        return Ok(None);
+    };
+
+    if should_update_last_used {
+        schedule_api_key_last_used_update(db.clone(), key_hash);
+    }
+
+    Ok(Some(RequestAuth {
+        organization_id,
+        scopes: parse_api_scopes(scope_values)?,
+    }))
+}
+
+fn parse_api_scopes(values: Vec<String>) -> Result<BTreeSet<ApiScope>, AppError> {
+    let mut scopes = BTreeSet::new();
+    for value in values {
+        let scope = match value.as_str() {
+            "upload" => ApiScope::Upload,
+            "read" => ApiScope::Read,
+            "delete" => ApiScope::Delete,
+            "analytics" => ApiScope::Analytics,
+            _ => return Err(AppError::internal("invalid API key scope in database")),
+        };
+        scopes.insert(scope);
+    }
+    if scopes.is_empty() {
+        return Err(AppError::internal("API key has no scopes"));
+    }
+    Ok(scopes)
+}
+
+fn schedule_api_key_last_used_update(db: PgPool, key_hash: String) {
+    tokio::spawn(async move {
+        if let Err(error) = sqlx::query(
+            "
+            UPDATE rend.api_keys
+            SET last_used_at = now(),
+                last_used_update_after = now() + interval '5 minutes'
+            WHERE key_hash = $1
+              AND revoked_at IS NULL
+              AND (last_used_update_after IS NULL OR last_used_update_after <= now())
+            ",
         )
-            .into_response()
+        .bind(key_hash)
+        .execute(&db)
+        .await
+        {
+            tracing::warn!(error = %error, "failed to update API key last-used timestamp");
+        }
+    });
+}
+
+fn require_scope(auth: &RequestAuth, scope: ApiScope) -> Result<(), AppError> {
+    if auth.has_scope(scope) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("insufficient API key scope"))
     }
 }
 
@@ -3440,6 +3711,7 @@ async fn require_internal_edge_token(
     }
 }
 
+#[cfg(test)]
 fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
     if api_key.is_empty() {
         return false;
@@ -3450,6 +3722,58 @@ fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| token == api_key)
+}
+
+fn unauthorized_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "unauthorized".to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+fn header_string<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_org_id(organization_id: &str) -> Result<String, AppError> {
+    let organization_id = organization_id.trim();
+    if !is_canonical_uuid(organization_id) {
+        return Err(AppError::bad_request("malformed organization_id"));
+    }
+    Ok(organization_id.to_ascii_lowercase())
+}
+
+fn secret_matches(provided: &str, expected: &str) -> bool {
+    if expected.is_empty() || provided.is_empty() {
+        return false;
+    }
+    let left = Sha256::digest(provided.as_bytes());
+    let right = Sha256::digest(expected.as_bytes());
+    let mut diff = 0;
+    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
+        diff |= left_byte ^ right_byte;
+    }
+    diff == 0
+}
+
+fn hash_api_key(raw_key: &str) -> String {
+    format!("{:x}", Sha256::digest(raw_key.as_bytes()))
+}
+
+fn looks_like_api_key(token: &str) -> bool {
+    token.starts_with("rend_live_") || token.starts_with("rend_test_")
 }
 
 async fn check_postgres(state: &AppState) -> DependencyCheck {
@@ -3554,6 +3878,13 @@ impl AppError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }
