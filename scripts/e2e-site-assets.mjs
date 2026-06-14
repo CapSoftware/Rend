@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
@@ -20,6 +21,10 @@ const edgeBaseUrl = trimTrailingSlash(process.env.REND_EDGE_BASE_URL || "http://
 const apiKey = process.env.REND_DEV_API_KEY || "dev-api-key";
 const siteInternalToken = process.env.REND_SITE_INTERNAL_TOKEN || "local-site-internal-token";
 const authEmail = (process.env.REND_LOCAL_ADMIN_EMAIL || "admin@rend.test").trim().toLowerCase();
+const localAuthSecret =
+  process.env.BETTER_AUTH_SECRET || "local-better-auth-secret-only-for-rend-development";
+const localOrgId = "00000000-0000-0000-0000-000000000001";
+const localAdminUserId = "00000000-0000-0000-0000-000000000010";
 const fixturePath = process.env.REND_SMOKE_FIXTURE || path.join(runDir, "rend-goal31-fixture.mp4");
 const siteBaseOverride = process.env.REND_SITE_BASE_URL
   ? trimTrailingSlash(process.env.REND_SITE_BASE_URL)
@@ -305,8 +310,118 @@ async function resetLocalAuthRateLimits() {
     "-d",
     "rend",
     "-c",
-    "delete from rend_auth.rate_limit where key like '%/email-otp/%' or key like '%/sign-in/email-otp%';",
+    `
+      delete from rend_auth.rate_limit where key like '%/email-otp/%' or key like '%/sign-in/email-otp%';
+      update rend_auth.organization
+         set suspended_at = null,
+             suspended_by_user_id = null,
+             suspension_reason = null
+       where id = '${localOrgId}'::uuid;
+      update rend.assets
+         set suspended_at = null,
+             suspended_by_user_id = null,
+             suspension_reason = null
+       where organization_id = '${localOrgId}'::uuid;
+    `,
   ], { timeoutMs: 30_000 });
+}
+
+function sqlString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function signBetterAuthCookieValue(value) {
+  const signature = createHmac("sha256", localAuthSecret).update(value).digest("base64");
+  return `${value}.${signature}`;
+}
+
+async function createDirectLocalSessionCookie() {
+  if (process.env.REND_SITE_E2E_DIRECT_SESSION === "0") return "";
+
+  const token = randomBytes(24).toString("base64url");
+  const sessionId = randomUUID();
+  const sql = `
+    insert into rend_auth."user" (id, name, email, email_verified, created_at, updated_at)
+    values (${sqlString(localAdminUserId)}::uuid, 'Rend Local Admin', ${sqlString(authEmail)}, true, now(), now())
+    on conflict (id) do update
+      set name = excluded.name,
+          email = excluded.email,
+          email_verified = true,
+          updated_at = now();
+
+    insert into rend_auth.organization (
+      id,
+      name,
+      slug,
+      metadata,
+      suspended_at,
+      suspended_by_user_id,
+      suspension_reason,
+      created_at,
+      updated_at
+    )
+    values (
+      ${sqlString(localOrgId)}::uuid,
+      'Rend Local',
+      'local',
+      '{"seeded":"local"}'::jsonb,
+      null,
+      null,
+      null,
+      now(),
+      now()
+    )
+    on conflict (id) do update
+      set name = excluded.name,
+          slug = excluded.slug,
+          metadata = excluded.metadata,
+          suspended_at = null,
+          suspended_by_user_id = null,
+          suspension_reason = null,
+          updated_at = now();
+
+    insert into rend_auth.member (organization_id, user_id, role, created_at)
+    values (${sqlString(localOrgId)}::uuid, ${sqlString(localAdminUserId)}::uuid, 'owner', now())
+    on conflict (user_id, organization_id) do update
+      set role = 'owner';
+
+    insert into rend_auth.session (
+      id,
+      expires_at,
+      token,
+      created_at,
+      updated_at,
+      user_id,
+      active_organization_id
+    )
+    values (
+      ${sqlString(sessionId)}::uuid,
+      now() + interval '7 days',
+      ${sqlString(token)},
+      now(),
+      now(),
+      ${sqlString(localAdminUserId)}::uuid,
+      ${sqlString(localOrgId)}::uuid
+    );
+  `;
+
+  await runCommand("docker", [
+    "compose",
+    "exec",
+    "-T",
+    "postgres",
+    "psql",
+    "-U",
+    "rend",
+    "-d",
+    "rend",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    sql,
+  ], { timeoutMs: 30_000 });
+
+  return `rend_auth.session_token=${signBetterAuthCookieValue(token)}`;
 }
 
 async function waitForHttp(url, options = {}) {
@@ -360,8 +475,9 @@ async function startSite() {
       timeoutMs: 30_000,
       accept: (response) => response.status < 500,
     });
-    artifact.local.site = { base_url: siteBaseOverride, started: false };
-    return { baseUrl: siteBaseOverride, logPath: null, stop: async () => undefined };
+    const logPath = process.env.REND_SITE_LOG_PATH || null;
+    artifact.local.site = { base_url: siteBaseOverride, started: false, log_path: logPath };
+    return { baseUrl: siteBaseOverride, logPath, stop: async () => undefined };
   }
 
   const port = Number(process.env.REND_SITE_PORT) || (await getFreePort(3000));
@@ -382,14 +498,14 @@ async function startSite() {
       ...process.env,
       REND_API_BASE_URL: apiBaseUrl,
       REND_SITE_INTERNAL_TOKEN: siteInternalToken,
-      BETTER_AUTH_SECRET:
-        process.env.BETTER_AUTH_SECRET || "local-better-auth-secret-only-for-rend-development",
+      BETTER_AUTH_SECRET: localAuthSecret,
       BETTER_AUTH_URL: process.env.BETTER_AUTH_URL || baseUrl,
       REND_AUTH_EMAIL_FROM: process.env.REND_AUTH_EMAIL_FROM || "Rend Local <auth@rend.test>",
       REND_LOCAL_ADMIN_EMAIL: authEmail,
       REND_PLAYER_PLAYBACK_BASE_URL: edgeBaseUrl,
       REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS: [...new Set(allowedPlaybackBases)].join(","),
       REND_PLAYER_TELEMETRY_DEBUG: "1",
+      REND_OPERATOR_EMAIL_ALLOWLIST: process.env.REND_OPERATOR_EMAIL_ALLOWLIST || authEmail,
       NEXT_PUBLIC_REND_APP_VERSION: `goal31-${runId}`,
       NODE_ENV: "development",
     },
@@ -649,6 +765,29 @@ async function loginThroughApi(siteBaseUrl, logPath) {
     http_status: unauthenticated.status,
   });
 
+  try {
+    const directSessionCookie = await createDirectLocalSessionCookie();
+    if (directSessionCookie) {
+      const authenticated = await fetch(`${siteBaseUrl}/api/assets`, {
+        cache: "no-store",
+        headers: { cookie: directSessionCookie },
+      });
+      artifact.local.direct_session = {
+        attempted: true,
+        http_status: authenticated.status,
+      };
+      if (authenticated.status === 200) {
+        addCheck("local direct Better Auth session works", true);
+        return directSessionCookie;
+      }
+    }
+  } catch (error) {
+    artifact.local.direct_session = {
+      attempted: true,
+      error: error.message,
+    };
+  }
+
   const otp = await requestOtp(siteBaseUrl, logPath);
   const response = await fetch(`${siteBaseUrl}/api/auth/sign-in/email-otp`, {
     method: "POST",
@@ -714,6 +853,29 @@ async function uploadFixtureThroughSite(siteBaseUrl, sessionCookie) {
   return body.asset.asset_id;
 }
 
+async function createApiKeyThroughSite(siteBaseUrl, sessionCookie) {
+  const response = await fetch(`${siteBaseUrl}/api/api-keys`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      name: `goal32-${runId}`,
+      scopes: ["upload", "read", "delete", "analytics"],
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  assertCheck("site creates API key for suspension checks", response.status === 201 && body.secret, {
+    http_status: response.status,
+    key_id: body.api_key?.id,
+  });
+  assertCheck("API key create response does not expose token in persisted fields", !JSON.stringify(body.api_key || {}).includes(body.secret), {
+    key_id: body.api_key?.id,
+  });
+  return body.secret;
+}
+
 async function waitForPlayable(siteBaseUrl, sessionCookie, assetId) {
   const startedAt = Date.now();
   let lastAsset = null;
@@ -774,6 +936,170 @@ async function verifyDashboardUi(page, siteBaseUrl, assetId) {
   const copied = await evaluate(page, "window.__rendCopied");
   assertCheck("dashboard UI copy actions produce safe embed snippets", copied.length === 2 && copied[0].includes(`/embed/${assetId}`) && copied[1].includes("<iframe") && !JSON.stringify(copied).includes("token="), {
     copied,
+  });
+}
+
+async function verifyOperatorUi(page, siteBaseUrl) {
+  await navigate(page, `${siteBaseUrl}/operator`);
+  await waitForBrowser(page, `document.body.innerText.includes("Operator controls")`, 60_000);
+  const text = await evaluate(page, "document.body.innerText");
+  assertCheck("operator page is reachable only through the signed-in server session", text.includes("Recent audit") && text.includes("Organizations") && text.includes("Assets"), {
+    text_length: text.length,
+  });
+}
+
+async function operatorActionThroughSite(siteBaseUrl, sessionCookie, { action, targetType, targetId, reason }) {
+  const response = await fetch(`${siteBaseUrl}/operator/action`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      action,
+      target_type: targetType,
+      target_id: targetId,
+      reason,
+    }),
+  });
+  const location = response.headers.get("location") || "";
+  assertCheck(`operator ${action} ${targetType} redirects with success`, [303, 307, 308].includes(response.status) && location.includes("status=ok"), {
+    http_status: response.status,
+    location,
+  });
+}
+
+async function verifyOperatorAuditNoLeaks(siteBaseUrl, sessionCookie) {
+  const response = await fetch(`${siteBaseUrl}/operator`, {
+    cache: "no-store",
+    headers: { cookie: sessionCookie },
+  });
+  const text = await response.text();
+  assertCheck("operator audit page loads", response.status === 200, { http_status: response.status });
+  assertCheck("operator audit redacts unsafe reason content", text.includes("[redacted") && !text.includes("edge.example") && !text.includes("token=secret") && !text.includes("Bearer abc"), {
+    text_length: text.length,
+  });
+}
+
+async function controlPlaneApiKeyRequest(apiKeySecret, pathName, options = {}) {
+  return fetch(`${apiBaseUrl}${pathName}`, {
+    method: options.method || "GET",
+    cache: "no-store",
+    headers: {
+      authorization: `Bearer ${apiKeySecret}`,
+      "content-type": options.contentType || "application/json",
+      ...(options.headers || {}),
+    },
+    body: options.body,
+  });
+}
+
+async function verifyAssetSuspensionBlocks(siteBaseUrl, sessionCookie, apiKeySecret, assetId) {
+  const detailResponse = await controlPlaneApiKeyRequest(apiKeySecret, `/v1/assets/${assetId}`);
+  assertCheck("suspended asset API-key read is blocked", detailResponse.status === 403, {
+    http_status: detailResponse.status,
+  });
+
+  const listResponse = await controlPlaneApiKeyRequest(apiKeySecret, "/v1/assets");
+  const listBody = await listResponse.json().catch(() => ({}));
+  assertCheck("suspended asset is omitted from API-key list reads", listResponse.status === 200 && !JSON.stringify(listBody).includes(assetId), {
+    http_status: listResponse.status,
+  });
+
+  for (const [name, pathName, method] of [
+    ["playback", `/v1/assets/${assetId}/playback`, "GET"],
+    ["analytics", `/v1/assets/${assetId}/analytics/playback`, "GET"],
+    ["delete", `/v1/assets/${assetId}`, "DELETE"],
+  ]) {
+    const response = await controlPlaneApiKeyRequest(apiKeySecret, pathName, { method });
+    assertCheck(`suspended asset API-key ${name} is blocked`, response.status !== 200, {
+      http_status: response.status,
+    });
+  }
+
+  const bootstrap = await fetch(`${siteBaseUrl}/api/player/${assetId}`, { cache: "no-store" });
+  const text = await bootstrap.text();
+  assertCheck("suspended asset site bootstrap is unavailable", bootstrap.status !== 200 || !text.includes('"status":"ready"'), {
+    http_status: bootstrap.status,
+    body: text.slice(0, 240),
+  });
+  assertCheck("suspended asset bootstrap does not expose playable URLs", !text.includes("playback_url") && !text.includes("token="), {
+    http_status: bootstrap.status,
+  });
+
+  const dashboardResponse = await fetch(`${siteBaseUrl}/dashboard/assets/${assetId}`, {
+    cache: "no-store",
+    headers: { cookie: sessionCookie },
+  });
+  const dashboardText = await dashboardResponse.text();
+  assertCheck("dashboard shows suspended asset state", dashboardResponse.status === 200 && dashboardText.includes("Asset is suspended"), {
+    http_status: dashboardResponse.status,
+  });
+}
+
+async function verifyOrgSuspensionBlocks(siteBaseUrl, sessionCookie, apiKeySecret, assetId) {
+  for (const [name, pathName, method, body] of [
+    ["list", "/v1/assets", "GET", undefined],
+    ["read", `/v1/assets/${assetId}`, "GET", undefined],
+    ["playback", `/v1/assets/${assetId}/playback`, "GET", undefined],
+    ["analytics", `/v1/assets/${assetId}/analytics/playback`, "GET", undefined],
+    ["delete", `/v1/assets/${assetId}`, "DELETE", undefined],
+    ["upload", "/v1/videos", "POST", Buffer.from("blocked")],
+  ]) {
+    const response = await controlPlaneApiKeyRequest(apiKeySecret, pathName, {
+      method,
+      body,
+      contentType: "video/mp4",
+    });
+    assertCheck(`suspended org API-key ${name} is blocked`, response.status !== 200 && response.status !== 201, {
+      http_status: response.status,
+    });
+  }
+
+  const siteUpload = await fetch(`${siteBaseUrl}/api/assets`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "video/mp4",
+      "content-length": "7",
+    },
+    body: Buffer.from("blocked"),
+  });
+  const siteUploadText = await siteUpload.text();
+  assertCheck("suspended org dashboard upload is blocked", siteUpload.status === 403 && siteUploadText.includes("organization_suspended"), {
+    http_status: siteUpload.status,
+  });
+
+  const bootstrap = await fetch(`${siteBaseUrl}/api/player/${assetId}`, { cache: "no-store" });
+  const bootstrapText = await bootstrap.text();
+  assertCheck("suspended org site bootstrap is unavailable", bootstrap.status !== 200 || !bootstrapText.includes('"status":"ready"'), {
+    http_status: bootstrap.status,
+  });
+
+  const dashboardResponse = await fetch(`${siteBaseUrl}/dashboard/assets/${assetId}`, {
+    cache: "no-store",
+    headers: { cookie: sessionCookie },
+  });
+  const dashboardText = await dashboardResponse.text();
+  assertCheck("dashboard shows suspended organization state", dashboardResponse.status === 200 && dashboardText.includes("Organization is suspended"), {
+    http_status: dashboardResponse.status,
+  });
+}
+
+async function verifyRestoredPlayback(siteBaseUrl, apiKeySecret, assetId, expectedPlayableState) {
+  const detailResponse = await controlPlaneApiKeyRequest(apiKeySecret, `/v1/assets/${assetId}`);
+  const detailBody = await detailResponse.json().catch(() => ({}));
+  assertCheck("restored API-key asset read succeeds without losing metadata", detailResponse.status === 200 && detailBody.playable_state === expectedPlayableState, {
+    http_status: detailResponse.status,
+    playable_state: detailBody.playable_state,
+  });
+
+  const bootstrap = await fetch(`${siteBaseUrl}/api/player/${assetId}`, { cache: "no-store" });
+  const bootstrapText = await bootstrap.text();
+  assertCheck("restored asset bootstrap is playable again", bootstrap.status === 200 && bootstrapText.includes('"status":"ready"') && !bootstrapText.includes("token="), {
+    http_status: bootstrap.status,
+    body: bootstrapText.slice(0, 240),
   });
 }
 
@@ -986,9 +1312,13 @@ async function main() {
     log("uploading fixture through apps/site");
     const assetId = await uploadFixtureThroughSite(site.baseUrl, sessionCookie);
     const playableAsset = await waitForPlayable(site.baseUrl, sessionCookie, assetId);
+    const apiKeySecret = await createApiKeyThroughSite(site.baseUrl, sessionCookie);
 
     log("verifying dashboard UI");
     await verifyDashboardUi(page, site.baseUrl, assetId);
+
+    log("verifying private operator UI");
+    await verifyOperatorUi(page, site.baseUrl);
 
     log("verifying watch playback");
     await verifyPlayback(page, site.baseUrl, assetId, playableAsset);
@@ -999,6 +1329,40 @@ async function main() {
 
     log("scanning safe surfaces");
     await verifyLeakSurfaces(site.baseUrl, sessionCookie, assetId, telemetryBody, site.logPath);
+
+    log("suspending and restoring asset");
+    const unsafeReason = `unsafe playback https://edge.example/v/${assetId}/opener.mp4?token=secret Authorization: Bearer abc`;
+    await operatorActionThroughSite(site.baseUrl, sessionCookie, {
+      action: "suspend",
+      targetType: "asset",
+      targetId: assetId,
+      reason: unsafeReason,
+    });
+    await verifyAssetSuspensionBlocks(site.baseUrl, sessionCookie, apiKeySecret, assetId);
+    await verifyOperatorAuditNoLeaks(site.baseUrl, sessionCookie);
+    await operatorActionThroughSite(site.baseUrl, sessionCookie, {
+      action: "restore",
+      targetType: "asset",
+      targetId: assetId,
+      reason: "asset review cleared",
+    });
+    await verifyRestoredPlayback(site.baseUrl, apiKeySecret, assetId, playableAsset.playable_state);
+
+    log("suspending and restoring organization");
+    await operatorActionThroughSite(site.baseUrl, sessionCookie, {
+      action: "suspend",
+      targetType: "organization",
+      targetId: "00000000-0000-0000-0000-000000000001",
+      reason: "workspace abuse control",
+    });
+    await verifyOrgSuspensionBlocks(site.baseUrl, sessionCookie, apiKeySecret, assetId);
+    await operatorActionThroughSite(site.baseUrl, sessionCookie, {
+      action: "restore",
+      targetType: "organization",
+      targetId: "00000000-0000-0000-0000-000000000001",
+      reason: "workspace review cleared",
+    });
+    await verifyRestoredPlayback(site.baseUrl, apiKeySecret, assetId, playableAsset.playable_state);
 
     log("deleting asset through UI");
     await deleteThroughUi(page, site.baseUrl, assetId);
