@@ -1,8 +1,9 @@
 # Rend Edge Host Runbook V1
 
-This runbook prepares the Docker deployment shape for first real us-east and
-london edge host trials. It does not provision cloud resources, DNS, anycast,
-Terraform, Kubernetes, Better Auth, billing, or dashboard surfaces.
+This runbook prepares the Docker deployment shape for initial us-east and
+london production edge host deployments. It does not provision cloud resources,
+DNS, anycast, Terraform, Kubernetes, Better Auth, billing, or dashboard
+surfaces.
 
 The local source of truth is still `compose.yml` and `.env.docker.example`.
 The production-style examples in this runbook keep the same service names,
@@ -32,10 +33,10 @@ has no healthy active edge.
 
 ## Minimum Edge Host Requirements
 
-These are first-trial minimums for one `rend-edge` process. They are not final
+These are initial production minimums for one `rend-edge` process. They are not final
 capacity targets.
 
-| Concern | Minimum | Preferred for trial |
+| Concern | Minimum | Preferred for production |
 | --- | --- | --- |
 | CPU | 4 dedicated x86_64 vCPU | 8 vCPU |
 | RAM | 8 GiB | 16 GiB |
@@ -46,7 +47,7 @@ capacity targets.
 | OS | Debian 12 or Ubuntu 24.04 LTS | Same, current kernel updates applied |
 | Runtime | Docker Engine 25+ with Compose v2 | Docker Engine 26+ with Compose v2.26+ |
 
-Bandwidth assumptions for first trials:
+Bandwidth assumptions for initial production deployments:
 
 - The edge should have enough egress for real playback tests without rate
   limiting. Assume public playback can burst to the NIC line rate.
@@ -105,12 +106,12 @@ loopback or a private interface and put Caddy or an equivalent reverse proxy in
 front of the container. Direct public `4100` exposure is disabled by default and
 requires an explicit `REND_EDGE_PUBLISH_ADDR` override plus
 `scripts/preflight-edge-host.sh --allow-direct-edge-exposure`; use that only for
-short trial debugging with known test client IPs.
+short production debugging with known test client IPs.
 
 | Direction | Port | Source | Destination | Purpose |
 | --- | --- | --- | --- | --- |
 | Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. |
-| Inbound trial-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while debugging only. Requires the explicit direct-exposure preflight override. |
+| Inbound debugging-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while debugging only. Requires the explicit direct-exposure preflight override. |
 | Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
 | Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
 | Outbound origin | TCP `443` | `rend-edge` | S3-compatible endpoint | Artifact fills and origin readiness checks. |
@@ -128,10 +129,10 @@ Control-plane host exposure:
 - `POST /internal/telemetry/playback` must be reachable from edge hosts and
   must require `x-rend-internal-token` or `x-rend-telemetry-token`.
 - Postgres, Redis, ClickHouse, and object storage are external dependencies for
-  production trials and are not included in the production-style compose
+  production deployments and are not included in the production-style compose
   templates.
 
-For the first Latitude trial shape, bind Rend services to loopback and let Caddy
+For the first Latitude production shape, bind Rend services to loopback and let Caddy
 own public TLS. Checked Caddy templates live in:
 
 - `docs/templates/control-plane.Caddyfile`
@@ -258,12 +259,12 @@ us-east edge values should set `REND_EDGE_REGION=us-east`, a unique
 set `REND_EDGE_REGION=london`, a unique `REND_EDGE_ID`, and its own
 `REND_EDGE_BASE_URL`, for example `rend-edge-london-001` and
 `https://edge-london.example.com`. Both regions must share the same playback
-signing key and `REND_EDGE_INTERNAL_TOKEN` as the API for a given trial.
-Set `REND_ENV=trial` for first hosted trials. The API, worker, and every edge
+signing key and `REND_EDGE_INTERNAL_TOKEN` as the API for a given production deployment.
+Set `REND_ENV=production` for hosted production deployments. The API, worker, and every edge
 host must share the same `REND_EXPECTED_EDGES` list in
 `edge_id=region=https://base-url` format; registration and warm/purge fanout
 reject rows that do not match this list. Leave
-`REND_ALLOW_INSECURE_EDGE_URLS=false` for hosted trials.
+`REND_ALLOW_INSECURE_EDGE_URLS=false` for hosted production deployments.
 
 ## Compose Templates
 
@@ -274,19 +275,19 @@ Production-style templates are checked in under `docs/templates/`:
 - `docs/templates/control-plane.Caddyfile`
 - `docs/templates/edge-host.Caddyfile`
 
-Build trial images from a clean git worktree before bootstrapping or deploy:
+Build production images from a clean git worktree before bootstrapping or deploy:
 
 ```sh
 bun run release:images -- \
-  --tag trial-001 \
+  --tag production-001 \
   --registry registry.example.com/rend \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --platform linux/amd64 \
   --push
 ```
 
 Use the manifest `image_digest` values for compose image variables. They are
-immutable deploy and rollback refs. The human `trial-*` tag is only an operator
+immutable deploy and rollback refs. The human `production-*` tag is only an operator
 label for finding the release. Pushed releases also copy the accepted non-secret
 manifest to `docs/releases/` so operators can recover the exact digest refs and
 platform metadata later.
@@ -294,7 +295,7 @@ platform metadata later.
 Before copying the manifest to hosts, verify release image metadata locally:
 
 ```sh
-scripts/check-docker-image-versions.sh --tag trial-001 --registry registry.example.com/rend --strict
+scripts/check-docker-image-versions.sh --tag production-001 --registry registry.example.com/rend --strict
 ```
 
 For GHCR or another authenticated registry, log in as the same Unix user that
@@ -306,7 +307,7 @@ docker login ghcr.io
 sudo docker login ghcr.io
 ```
 
-On the hosted trial hosts, both `ubuntu` and `root` needed GHCR pull readiness
+On the hosted production hosts, both `ubuntu` and `root` needed GHCR pull readiness
 because operators used both non-root and `sudo` Docker commands. Run the
 preflight without `--dry-run` before deploy or rollback; it now pulls each
 manifest `image_digest` ref so credential or registry-scope problems fail
@@ -326,9 +327,9 @@ sudo cp docs/env/rend-media-worker.env.example /etc/rend/rend-media-worker.env
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
 
 scripts/validate-production-env.sh --role control-plane
-scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-001.json
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json --dry-run
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json
+scripts/preflight-control-plane-host.sh --manifest .rend/releases/production-001.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json
 ```
 
 Edge host bootstrap:
@@ -342,9 +343,9 @@ sudo cp docs/env/rend-edge-us-east.env.example /etc/rend/rend-edge.env
 sudoedit /etc/rend/rend-edge.env
 
 scripts/validate-production-env.sh --role edge-host
-scripts/preflight-edge-host.sh --manifest .rend/releases/trial-001.json
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json --dry-run
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json
+scripts/preflight-edge-host.sh --manifest .rend/releases/production-001.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-001.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-001.json
 ```
 
 Use `sudo` for these commands when `/etc/rend/*.env` is root-only.
@@ -523,9 +524,9 @@ Control-plane deploy:
 ```sh
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
 scripts/validate-production-env.sh --role control-plane
-scripts/preflight-control-plane-host.sh --manifest .rend/releases/trial-004.json
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-004.json --dry-run
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-004.json
+scripts/preflight-control-plane-host.sh --manifest .rend/releases/production-004.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-004.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-004.json
 curl -fsS http://127.0.0.1:4000/readyz
 docker compose -f /opt/rend/control-plane.compose.yml ps
 ```
@@ -535,33 +536,34 @@ Edge deploy:
 ```sh
 sudoedit /etc/rend/rend-edge.env
 scripts/validate-production-env.sh --role edge-host
-scripts/preflight-edge-host.sh --manifest .rend/releases/trial-004.json
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-004.json --dry-run
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-004.json
+scripts/preflight-edge-host.sh --manifest .rend/releases/production-004.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-004.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-004.json
 curl -fsS http://127.0.0.1:4100/readyz
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
 ```
 
 After each deploy, run the remote health and smoke commands above. For a
-multi-edge trial, verify each registered edge appears in `rend.edge_nodes`, the
-warm lifecycle event includes every healthy edge, each edge can serve a warmed
-`HIT`, and at least one cold `MISS` still works after a targeted purge.
+multi-edge production deployment, verify each registered edge appears in
+`rend.edge_nodes`, the warm lifecycle event includes every healthy edge, each
+edge can serve a warmed `HIT`, and at least one cold `MISS` still works after a
+targeted purge.
 
 ## Rollback Steps
 
 Edge rollback:
 
 ```sh
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json --dry-run
-scripts/deploy-edge-host.sh --manifest .rend/releases/trial-001.json
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-001.json --dry-run
+scripts/deploy-edge-host.sh --manifest .rend/releases/production-001.json
 curl -fsS http://127.0.0.1:4100/readyz
 ```
 
 Control-plane rollback:
 
 ```sh
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json --dry-run
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/trial-001.json
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json --dry-run
+scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json
 curl -fsS http://127.0.0.1:4000/readyz
 ```
 
@@ -626,14 +628,14 @@ Current metric and counter signals:
 - Origin health: edge `/readyz` origin check plus playback `error_code` values
   in analytics for non-2xx responses
 
-For first trials, alert manually on any sustained `rend_edge_ready=0`, rising
+For initial production deployments, alert manually on any sustained `rend_edge_ready=0`, rising
 spool size, `not_found` or `failed` warm summaries, elevated playback 5xx/401,
 or a cache mix that stays mostly `MISS` after warm operations.
 
-The trial cache safety gate bounds upload size, origin artifact buffering,
+The production cache safety gate bounds upload size, origin artifact buffering,
 cache free-space reserve, and optional cache size. It does not implement full
 LRU eviction or stream-while-write cold fills yet; keep those as follow-up work
-unless trial traffic proves the guards block useful playback.
+unless production traffic proves the guards block useful playback.
 
 ## Local Validation
 
@@ -654,14 +656,14 @@ scripts/validate-production-env.sh --role all --allow-dev-defaults \
 
 scripts/preflight-control-plane-host.sh --dry-run --allow-dev-defaults \
   --allow-local-image-refs \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --api-env .env.docker.example \
   --worker-env .env.docker.example \
   --compose-file docs/templates/control-plane.compose.yml
 
 scripts/preflight-edge-host.sh --dry-run --allow-dev-defaults \
   --allow-local-image-refs \
-  --manifest .rend/releases/trial-001.json \
+  --manifest .rend/releases/production-001.json \
   --edge-env .env.docker.example \
   --compose-file docs/templates/edge-host.compose.yml
 ```
@@ -674,5 +676,5 @@ bun run backend:docker:smoke
 
 The local smoke still uses `compose.yml` and `.env.docker.example`. The
 production-style templates intentionally omit local Postgres, Redis, MinIO, and
-ClickHouse because first real host trials should point at managed or separately
+ClickHouse because production host deployments should point at managed or separately
 provisioned dependencies.
