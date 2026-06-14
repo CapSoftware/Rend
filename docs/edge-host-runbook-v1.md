@@ -84,7 +84,9 @@ sudo chown -R 10001:10001 /var/lib/rend /var/spool/rend
 If production env files are installed root-only under `/etc/rend`, run the
 operator validators and preflights with `sudo` rather than weakening secret
 file permissions. When `psql` runs as root against a Postgres URL that requires
-CA verification, libpq may require a root trust reference:
+CA verification, the operator scripts normalize `sslrootcert=system` out of the
+URL for `psql` probes. If the host libpq setup still requires a CA file, add a
+root trust reference:
 
 ```sh
 sudo mkdir -p /root/.postgresql
@@ -279,12 +281,15 @@ bun run release:images -- \
   --tag trial-001 \
   --registry registry.example.com/rend \
   --manifest .rend/releases/trial-001.json \
+  --platform linux/amd64 \
   --push
 ```
 
 Use the manifest `image_digest` values for compose image variables. They are
 immutable deploy and rollback refs. The human `trial-*` tag is only an operator
-label for finding the release.
+label for finding the release. Pushed releases also copy the accepted non-secret
+manifest to `docs/releases/` so operators can recover the exact digest refs and
+platform metadata later.
 
 Before copying the manifest to hosts, verify release image metadata locally:
 
@@ -305,7 +310,10 @@ On the hosted trial hosts, both `ubuntu` and `root` needed GHCR pull readiness
 because operators used both non-root and `sudo` Docker commands. Run the
 preflight without `--dry-run` before deploy or rollback; it now pulls each
 manifest `image_digest` ref so credential or registry-scope problems fail
-before Compose changes running containers.
+before Compose changes running containers. It also verifies manifest and pulled
+image OS/architecture against the host expectation, `linux/amd64` by default.
+Pass `--expected-platform` only when deploying to an intentionally different
+host architecture.
 
 Control-plane host bootstrap:
 
@@ -367,7 +375,13 @@ Run the combined verifier first. It checks API `/readyz`, private edge
 `/readyz`, all expected edge registrations, public deny surfaces on each edge,
 warmed `HIT` signed playback through every public edge, telemetry analytics
 increasing, no telemetry dropped-counter increase, and spool bytes returning to
-`0`.
+`0`. The verifier reads `DATABASE_URL`, `CLICKHOUSE_URL`,
+`CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD` from
+`--api-env` when provided. For laptop or bastion runs without `/etc/rend`
+access, pass those values explicitly with `--database-url`, `--clickhouse-url`,
+`--clickhouse-database`, `--clickhouse-user`, and `--clickhouse-password`.
+The verifier normalizes `sslrootcert=system` out of `DATABASE_URL` only for
+`psql` probes; the service env file remains unchanged.
 
 ```sh
 scripts/verify-first-host-deploy.sh \
