@@ -53,6 +53,11 @@
     "backend:smoke:edge-warming": "scripts/smoke-edge-warming.sh",
     "backend:smoke:delete-purge": "scripts/smoke-delete-purge.sh",
     "backend:smoke:signed-playback": "scripts/smoke-edge-cache.sh",
+    "openapi:lint": "node scripts/lint-openapi.mjs",
+    "openapi:generate": "node scripts/generate-openapi-client.mjs",
+    "openapi:check": "bun run openapi:lint && node scripts/generate-openapi-client.mjs --check",
+    "openapi:contract": "bun run --cwd apps/site test:contract",
+    "openapi:sdk-test": "bun run --cwd packages/sdk test",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
     "clean": "turbo clean"
