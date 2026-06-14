@@ -8,7 +8,10 @@ import {
   type DashboardAccessContext,
 } from "./dashboard-auth.ts";
 
-function access(role: DashboardAccessContext["role"]): DashboardAccessContext {
+function access(
+  role: DashboardAccessContext["role"],
+  extra: Partial<DashboardAccessContext> = {}
+): DashboardAccessContext {
   return {
     userId: "00000000-0000-0000-0000-000000000010",
     userEmail: "admin@rend.test",
@@ -16,6 +19,7 @@ function access(role: DashboardAccessContext["role"]): DashboardAccessContext {
     organizationName: "Rend Local",
     organizationSlug: "local",
     role,
+    ...extra,
   };
 }
 
@@ -69,4 +73,15 @@ test("dashboard roles gate mutating actions", () => {
   assert.equal(canManageApiKeys(access("member")), false);
   assert.equal(canDeleteAssets(access("member")), false);
   assert.equal(canUploadAssets(access("member")), false);
+});
+
+test("suspended organizations are read-only in the dashboard", () => {
+  const suspended = access("owner", {
+    organizationSuspendedAt: "2026-06-14T10:00:00.000Z",
+    organizationSuspensionReason: "abuse report",
+  });
+
+  assert.equal(canManageApiKeys(suspended), false);
+  assert.equal(canDeleteAssets(suspended), false);
+  assert.equal(canUploadAssets(suspended), false);
 });
