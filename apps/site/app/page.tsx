@@ -126,12 +126,20 @@ export default function Home() {
             company
           </a>
         </div>
-        <a
-          href="#waitlist"
-          className="rounded-full bg-ink px-[18px] py-[9px] text-sm font-medium text-bg transition hover:-translate-y-px hover:shadow-[0_4px_14px_rgba(22,21,19,0.18)]"
-        >
-          Join the waitlist
-        </a>
+        <nav className="flex items-center gap-3" aria-label="Primary navigation">
+          <a
+            href="/docs"
+            className="text-sm font-medium text-muted transition hover:text-ink"
+          >
+            Docs
+          </a>
+          <a
+            href="#waitlist"
+            className="rounded-full bg-ink px-[18px] py-[9px] text-sm font-medium text-bg transition hover:-translate-y-px hover:shadow-[0_4px_14px_rgba(22,21,19,0.18)]"
+          >
+            Join the waitlist
+          </a>
+        </nav>
       </header>
 
       <main>
