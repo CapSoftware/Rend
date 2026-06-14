@@ -249,7 +249,9 @@ scripts/validate-production-env.sh --role all --allow-dev-defaults \
 ```
 
 Run host preflight before deploy. Production manifests must contain
-`image_digest` refs for the required services:
+`image_digest` refs and platform metadata for the required services. The host
+expectation defaults to `linux/amd64`; pass `--expected-platform` only for an
+intentional architecture change:
 
 ```sh
 scripts/preflight-control-plane-host.sh \
@@ -260,9 +262,11 @@ scripts/preflight-edge-host.sh \
 ```
 
 The control-plane preflight checks Docker/Compose, compose/env files, manifest
-digest refs, manifest image pull readiness, managed dependency connectivity
-where local tools allow it, and host bind ports. The edge preflight checks
-Docker/Compose, edge env, manifest digest ref, manifest image pull readiness,
+digest refs, manifest platform metadata, manifest image pull readiness, pulled
+image OS/architecture, managed dependency connectivity where local tools allow
+it, and host bind ports. The edge preflight checks Docker/Compose, edge env,
+manifest digest ref, manifest platform metadata, manifest image pull readiness,
+pulled image OS/architecture,
 private-by-default direct port publishing, uid/gid `10001` cache and spool
 writeability, object-store health, control-plane register/heartbeat
 reachability, telemetry ingest reachability, and host bind ports.
@@ -298,7 +302,12 @@ scripts/verify-first-host-deploy.sh \
 The verifier checks API `/readyz`, private edge `/readyz`, all expected edge
 registrations, the public deny surface, warmed `HIT` signed playback on each
 edge, playback analytics increasing after the smoke requests, no
-dropped-telemetry increase, and telemetry spool bytes returning to `0`.
+dropped-telemetry increase, and telemetry spool bytes returning to `0`. It reads
+Postgres and ClickHouse settings from `--api-env`, or from explicit
+`--database-url`, `--clickhouse-url`, `--clickhouse-database`,
+`--clickhouse-user`, and `--clickhouse-password` flags for laptop or bastion
+runs. For `psql` probes only, it normalizes hosted Postgres URLs by removing
+`sslrootcert=system`; the service `DATABASE_URL` is not rewritten.
 
 ## Deploy Order
 
@@ -306,7 +315,9 @@ dropped-telemetry increase, and telemetry spool bytes returning to `0`.
 2. Apply or confirm ClickHouse schema.
 3. From a clean git worktree, build and optionally push images with
    `bun run release:images -- --tag trial-001 --registry <registry-prefix>
-   --push`.
+   --platform linux/amd64 --push`. Pushed releases require the git SHA to be
+   reachable from a pushed branch or tag and copy the accepted manifest to
+   `docs/releases/`.
 4. Copy production-style compose files, real env files, and the release
    manifest to the target hosts.
 5. Run `scripts/validate-production-env.sh` and the relevant preflight script on
