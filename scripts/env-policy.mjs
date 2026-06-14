@@ -42,12 +42,12 @@ const DEV_DEFAULTS = new Map([
   ["AWS_ACCESS_KEY_ID", new Set(["rend_minio"])],
   ["AWS_SECRET_ACCESS_KEY", new Set(["rend_minio_password"])],
   ["CLICKHOUSE_PASSWORD", new Set(["rend"])],
-  ["REND_SITE_OPERATOR_TOKEN", new Set(["local-site-operator-token"])],
-  ["REND_SITE_AUTH_SECRET", new Set(["local-site-auth-secret"])],
+  ["BETTER_AUTH_SECRET", new Set(["local-better-auth-secret-only-for-rend-development"])],
+  ["REND_SITE_INTERNAL_TOKEN", new Set(["local-site-internal-token"])],
 ]);
 
 const ENV_FILE_KEY_PATTERN =
-  /^(REND_|NEXT_PUBLIC_|DATABASE_URL$|REDIS_URL$|S3_|AWS_|CLICKHOUSE_|OBJECT_STORE_|KV_|UPSTASH_)/;
+  /^(REND_|NEXT_PUBLIC_|BETTER_AUTH_|AUTH_SECRET$|RESEND_|DATABASE_URL$|REDIS_URL$|S3_|AWS_|CLICKHOUSE_|OBJECT_STORE_|KV_|UPSTASH_)/;
 
 export function parseCliEnvOptions(argv) {
   const options = {
@@ -89,7 +89,7 @@ export function normalizeProfile(value, { allowEmpty = false } = {}) {
   if (!normalized && allowEmpty) {
     return "";
   }
-  if (normalized === "prod" || normalized === "trial") {
+  if (normalized === "prod") {
     return PRODUCTION_PROFILE;
   }
   if (PROFILE_VALUES.has(normalized)) {
@@ -279,6 +279,7 @@ function validateLocalEnv(env, errors) {
 }
 
 function validateProductionEnv(env, errors, { allowPlaceholders }) {
+  validateProductionAuthEnv(env, errors);
   for (const [key, value] of relevantEnvEntries(env)) {
     const normalized = String(value || "").trim();
     if (!normalized) {
@@ -292,6 +293,35 @@ function validateProductionEnv(env, errors, { allowPlaceholders }) {
     }
     if (isUrlKey(key)) {
       validateProductionUrlishValue(key, normalized, errors);
+    }
+  }
+}
+
+function validateProductionAuthEnv(env, errors) {
+  const devApiKey = String(env.REND_DEV_API_KEY || "").trim();
+  if (devApiKey) {
+    errors.push("REND_DEV_API_KEY is local/dev only and must not be set in production profile");
+  }
+
+  const betterAuthSecret = String(env.BETTER_AUTH_SECRET || env.AUTH_SECRET || "").trim();
+  if (!betterAuthSecret) {
+    errors.push("production profile requires BETTER_AUTH_SECRET");
+  }
+
+  const betterAuthUrl = String(env.BETTER_AUTH_URL || env.REND_AUTH_BASE_URL || "").trim();
+  if (!betterAuthUrl) {
+    errors.push("production profile requires BETTER_AUTH_URL or REND_AUTH_BASE_URL");
+  }
+
+  const emailDisabled = ["1", "true", "yes", "on"].includes(
+    String(env.REND_AUTH_EMAIL_DISABLED || "").trim().toLowerCase(),
+  );
+  if (!emailDisabled) {
+    if (!String(env.RESEND_API_KEY || "").trim()) {
+      errors.push("production profile requires RESEND_API_KEY unless REND_AUTH_EMAIL_DISABLED=true");
+    }
+    if (!String(env.REND_AUTH_EMAIL_FROM || "").trim()) {
+      errors.push("production profile requires REND_AUTH_EMAIL_FROM unless REND_AUTH_EMAIL_DISABLED=true");
     }
   }
 }
