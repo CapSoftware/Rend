@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 import { and, eq, isNull } from "drizzle-orm";
-import { assets } from "../../../../../../lib/db/schema.ts";
+import { assets, organization } from "../../../../../../lib/db/schema.ts";
 import {
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
@@ -180,7 +180,15 @@ async function assetOrganizationId(assetId: string) {
   const [row] = await getSiteDb()
     .select({ organizationId: assets.organization_id })
     .from(assets)
-    .where(and(eq(assets.id, assetId), isNull(assets.deleted_at)))
+    .innerJoin(organization, eq(organization.id, assets.organization_id))
+    .where(
+      and(
+        eq(assets.id, assetId),
+        isNull(assets.deleted_at),
+        isNull(assets.suspended_at),
+        isNull(organization.suspended_at)
+      )
+    )
     .limit(1);
   return row?.organizationId ?? null;
 }
