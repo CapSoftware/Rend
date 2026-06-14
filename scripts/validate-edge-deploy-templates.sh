@@ -232,6 +232,8 @@ require_contains docs/templates/edge-host.compose.yml "http://127.0.0.1:4100/rea
 require_contains docs/templates/edge-host.compose.yml '${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}'
 
 require_contains docs/templates/control-plane.Caddyfile 'remote_ip {$REND_CONTROL_PLANE_ALLOWED_EDGE_IPS}'
+require_contains docs/templates/control-plane.Caddyfile 'REND_PUBLIC_API_HOSTNAME'
+require_contains docs/templates/control-plane.Caddyfile "path /v1/* /readyz"
 require_contains docs/templates/control-plane.Caddyfile "path /internal/*"
 require_contains docs/templates/control-plane.Caddyfile "reverse_proxy 127.0.0.1:4000"
 require_contains docs/templates/control-plane.Caddyfile "respond 404"
