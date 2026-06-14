@@ -43,6 +43,7 @@
     "backend:smoke:playback-bootstrap": "scripts/smoke-playback-bootstrap.sh",
     "backend:smoke:playback-telemetry": "scripts/smoke-playback-telemetry.sh",
     "e2e:player-telemetry": "node scripts/e2e-player-telemetry.mjs",
+    "e2e:site-assets": "node scripts/e2e-site-assets.mjs",
     "backend:smoke:edge-warming": "scripts/smoke-edge-warming.sh",
     "backend:smoke:delete-purge": "scripts/smoke-delete-purge.sh",
     "backend:smoke:signed-playback": "scripts/smoke-edge-cache.sh",
