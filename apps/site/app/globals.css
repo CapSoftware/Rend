@@ -346,6 +346,7 @@
   }
 
   .app-state-ready,
+  .app-state-pass,
   .app-state-hls_ready,
   .app-state-opener_ready,
   .app-state-uploaded {
@@ -355,11 +356,19 @@
   }
 
   .app-state-failed,
+  .app-state-fail,
   .app-state-deleted,
   .app-state-suspended {
     border-color: #f2b8b5;
     background: #fff4f2;
     color: #9f1f17;
+  }
+
+  .app-state-warn,
+  .app-state-missing {
+    border-color: #f3d38a;
+    background: #fff8e6;
+    color: #854d0e;
   }
 
   .app-state-processing,
@@ -373,6 +382,25 @@
   .app-empty {
     color: #586273;
     font-size: 14px;
+  }
+
+  .app-muted {
+    margin: 0;
+    color: #586273;
+    font-size: 12px;
+  }
+
+  .app-readiness-panel {
+    margin-bottom: 16px;
+  }
+
+  .app-readiness-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-bottom: 16px;
+  }
+
+  .app-readiness-table {
+    margin-top: 8px;
   }
 
   .app-detail-grid {
@@ -539,6 +567,7 @@
     }
 
     .app-stats,
+    .app-readiness-stats,
     .app-counts,
     .app-scope-grid {
       grid-template-columns: 1fr;
