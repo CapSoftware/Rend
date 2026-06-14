@@ -56,10 +56,12 @@ export default function AssetDetailClient({
   initialAnalytics,
   initialAsset,
   initialTelemetry,
+  readOnlyReason,
 }: {
   initialAnalytics: AssetPlaybackAnalytics | null;
   initialAsset: AssetDetail;
   initialTelemetry: AssetPlayerTelemetryEvent[];
+  readOnlyReason?: string;
 }) {
   const [asset, setAsset] = useState(initialAsset);
   const [analytics, setAnalytics] = useState(initialAnalytics);
@@ -81,6 +83,18 @@ export default function AssetDetailClient({
   const watchPath = `/watch/${assetId}`;
   const embedUrl = `${origin}${embedPath}`;
   const iframeSnippet = `<iframe src="${embedUrl || embedPath}" width="960" height="540" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+  const suspensionReason =
+    readOnlyReason ??
+    (asset.suspended_at
+      ? asset.suspension_reason
+        ? `Asset is suspended: ${asset.suspension_reason}`
+        : "Asset is suspended. Playback and mutations are unavailable."
+      : asset.organization_suspended_at
+        ? asset.organization_suspension_reason
+          ? `Organization is suspended: ${asset.organization_suspension_reason}`
+          : "Organization is suspended. This asset is read-only."
+        : "");
+  const readOnly = Boolean(suspensionReason);
 
   const refreshAsset = useCallback(async () => {
     const response = await fetch(`/api/assets/${assetId}`, { cache: "no-store" });
@@ -144,12 +158,18 @@ export default function AssetDetailClient({
   }, [asset.playable_state, deleteState, pollExhausted, pollVersion, refreshAsset]);
 
   async function copyText(label: string, value: string) {
+    if (readOnly) return;
     await navigator.clipboard.writeText(value);
     setCopied(label);
     window.setTimeout(() => setCopied(null), 1_500);
   }
 
   async function deleteAsset() {
+    if (readOnly) {
+      setDeleteState("error");
+      setDeleteMessage(suspensionReason);
+      return;
+    }
     if (!window.confirm(`Delete asset ${assetId}?`)) return;
 
     setDeleteState("deleting");
@@ -209,12 +229,16 @@ export default function AssetDetailClient({
         </Link>
         <nav>
           <Link href="/dashboard/api-keys">API keys</Link>
-          <a href={watchPath} rel="noreferrer" target="_blank">
-            Open watch
-          </a>
-          <a href={embedPath} rel="noreferrer" target="_blank">
-            Open embed
-          </a>
+          {readOnly ? null : (
+            <a href={watchPath} rel="noreferrer" target="_blank">
+              Open watch
+            </a>
+          )}
+          {readOnly ? null : (
+            <a href={embedPath} rel="noreferrer" target="_blank">
+              Open embed
+            </a>
+          )}
           <button onClick={signOut} type="button">
             Sign out
           </button>
@@ -228,15 +252,15 @@ export default function AssetDetailClient({
             <h1 className="app-asset-title">{assetId}</h1>
           </div>
           <div className="app-detail-actions">
-            <button onClick={() => copyText("embed-url", embedUrl || embedPath)} type="button">
+            <button disabled={readOnly} onClick={() => copyText("embed-url", embedUrl || embedPath)} type="button">
               Copy embed URL
             </button>
-            <button onClick={() => copyText("iframe", iframeSnippet)} type="button">
+            <button disabled={readOnly} onClick={() => copyText("iframe", iframeSnippet)} type="button">
               Copy iframe
             </button>
             <button
               className="app-danger"
-              disabled={deleteState === "deleting" || deleteState === "deleted"}
+              disabled={readOnly || deleteState === "deleting" || deleteState === "deleted"}
               onClick={deleteAsset}
               type="button"
             >
@@ -246,6 +270,7 @@ export default function AssetDetailClient({
         </section>
 
         {copied ? <section className="app-callout app-callout-done">Copied {copied}.</section> : null}
+        {readOnly ? <section className="app-callout app-callout-error">{suspensionReason}</section> : null}
         {deleteMessage ? (
           <section className={`app-callout app-callout-${deleteState === "error" ? "error" : "done"}`}>
             {deleteMessage}
@@ -275,6 +300,14 @@ export default function AssetDetailClient({
                 </dd>
               </div>
               <div>
+                <dt>Access</dt>
+                <dd>
+                  <span className={`app-pill ${readOnly ? "app-state-suspended" : "app-state-ready"}`}>
+                    {readOnly ? "suspended" : "active"}
+                  </span>
+                </dd>
+              </div>
+              <div>
                 <dt>Source size</dt>
                 <dd>{formatBytes(asset.source_byte_size)}</dd>
               </div>
@@ -292,7 +325,7 @@ export default function AssetDetailClient({
           </div>
         </section>
 
-        {playable(asset.playable_state) && deleteState !== "deleted" ? (
+        {playable(asset.playable_state) && deleteState !== "deleted" && !readOnly ? (
           <section className="app-panel app-preview-panel">
             <iframe
               allow="autoplay; fullscreen; picture-in-picture"
@@ -303,7 +336,11 @@ export default function AssetDetailClient({
           </section>
         ) : (
           <section className="app-panel app-empty">
-            {asset.playable_state === "deleted" ? "Playback is unavailable." : "Waiting for a playable rendition."}
+            {readOnly
+              ? "Playback is unavailable while suspended."
+              : asset.playable_state === "deleted"
+                ? "Playback is unavailable."
+                : "Waiting for a playable rendition."}
           </section>
         )}
 
@@ -337,7 +374,7 @@ export default function AssetDetailClient({
           <div className="app-panel">
             <div className="app-panel-title-row">
               <h2>Edge requests</h2>
-              <button disabled={metricsLoading} onClick={refreshMetrics} type="button">
+              <button disabled={metricsLoading || readOnly} onClick={refreshMetrics} type="button">
                 {metricsLoading ? "Refreshing..." : "Refresh"}
               </button>
             </div>
@@ -389,7 +426,7 @@ export default function AssetDetailClient({
         <section className="app-panel">
           <div className="app-panel-title-row">
             <h2>Player startup</h2>
-            <button disabled={metricsLoading} onClick={refreshMetrics} type="button">
+            <button disabled={metricsLoading || readOnly} onClick={refreshMetrics} type="button">
               {metricsLoading ? "Refreshing..." : "Refresh"}
             </button>
           </div>
