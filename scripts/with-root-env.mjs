@@ -1,68 +1,51 @@
+#!/usr/bin/env node
+
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "dotenv";
-import { expand } from "dotenv-expand";
+import {
+  inferCommandProfile,
+  loadProfileEnv,
+  normalizeProfile,
+  parseCliEnvOptions,
+  printValidationResult,
+  validateEnvironment,
+} from "./env-policy.mjs";
 
-const args = process.argv.slice(2);
+const options = parseCliEnvOptions(process.argv.slice(2));
 
-if (args.length === 0) {
-  console.error("Usage: node scripts/with-root-env.mjs <command> [...args]");
+if (options.args.length === 0) {
+  console.error(
+    "Usage: node scripts/with-root-env.mjs [--profile local|production] [--env-file FILE] <command> [...args]",
+  );
   process.exit(1);
 }
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const profile = normalizeProfile(options.profile || inferCommandProfile(options.args));
 const appRoot = process.cwd();
-const mode = process.env.NODE_ENV || (args.includes("dev") ? "development" : "production");
-const inheritedKeys = new Set(Object.keys(process.env));
-const loaded = {};
+const { env, files, loadedFiles } = loadProfileEnv({
+  profile,
+  envFile: options.envFile,
+  appRoot,
+  cwd: process.cwd(),
+});
 
-function applyEnvFile(file) {
-  if (!existsSync(file)) {
-    return;
-  }
-
-  const parsed = parse(readFileSync(file));
-
-  for (const [key, value] of Object.entries(parsed)) {
-    if (!inheritedKeys.has(key)) {
-      loaded[key] = value;
-    }
-  }
+const validation = validateEnvironment({ profile, env, files });
+printValidationResult(validation);
+if (validation.errors.length > 0) {
+  process.exit(1);
 }
 
-function loadEnvFiles(root) {
-  applyEnvFile(join(root, ".env"));
-  applyEnvFile(join(root, `.env.${mode}`));
-
-  if (mode !== "test") {
-    applyEnvFile(join(root, ".env.local"));
-  }
-
-  applyEnvFile(join(root, `.env.${mode}.local`));
+if (process.env.REND_ENV_DEBUG === "1") {
+  const fileList = loadedFiles.length ? loadedFiles.join(", ") : "platform environment only";
+  console.error(`[env] loaded ${profile} profile from ${fileList}`);
 }
 
-loadEnvFiles(repoRoot);
-
-if (appRoot !== repoRoot) {
-  loadEnvFiles(appRoot);
-}
-
-const expanded = expand({
-  parsed: loaded,
-  processEnv: { ...process.env }
-}).parsed ?? loaded;
-const env = {
-  ...process.env,
-  ...expanded,
-  NODE_ENV: process.env.NODE_ENV || mode
-};
-
-const child = spawn(args[0], args.slice(1), {
-  env,
+const child = spawn(options.args[0], options.args.slice(1), {
+  env: {
+    ...env,
+    NODE_ENV: process.env.NODE_ENV || (profile === "local" ? "development" : "production"),
+  },
   shell: process.platform === "win32",
-  stdio: "inherit"
+  stdio: "inherit",
 });
 
 child.on("exit", (code, signal) => {
