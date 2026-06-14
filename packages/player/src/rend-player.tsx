@@ -1,6 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  generatePlaybackSessionId,
+  readableTelemetryHeaders,
+  REND_PLAYER_VERSION,
+  sendPlayerTelemetryEvent,
+  telemetryLabelsFromHeaders,
+} from "./telemetry";
+import type {
+  RendPlayerPlaybackMode,
+  RendPlayerTelemetryEvent,
+  RendPlayerTelemetryInput,
+} from "./telemetry";
 
 export type PlaybackPrefetchHint = {
   artifact_path: string;
@@ -72,6 +84,10 @@ export type RendPlayerProps = {
   controls?: boolean;
   className?: string;
   maxPrefetchHints?: number;
+  telemetryEnabled?: boolean;
+  telemetryUrl?: string;
+  telemetryAppVersion?: string;
+  onTelemetryEvent?: (event: RendPlayerTelemetryEvent) => void;
   onStateChange?: (state: RendPlayerState) => void;
   onTimingsChange?: (timings: RendPlayerTimings) => void;
 };
@@ -80,7 +96,18 @@ type HlsInstance = {
   loadSource(source: string): void;
   attachMedia(media: HTMLMediaElement): void;
   destroy(): void;
-  on(event: string, callback: (_event: string, data: { fatal?: boolean }) => void): void;
+  on(
+    event: string,
+    callback: (
+      _event: string,
+      data: {
+        details?: string;
+        fatal?: boolean;
+        response?: { code?: number };
+        type?: string;
+      }
+    ) => void
+  ): void;
 };
 
 type HlsConstructor = {
@@ -92,10 +119,45 @@ type HlsConstructor = {
 };
 
 type SourceSelection = {
-  label: "manifest" | "hls.js" | "opener" | "primary";
+  label: RendPlayerPlaybackMode;
   artifactPath: string;
   url: string;
 };
+
+type ManifestObjectUrlResult = {
+  sourceUrl: string;
+  cacheHeaders?: Record<string, string>;
+  edgeLabel?: string;
+  httpStatus: number;
+  regionLabel?: string;
+};
+
+class PlaybackLoadError extends Error {
+  cacheHeaders?: Record<string, string>;
+  code: string;
+  edgeLabel?: string;
+  httpStatus?: number;
+  regionLabel?: string;
+
+  constructor(
+    code: string,
+    message: string,
+    options: {
+      cacheHeaders?: Record<string, string>;
+      edgeLabel?: string;
+      httpStatus?: number;
+      regionLabel?: string;
+    } = {}
+  ) {
+    super(message);
+    this.name = "PlaybackLoadError";
+    this.code = code;
+    this.cacheHeaders = options.cacheHeaders;
+    this.edgeLabel = options.edgeLabel;
+    this.httpStatus = options.httpStatus;
+    this.regionLabel = options.regionLabel;
+  }
+}
 
 const DEFAULT_MAX_PREFETCH_HINTS = 2;
 
@@ -118,7 +180,7 @@ function selectedSource(
 ): SourceSelection | null {
   if (data.manifest_url && isNativeHlsSupported(video)) {
     return {
-      label: "manifest",
+      label: "native_hls",
       artifactPath: "hls/master.m3u8",
       url: data.manifest_url,
     };
@@ -126,7 +188,7 @@ function selectedSource(
 
   if (data.manifest_url && hlsSupported) {
     return {
-      label: "hls.js",
+      label: "hls_js",
       artifactPath: "hls/master.m3u8",
       url: data.manifest_url,
     };
@@ -175,8 +237,20 @@ async function signedHlsManifestObjectUrl(manifestUrl: string) {
   const parsedManifestUrl = new URL(manifestUrl);
   const token = parsedManifestUrl.searchParams.get("token");
   const response = await fetch(parsedManifestUrl.toString(), { cache: "no-store" });
+  const cacheHeaders = readableTelemetryHeaders(response.headers);
+  const labels = telemetryLabelsFromHeaders(response.headers);
+
   if (!response.ok) {
-    throw new Error(`HLS manifest failed with HTTP ${response.status}`);
+    throw new PlaybackLoadError(
+      "hls_manifest_http_error",
+      `HLS manifest failed with HTTP ${response.status}`,
+      {
+        cacheHeaders,
+        edgeLabel: labels.edge_label,
+        httpStatus: response.status,
+        regionLabel: labels.region_label,
+      }
+    );
   }
 
   const manifest = await response.text();
@@ -185,9 +259,15 @@ async function signedHlsManifestObjectUrl(manifestUrl: string) {
     .map((line) => signedHlsLine(line, parsedManifestUrl, token))
     .join("\n");
 
-  return URL.createObjectURL(
-    new Blob([signedManifest], { type: "application/vnd.apple.mpegurl" })
-  );
+  return {
+    sourceUrl: URL.createObjectURL(
+      new Blob([signedManifest], { type: "application/vnd.apple.mpegurl" })
+    ),
+    cacheHeaders,
+    edgeLabel: labels.edge_label,
+    httpStatus: response.status,
+    regionLabel: labels.region_label,
+  } satisfies ManifestObjectUrlResult;
 }
 
 function stateLabel(state: RendPlayerState) {
@@ -227,6 +307,37 @@ function isUnavailableState(state: RendPlayerState) {
   );
 }
 
+function playbackLoadErrorFields(error: unknown, fallbackCode: string, fallbackReason: string) {
+  if (error instanceof PlaybackLoadError) {
+    return {
+      cache_headers: error.cacheHeaders,
+      edge_label: error.edgeLabel,
+      playback_failure_code: error.code,
+      playback_failure_reason: error.message,
+      region_label: error.regionLabel,
+    };
+  }
+
+  return {
+    playback_failure_code: fallbackCode,
+    playback_failure_reason: fallbackReason,
+  };
+}
+
+function selectionTelemetryFields(selection: SourceSelection | null) {
+  if (!selection) return {};
+  return {
+    selected_artifact_path: selection.artifactPath,
+    selected_playback_mode: selection.label,
+  };
+}
+
+function hlsFailureReason(errorData: { details?: string; response?: { code?: number }; type?: string }) {
+  const parts = [errorData.type, errorData.details].filter(Boolean);
+  if (errorData.response?.code) parts.push(`HTTP ${errorData.response.code}`);
+  return parts.length > 0 ? parts.join(": ") : "Fatal hls.js playback error";
+}
+
 export function RendPlayer({
   assetId,
   bootstrapUrl,
@@ -235,6 +346,10 @@ export function RendPlayer({
   controls = true,
   className,
   maxPrefetchHints = DEFAULT_MAX_PREFETCH_HINTS,
+  telemetryEnabled,
+  telemetryUrl,
+  telemetryAppVersion,
+  onTelemetryEvent,
   onStateChange,
   onTimingsChange,
 }: RendPlayerProps) {
@@ -243,16 +358,50 @@ export function RendPlayer({
   const manifestObjectUrlRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const loadStartedAtRef = useRef<number>(0);
+  const timingsRef = useRef<RendPlayerTimings>({});
   const triedOpenerFallbackRef = useRef(false);
   const [state, setState] = useState<RendPlayerState>("idle");
   const [message, setMessage] = useState("Loading playback");
   const [bootstrap, setBootstrap] = useState<PlaybackBootstrapResponse | null>(null);
   const [selection, setSelection] = useState<SourceSelection | null>(null);
   const [timings, setTimings] = useState<RendPlayerTimings>({});
+  const playbackSessionId = useMemo(() => generatePlaybackSessionId(), []);
+  const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
 
   const resolvedBootstrapUrl = useMemo(
     () => bootstrapUrl ?? `/api/player/${encodeURIComponent(assetId)}`,
     [assetId, bootstrapUrl]
+  );
+
+  const emitTelemetry = useCallback(
+    (input: RendPlayerTelemetryInput) => {
+      if (!telemetryActive) return;
+
+      const event: RendPlayerTelemetryEvent = {
+        playback_session_id: playbackSessionId,
+        asset_id: assetId,
+        event_time_ms: Date.now(),
+        player_version: REND_PLAYER_VERSION,
+        app_version: telemetryAppVersion,
+        ...input,
+      };
+
+      try {
+        onTelemetryEvent?.(event);
+      } catch {
+        // Telemetry callbacks must not interfere with playback.
+      }
+
+      if (telemetryUrl) sendPlayerTelemetryEvent(telemetryUrl, event);
+    },
+    [
+      assetId,
+      onTelemetryEvent,
+      playbackSessionId,
+      telemetryActive,
+      telemetryAppVersion,
+      telemetryUrl,
+    ]
   );
 
   const setPlayerState = useCallback(
@@ -267,17 +416,18 @@ export function RendPlayer({
   const recordTiming = useCallback(
     (key: keyof RendPlayerTimings) => {
       const startedAt = loadStartedAtRef.current;
-      if (!startedAt) return;
+      if (!startedAt || timingsRef.current[key] !== undefined) return undefined;
 
-      setTimings((current) => {
-        if (current[key] !== undefined) return current;
-        const next = {
-          ...current,
-          [key]: Date.now() - startedAt,
-        };
-        onTimingsChange?.(next);
-        return next;
-      });
+      const value = Date.now() - startedAt;
+      const next = {
+        ...timingsRef.current,
+        [key]: value,
+      };
+      timingsRef.current = next;
+      setTimings(next);
+      onTimingsChange?.(next);
+
+      return value;
     },
     [onTimingsChange]
   );
@@ -312,19 +462,44 @@ export function RendPlayer({
       setPlayerState("ready");
 
       try {
-        const sourceUrl =
-          nextSelection.artifactPath === "hls/master.m3u8"
-            ? await signedHlsManifestObjectUrl(nextSelection.url)
-            : nextSelection.url;
+        let sourceUrl = nextSelection.url;
+        let sourceTelemetry: Pick<
+          RendPlayerTelemetryEvent,
+          "cache_headers" | "edge_label" | "region_label"
+        > = {};
+
+        if (nextSelection.artifactPath === "hls/master.m3u8") {
+          const manifest = await signedHlsManifestObjectUrl(nextSelection.url);
+          sourceUrl = manifest.sourceUrl;
+          sourceTelemetry = {
+            cache_headers: manifest.cacheHeaders,
+            edge_label: manifest.edgeLabel,
+            region_label: manifest.regionLabel,
+          };
+        }
+
         if (sourceUrl !== nextSelection.url) {
           manifestObjectUrlRef.current = sourceUrl;
         }
 
-        if (nextSelection.label === "hls.js" && Hls) {
+        emitTelemetry({
+          phase: "source_selected",
+          ...selectionTelemetryFields(nextSelection),
+          ...sourceTelemetry,
+        });
+
+        if (nextSelection.label === "hls_js" && Hls) {
           const hls = new Hls();
           hlsRef.current = hls;
           hls.on(Hls.Events.ERROR, (_event, errorData) => {
             if (!errorData.fatal) return;
+
+            emitTelemetry({
+              phase: "playback_failure",
+              playback_failure_code: "hls_js_fatal",
+              playback_failure_reason: hlsFailureReason(errorData),
+              ...selectionTelemetryFields(nextSelection),
+            });
 
             const opener = openerSource(data);
             if (!triedOpenerFallbackRef.current && opener) {
@@ -344,7 +519,19 @@ export function RendPlayer({
 
         video.src = sourceUrl;
         video.load();
-      } catch {
+      } catch (error) {
+        emitTelemetry({
+          phase: "playback_failure",
+          ...selectionTelemetryFields(nextSelection),
+          ...playbackLoadErrorFields(
+            error,
+            nextSelection.artifactPath === "hls/master.m3u8"
+              ? "hls_manifest_load_failed"
+              : "source_load_failed",
+            "Playback source failed to load"
+          ),
+        });
+
         const opener = openerSource(data);
         if (
           nextSelection.artifactPath === "hls/master.m3u8" &&
@@ -359,7 +546,7 @@ export function RendPlayer({
         setPlayerState(isTokenExpired(data) ? "token_expired" : "playback_failure");
       }
     },
-    [destroyHls, revokeManifestObjectUrl, setPlayerState]
+    [destroyHls, emitTelemetry, revokeManifestObjectUrl, setPlayerState]
   );
 
   const loadPlayback = useCallback(async () => {
@@ -372,8 +559,13 @@ export function RendPlayer({
     destroyHls();
     setSelection(null);
     setBootstrap(null);
+    timingsRef.current = {};
     setTimings({});
     setPlayerState("loading");
+    emitTelemetry({
+      phase: "player_load",
+      bootstrap_start_ms: 0,
+    });
 
     const abortController = new AbortController();
     abortRef.current = abortController;
@@ -388,9 +580,21 @@ export function RendPlayer({
         asset_id: assetId,
         message: `HTTP ${response.status}`,
       }))) as PlaybackBootstrapResponse;
+      const bootstrapMs = recordTiming("bootstrapMs") ?? Date.now() - loadStartedAtRef.current;
+      const cacheHeaders = readableTelemetryHeaders(response.headers);
+      const labels = telemetryLabelsFromHeaders(response.headers);
 
       setBootstrap(data);
-      recordTiming("bootstrapMs");
+      emitTelemetry({
+        phase: "bootstrap_complete",
+        bootstrap_start_ms: 0,
+        bootstrap_end_ms: bootstrapMs,
+        bootstrap_duration_ms: bootstrapMs,
+        bootstrap_http_status: response.status,
+        cache_headers: cacheHeaders,
+        edge_label: labels.edge_label,
+        region_label: labels.region_label,
+      });
 
       if (!response.ok || data.status !== "ready") {
         const nextState =
@@ -398,9 +602,21 @@ export function RendPlayer({
             ? "not_playable"
             : data.status === "unavailable"
               ? "unavailable"
-              : "bootstrap_failure";
+            : "bootstrap_failure";
         const nextMessage =
           data.status === "ready" ? `HTTP ${response.status}` : data.message;
+        emitTelemetry({
+          phase: "bootstrap_failure",
+          bootstrap_start_ms: 0,
+          bootstrap_end_ms: bootstrapMs,
+          bootstrap_duration_ms: bootstrapMs,
+          bootstrap_http_status: response.status,
+          playback_failure_code: nextState,
+          playback_failure_reason: nextMessage,
+          cache_headers: cacheHeaders,
+          edge_label: labels.edge_label,
+          region_label: labels.region_label,
+        });
         setPlayerState(nextState, nextMessage);
         return;
       }
@@ -415,6 +631,11 @@ export function RendPlayer({
 
       const nextSelection = selectedSource(data, video, Boolean(Hls?.isSupported()));
       if (!nextSelection) {
+        emitTelemetry({
+          phase: "playback_failure",
+          playback_failure_code: "no_playable_artifact",
+          playback_failure_reason: "No playable artifact is available",
+        });
         setPlayerState("not_playable", "No playable artifact is available");
         return;
       }
@@ -427,6 +648,18 @@ export function RendPlayer({
         asset_id: assetId,
         message: "Playback bootstrap failed",
       });
+      emitTelemetry({
+        phase: "bootstrap_failure",
+        bootstrap_start_ms: 0,
+        bootstrap_end_ms: loadStartedAtRef.current
+          ? Date.now() - loadStartedAtRef.current
+          : undefined,
+        bootstrap_duration_ms: loadStartedAtRef.current
+          ? Date.now() - loadStartedAtRef.current
+          : undefined,
+        playback_failure_code: "bootstrap_fetch_failed",
+        playback_failure_reason: "Playback bootstrap failed",
+      });
       setPlayerState("bootstrap_failure", "Playback bootstrap failed");
     } finally {
       if (abortRef.current === abortController) {
@@ -436,6 +669,7 @@ export function RendPlayer({
   }, [
     assetId,
     destroyHls,
+    emitTelemetry,
     loadSource,
     recordTiming,
     resolvedBootstrapUrl,
@@ -488,6 +722,7 @@ export function RendPlayer({
       data-rend-canplay-ms={timings.canplayMs}
       data-rend-first-frame-ms={timings.firstFrameMs}
       data-rend-asset-id={assetId}
+      data-rend-playback-session-id={playbackSessionId}
     >
       <div className="rend-player__stage">
         <video
@@ -500,15 +735,36 @@ export function RendPlayer({
           preload="metadata"
           crossOrigin="anonymous"
           onLoadedMetadata={() => {
-            recordTiming("metadataMs");
+            const metadataMs = recordTiming("metadataMs");
+            if (metadataMs !== undefined) {
+              emitTelemetry({
+                phase: "metadata_loaded",
+                metadata_loaded_ms: metadataMs,
+                ...selectionTelemetryFields(selection),
+              });
+            }
             setPlayerState("metadata");
           }}
           onCanPlay={() => {
-            recordTiming("canplayMs");
+            const canplayMs = recordTiming("canplayMs");
+            if (canplayMs !== undefined) {
+              emitTelemetry({
+                phase: "canplay",
+                canplay_ms: canplayMs,
+                ...selectionTelemetryFields(selection),
+              });
+            }
             setPlayerState("canplay");
           }}
           onPlaying={() => {
-            recordTiming("firstFrameMs");
+            const firstFrameMs = recordTiming("firstFrameMs");
+            if (firstFrameMs !== undefined) {
+              emitTelemetry({
+                phase: "first_frame",
+                first_frame_ms: firstFrameMs,
+                ...selectionTelemetryFields(selection),
+              });
+            }
             setPlayerState("playing");
           }}
           onError={() => {
@@ -525,8 +781,24 @@ export function RendPlayer({
               return;
             }
 
+            const mediaError = videoRef.current?.error;
+            const tokenExpired = isTokenExpired(data);
+            emitTelemetry({
+              phase: "playback_failure",
+              playback_failure_code: tokenExpired
+                ? "token_expired"
+                : mediaError
+                  ? `media_error_${mediaError.code}`
+                  : "media_error",
+              playback_failure_reason: tokenExpired
+                ? "Playback token expired"
+                : mediaError
+                  ? `HTMLMediaElement error ${mediaError.code}`
+                  : "Media playback failed",
+              ...selectionTelemetryFields(selection),
+            });
             setPlayerState(
-              isTokenExpired(data) ? "token_expired" : "playback_failure"
+              tokenExpired ? "token_expired" : "playback_failure"
             );
           }}
         />
