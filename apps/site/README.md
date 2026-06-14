@@ -32,12 +32,24 @@ To read the list back, run `SMEMBERS waitlist` from the Upstash console.
 
 ## Player telemetry
 
-The embed and watch players post beta startup telemetry to
+The embed and watch players post player startup telemetry to
 `/api/player/telemetry`. This data is separate from edge request telemetry and is
 not billing-grade watch accounting. Recent sanitized events are available at
 `/api/player/telemetry/recent` on localhost and non-production builds; set
-`REND_PLAYER_TELEMETRY_DEBUG=1` to expose that JSON endpoint for a hosted beta
+`REND_PLAYER_TELEMETRY_DEBUG=1` to expose that JSON endpoint for a hosted environment
 debug session.
+
+## Dashboard assets
+
+Sign in at `/login`, then use the asset dashboard at `/dashboard/assets`.
+Dashboard routes and `/api/assets/*` require `REND_SITE_OPERATOR_TOKEN`; the
+site keeps all Rend API calls server-side, and the browser receives only
+sanitized asset, analytics, and startup telemetry data. The local full-flow
+check is:
+
+```bash
+bun run e2e:site-assets
+```
 
 ## Deploy
 
