@@ -79,6 +79,8 @@ approved accounts while delivery economics are measured.
 - [`clickhouse/`](./clickhouse) — ClickHouse schema for raw playback request telemetry
 - [`compose.yml`](./compose.yml) — local Postgres, ClickHouse, MinIO, and Redis
 - [`packages/`](./packages) — shared packages for future apps and services
+- [`docs/openapi/rend-public-api.openapi.json`](./docs/openapi/rend-public-api.openapi.json) — canonical public OpenAPI contract
+- [`packages/sdk/`](./packages/sdk) — generated TypeScript public API client
 
 ## Develop
 
@@ -92,6 +94,19 @@ bun dev
 Use `bun run build` for production builds and `bun typecheck` for TypeScript.
 `bun build` is Bun's native bundler command, so it does not run the package
 script.
+
+Public API contract and SDK commands:
+
+```bash
+bun run openapi:lint
+bun run openapi:generate
+bun run openapi:check
+bun run openapi:contract
+bun run openapi:sdk-test
+```
+
+The generated TypeScript client lives at [`packages/sdk/`](./packages/sdk) and
+is generated from the single OpenAPI source file under `docs/openapi/`.
 
 Root env files are loaded by explicit profile through
 `scripts/with-root-env.mjs` and `crates/rend-config`.
