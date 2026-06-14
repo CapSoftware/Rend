@@ -5,12 +5,32 @@
 # Internal control-plane ingress for edge hosts.
 #
 # Required Caddy environment:
+# - REND_PUBLIC_API_HOSTNAME: public API hostname for /v1/* and /readyz.
 # - REND_CONTROL_PLANE_HOSTNAME: private/internal API hostname.
 # - REND_CONTROL_PLANE_ALLOWED_EDGE_IPS: space-separated edge source IPs,
 #   plus any private bastion/VPN source used for operator probes.
 #
-# Public API ingress, if needed, should use a separate Caddy site that does not
-# route /internal/*.
+# The public hostname must never route /internal/*.
+{$REND_PUBLIC_API_HOSTNAME} {
+	@blocked_internal {
+		path /internal/*
+	}
+	handle @blocked_internal {
+		respond 404
+	}
+
+	@public_api {
+		path /v1/* /readyz
+	}
+	handle @public_api {
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	handle {
+		respond 404
+	}
+}
+
 {$REND_CONTROL_PLANE_HOSTNAME} {
 	@allowed_internal {
 		path /internal/*
