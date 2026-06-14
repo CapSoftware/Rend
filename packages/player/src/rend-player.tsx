@@ -365,7 +365,7 @@ export function RendPlayer({
   const [bootstrap, setBootstrap] = useState<PlaybackBootstrapResponse | null>(null);
   const [selection, setSelection] = useState<SourceSelection | null>(null);
   const [timings, setTimings] = useState<RendPlayerTimings>({});
-  const playbackSessionId = useMemo(() => generatePlaybackSessionId(), []);
+  const [playbackSessionId, setPlaybackSessionId] = useState("");
   const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
 
   const resolvedBootstrapUrl = useMemo(
@@ -375,7 +375,7 @@ export function RendPlayer({
 
   const emitTelemetry = useCallback(
     (input: RendPlayerTelemetryInput) => {
-      if (!telemetryActive) return;
+      if (!telemetryActive || !playbackSessionId) return;
 
       const event: RendPlayerTelemetryEvent = {
         playback_session_id: playbackSessionId,
@@ -677,6 +677,11 @@ export function RendPlayer({
   ]);
 
   useEffect(() => {
+    setPlaybackSessionId((current) => current || generatePlaybackSessionId());
+  }, []);
+
+  useEffect(() => {
+    if (!playbackSessionId) return;
     void loadPlayback();
     return () => {
       abortRef.current?.abort();
@@ -684,7 +689,7 @@ export function RendPlayer({
       destroyHls();
       revokeManifestObjectUrl();
     };
-  }, [destroyHls, loadPlayback, revokeManifestObjectUrl]);
+  }, [destroyHls, loadPlayback, playbackSessionId, revokeManifestObjectUrl]);
 
   useEffect(() => {
     if (!bootstrap || bootstrap.status !== "ready") return;
