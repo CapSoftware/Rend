@@ -82,6 +82,7 @@ fn test_config() -> ApiConfig {
         redis_url: "redis://localhost:6379".to_owned(),
         object_store_health_url: "http://localhost:9100/minio/health/ready".to_owned(),
         dev_api_key: "dev-secret".to_owned(),
+        site_internal_token: "site-internal".to_owned(),
         s3_endpoint: "http://localhost:9100".to_owned(),
         s3_region: "us-east-1".to_owned(),
         s3_bucket: "rend-local".to_owned(),
@@ -322,6 +323,82 @@ fn bearer_authorization_rejects_missing_or_wrong_key() {
     );
 
     assert!(!is_authorized(&headers, "dev-secret"));
+}
+
+#[test]
+fn api_key_hashing_is_deterministic_hex() {
+    let hash = hash_api_key("rend_test_secret");
+
+    assert_eq!(hash, hash_api_key("rend_test_secret"));
+    assert_eq!(hash.len(), 64);
+    assert!(!hash.contains("rend_test_secret"));
+}
+
+#[test]
+fn request_auth_scope_checks_gate_mutations() {
+    let read_only = RequestAuth {
+        organization_id: LOCAL_ORG_ID.to_owned(),
+        scopes: [ApiScope::Read].into_iter().collect(),
+    };
+
+    assert!(require_scope(&read_only, ApiScope::Read).is_ok());
+    let Err(error) = require_scope(&read_only, ApiScope::Delete) else {
+        panic!("read-only auth unexpectedly had delete scope");
+    };
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn parse_api_scopes_rejects_unknown_or_empty_scope_sets() {
+    assert_eq!(
+        parse_api_scopes(vec!["read".to_owned(), "analytics".to_owned()]).unwrap(),
+        [ApiScope::Read, ApiScope::Analytics].into_iter().collect()
+    );
+    assert!(parse_api_scopes(Vec::new()).is_err());
+    assert!(parse_api_scopes(vec!["unknown".to_owned()]).is_err());
+}
+
+#[tokio::test]
+async fn site_internal_token_auth_sets_request_org_and_all_scopes() {
+    let state = test_state();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-rend-site-token",
+        HeaderValue::from_static("site-internal"),
+    );
+    headers.insert(
+        "x-rend-organization-id",
+        HeaderValue::from_static("00000000-0000-0000-0000-0000000000ab"),
+    );
+
+    let auth = authenticate_request(&state, &headers)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(auth.organization_id, "00000000-0000-0000-0000-0000000000ab");
+    assert!(auth.has_scope(ApiScope::Upload));
+    assert!(auth.has_scope(ApiScope::Read));
+    assert!(auth.has_scope(ApiScope::Delete));
+    assert!(auth.has_scope(ApiScope::Analytics));
+}
+
+#[tokio::test]
+async fn local_dev_key_auth_uses_seeded_local_org() {
+    let state = test_state();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer dev-secret"),
+    );
+
+    let auth = authenticate_request(&state, &headers)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(auth.organization_id, LOCAL_ORG_ID);
+    assert!(auth.has_scope(ApiScope::Upload));
 }
 
 #[tokio::test]
@@ -931,21 +1008,37 @@ fn playback_bootstrap_opener_ready_returns_opener_primary_without_manifest() {
 }
 
 #[test]
-fn playback_bootstrap_urls_use_signed_edge_playback_shape() {
+fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
         &hls_artifact_records(),
-        "http://edge.local",
+        "https://edge.local",
         &test_issuer(),
         1,
         NOW,
     )
     .unwrap();
     let playback_url = response.playback_url.as_deref().unwrap();
-    let (path, token) = playback_url.split_once("?token=").unwrap();
-    let claims = decode_unverified_claims(token).unwrap();
+    let claims = decode_unverified_claims(&response.playback_token).unwrap();
+    let serialized = serde_json::to_string(&response).unwrap();
+    let cookie = playback_cookie_header(
+        &response.playback_token,
+        response.ttl_seconds,
+        "https://edge.local",
+    );
 
-    assert_eq!(path, "http://edge.local/v/asset-123/hls/master.m3u8");
+    assert_eq!(
+        playback_url,
+        "https://edge.local/v/asset-123/hls/master.m3u8"
+    );
+    assert!(!serialized.contains("?token="), "{serialized}");
+    assert!(
+        !serialized.contains(&response.playback_token),
+        "{serialized}"
+    );
+    assert!(cookie.starts_with("__rend_playback="));
+    assert!(cookie.contains("; HttpOnly"));
+    assert!(cookie.contains("; Secure"));
     assert_eq!(claims.asset_id, "asset-123");
     assert_eq!(claims.exp, NOW + 600);
     assert_eq!(claims.kid, "kid-a");
@@ -980,7 +1073,7 @@ fn source_object_key_is_deterministic_and_internal() {
 }
 
 #[test]
-fn playback_url_uses_signed_hls_edge_shape() {
+fn playback_url_uses_tokenless_hls_edge_shape() {
     let issuer = PlaybackTokenIssuer::new(
         SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap(),
         Duration::from_secs(600),
@@ -995,14 +1088,9 @@ fn playback_url_uses_signed_hls_edge_shape() {
     )
     .unwrap()
     .unwrap();
-    let (path, token) = url.split_once("?token=").unwrap();
-    let claims = decode_unverified_claims(token).unwrap();
 
-    assert_eq!(path, "http://127.0.0.1:4100/v/asset-123/hls/master.m3u8");
-    assert_eq!(claims.asset_id, "asset-123");
-    assert_eq!(claims.exp, 1_800_000_600);
-    assert_eq!(claims.kid, "kid-a");
-    assert_eq!(claims.policy, POLICY_ASSET_PLAYBACK_V1);
+    assert_eq!(url, "http://127.0.0.1:4100/v/asset-123/hls/master.m3u8");
+    assert!(!url.contains("?token="), "{url}");
 }
 
 #[test]
@@ -1072,10 +1160,10 @@ fn edge_registry_validation_normalizes_safe_values() {
                 rend_env: RendEnv::Local,
                 allow_insecure_edge_urls: false,
             },
-            "https://edge.example.com/"
+            "http://127.0.0.1:4100/"
         )
         .unwrap(),
-        "https://edge.example.com"
+        "http://127.0.0.1:4100"
     );
     assert_eq!(
         normalize_edge_status(Some("HEALTHY"), "registered").unwrap(),
