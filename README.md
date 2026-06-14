@@ -93,10 +93,16 @@ Use `bun run build` for production builds and `bun typecheck` for TypeScript.
 `bun build` is Bun's native bundler command, so it does not run the package
 script.
 
-Root `.env*` files are loaded into app scripts through `scripts/with-root-env.mjs`.
-Copy `.env.example` to `.env.local` for local secrets. App-specific `.env*` files
-inside `apps/*` can override shared root values when a service needs its own
-configuration.
+Root env files are loaded by explicit profile through
+`scripts/with-root-env.mjs` and `crates/rend-config`.
+Copy `.env.local.example` to `.env.local` for local-only secrets and run
+`bun run env:local` before starting services. `.env.local` must use
+`REND_ENV=local` and must not point at production providers.
+
+Production secrets do not go in `.env.local`. Use `.env.production.local` for
+local production-targeted checks, or host/platform env vars for real deploys;
+production env must use `REND_ENV=production`. See
+[`docs/env/profiles.md`](./docs/env/profiles.md).
 
 ### Local backend foundation
 
@@ -129,7 +135,8 @@ telemetry failures must not fail or materially delay playback. Analytics queries
 dedupe by `event_id` because ClickHouse does not enforce uniqueness.
 
 ```bash
-cp .env.example .env.local
+cp .env.local.example .env.local
+bun run env:local
 bun run backend:up
 cargo check --workspace
 ```
