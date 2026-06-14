@@ -54,10 +54,14 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+!.env.local.example
+!.env.production.example
 !.env.docker.example
 apps/*/.env
 apps/*/.env.*
 !apps/*/.env.example
+!apps/*/.env.local.example
+!apps/*/.env.production.example
 
 # vercel
 .vercel/
