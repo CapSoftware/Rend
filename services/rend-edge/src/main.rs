@@ -15,7 +15,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -45,6 +45,7 @@ const MAX_ASSET_ID_LEN: usize = 128;
 const DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_CACHE_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
+const PLAYBACK_COOKIE_NAME: &str = "__rend_playback";
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -910,11 +911,14 @@ async fn playback(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<PlaybackPath>,
     Query(query): Query<PlaybackQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     let asset_id = path.asset_id.clone();
     let artifact_path = path.artifact_path.clone();
-    let result = playback_inner(state.clone(), path, query.token.as_deref()).await;
+    let cookie_token = playback_token_cookie(&headers);
+    let token = query.token.as_deref().or(cookie_token.as_deref());
+    let result = playback_inner(state.clone(), path, token).await;
     let (response, error_code) = match result {
         Ok(response) => (response, None),
         Err(error) => {
@@ -1514,6 +1518,16 @@ fn validate_playback_request(
     validate_playback_token(token, asset_id, artifact_path, now, keyring)
         .map(|_| ())
         .map_err(|_| PlaybackError::Unauthorized)
+}
+
+fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        let value = value.trim();
+        (name.trim() == PLAYBACK_COOKIE_NAME && !value.is_empty() && value.len() <= 4096)
+            .then(|| value.to_owned())
+    })
 }
 
 fn artifact_response(
