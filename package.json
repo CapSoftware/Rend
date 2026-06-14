@@ -38,6 +38,7 @@
     "deploy:control-plane": "scripts/deploy-control-plane-host.sh",
     "deploy:edge": "scripts/deploy-edge-host.sh",
     "deploy:verify:first-host": "scripts/verify-first-host-deploy.sh",
+    "playback:readiness": "node scripts/playback-readiness-gate.mjs",
     "backend:benchmark:local": "scripts/benchmark-local-playback.sh",
     "backend:smoke:async-media": "scripts/smoke-async-media.sh",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
