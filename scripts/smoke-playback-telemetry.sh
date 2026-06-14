@@ -57,7 +57,7 @@ PY
 fetch_and_expect_cache() {
   local label="$1"
   local url="$2"
-  local expected_cache="$3"
+  local expected_cache_values="$3"
   local headers_file="$tmp_dir/$label.headers"
   local body_file="$tmp_dir/$label.body"
   local status_code
@@ -69,14 +69,24 @@ fetch_and_expect_cache() {
   fi
   local cache_header
   cache_header="$(header_value "$headers_file" "x-rend-cache")"
-  if [[ "$cache_header" != "$expected_cache" ]]; then
-    echo "$label expected X-Rend-Cache $expected_cache, got $cache_header" >&2
+  local matched=0
+  local expected_cache
+  IFS='|' read -r -a expected_cache_list <<<"$expected_cache_values"
+  for expected_cache in "${expected_cache_list[@]}"; do
+    if [[ "$cache_header" == "$expected_cache" ]]; then
+      matched=1
+      break
+    fi
+  done
+  if [[ "$matched" != "1" ]]; then
+    echo "$label expected X-Rend-Cache $expected_cache_values, got $cache_header" >&2
     exit 1
   fi
   if [[ ! -s "$body_file" ]]; then
     echo "$label expected nonempty playback body" >&2
     exit 1
   fi
+  printf '%s\n' "$cache_header"
 }
 
 require_command cargo
@@ -230,8 +240,12 @@ if [[ "$playback_url" != "$expected_playback_prefix"* ]]; then
   exit 1
 fi
 
-fetch_and_expect_cache "first" "$playback_url" "MISS"
-fetch_and_expect_cache "second" "$playback_url" "HIT"
+first_cache="$(
+  fetch_and_expect_cache "first" "$playback_url" "${REND_SMOKE_FIRST_CACHE:-MISS|HIT}"
+)"
+second_cache="$(
+  fetch_and_expect_cache "second" "$playback_url" "HIT"
+)"
 
 analytics_response="$tmp_dir/analytics.json"
 for _ in $(seq 1 60); do
@@ -241,17 +255,19 @@ for _ in $(seq 1 60); do
       -H "authorization: Bearer $REND_DEV_API_KEY"
   )"
   if [[ "$status_code" == "200" ]] &&
-    python3 - "$analytics_response" <<'PY'
+    python3 - "$analytics_response" "$first_cache" "$second_cache" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     data = json.load(f)
+first_cache = sys.argv[2]
+second_cache = sys.argv[3]
 cache = data.get("cache_status_counts", {})
 statuses = data.get("status_code_counts", {})
 ok = (
     int(data.get("request_count", 0)) >= 2
     and int(data.get("bytes_served", 0)) > 0
-    and int(cache.get("MISS", 0)) >= 1
-    and int(cache.get("HIT", 0)) >= 1
+    and int(cache.get(first_cache, 0)) >= 1
+    and int(cache.get(second_cache, 0)) >= 1
     and int(statuses.get("200", 0)) >= 2
     and data.get("first_seen")
     and data.get("last_seen")
