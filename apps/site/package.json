@@ -6,7 +6,7 @@
     "dev": "node ../../scripts/with-root-env.mjs --profile local next dev",
     "build": "node ../../scripts/with-root-env.mjs --profile production next build",
     "start": "node ../../scripts/with-root-env.mjs --profile production next start",
-    "test": "node --test --experimental-strip-types lib/player-telemetry.test.mts lib/dashboard-auth.test.mts lib/auth.test.mts lib/api-keys.test.mts lib/operator.test.mts lib/asset-api.test.mts lib/asset-routes.test.mts lib/player-artifact-proxy.test.mts app/api/player/telemetry/route.test.mts",
+    "test": "node --test --experimental-strip-types lib/player-telemetry.test.mts lib/dashboard-auth.test.mts lib/auth.test.mts lib/api-keys.test.mts lib/operator.test.mts lib/readiness.test.mts lib/asset-api.test.mts lib/asset-routes.test.mts lib/player-artifact-proxy.test.mts app/api/player/telemetry/route.test.mts",
     "test:telemetry": "node --test --experimental-strip-types lib/player-telemetry.test.mts app/api/player/telemetry/route.test.mts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"
