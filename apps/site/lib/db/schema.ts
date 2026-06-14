@@ -45,6 +45,11 @@ export const organization = rendAuth.table(
     slug: text("slug").notNull(),
     logo: text("logo"),
     metadata: jsonb("metadata"),
+    suspended_at: timestamp("suspended_at", { withTimezone: true }),
+    suspended_by_user_id: uuid("suspended_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    suspension_reason: text("suspension_reason"),
     created_at: createdAt(),
     updated_at: updatedAt(),
   },
@@ -174,6 +179,11 @@ export const assets = rend.table("assets", {
   created_at: timestamp("created_at", { withTimezone: true }).notNull(),
   updated_at: timestamp("updated_at", { withTimezone: true }).notNull(),
   deleted_at: timestamp("deleted_at", { withTimezone: true }),
+  suspended_at: timestamp("suspended_at", { withTimezone: true }),
+  suspended_by_user_id: uuid("suspended_by_user_id").references(() => user.id, {
+    onDelete: "set null",
+  }),
+  suspension_reason: text("suspension_reason"),
 });
 
 export const apiKeys = rend.table(
@@ -198,6 +208,28 @@ export const apiKeys = rend.table(
   (table) => [
     uniqueIndex("api_keys_key_hash_uidx").on(table.key_hash),
     index("api_keys_organization_revoked_idx").on(table.organization_id, table.revoked_at),
+  ]
+);
+
+export const operatorAuditRecords = rend.table(
+  "operator_audit_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operator_user_id: uuid("operator_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    operator_email: text("operator_email").notNull(),
+    action: text("action").notNull(),
+    target_type: text("target_type").notNull(),
+    target_id: uuid("target_id").notNull(),
+    reason: text("reason").notNull(),
+    before_state: jsonb("before_state").notNull(),
+    after_state: jsonb("after_state").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("operator_audit_target_idx").on(table.target_type, table.target_id, table.created_at),
+    index("operator_audit_created_idx").on(table.created_at),
   ]
 );
 
@@ -255,6 +287,7 @@ export const schema = {
   ...authSchema,
   assets,
   apiKeys,
+  operatorAuditRecords,
   userRelations,
   sessionRelations,
   accountRelations,
