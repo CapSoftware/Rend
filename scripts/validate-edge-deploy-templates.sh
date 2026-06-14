@@ -174,11 +174,13 @@ require_file .env.docker.example
 require_file docs/deployment-v1.md
 require_file docs/edge-host-runbook-v1.md
 require_file docs/release-images-v1.md
+require_file docs/releases/README.md
 require_file docs/templates/control-plane.Caddyfile
 require_file docs/templates/edge-host.Caddyfile
 require_file docs/templates/control-plane.compose.yml
 require_file docs/templates/edge-host.compose.yml
 require_file scripts/operator-common.sh
+require_file scripts/release-images.sh
 require_file scripts/validate-production-env.sh
 require_file scripts/preflight-control-plane-host.sh
 require_file scripts/preflight-edge-host.sh
@@ -242,14 +244,28 @@ require_contains docs/templates/edge-host.Caddyfile 'remote_ip {$REND_EDGE_ALLOW
 require_contains docs/templates/edge-host.Caddyfile 'REND_EDGE_PRIVATE_HOSTNAME'
 
 require_contains scripts/operator-common.sh "operator_check_manifest_image_pulls"
+require_contains scripts/operator-common.sh "operator_manifest_service_platform"
+require_contains scripts/operator-common.sh "operator_check_image_platform"
+require_contains scripts/operator-common.sh "operator_psql_database_url"
 require_contains scripts/operator-common.sh "docker image pull"
 require_contains scripts/operator-common.sh "operator_check_edge_publish_addr_policy"
+require_contains scripts/release-images.sh "--platform"
+require_contains scripts/release-images.sh "require_pushed_git_sha"
+require_contains scripts/release-images.sh "docs/releases"
 require_contains scripts/preflight-control-plane-host.sh "operator_check_manifest_image_pulls"
+require_contains scripts/preflight-control-plane-host.sh "--expected-platform"
 require_contains scripts/preflight-edge-host.sh "operator_check_manifest_image_pulls"
+require_contains scripts/preflight-edge-host.sh "--expected-platform"
 require_contains scripts/preflight-edge-host.sh "--allow-direct-edge-exposure"
 require_contains scripts/preflight-edge-host.sh 'publish_addr="${REND_EDGE_PUBLISH_ADDR:-127.0.0.1}"'
+require_contains scripts/deploy-control-plane-host.sh "--expected-platform"
+require_contains scripts/deploy-control-plane-host.sh "operator_check_manifest_image_pulls"
+require_contains scripts/deploy-edge-host.sh "--expected-platform"
+require_contains scripts/deploy-edge-host.sh "operator_check_manifest_image_pulls"
 require_contains scripts/quarantine-telemetry-spool-lines.sh "playback-events.quarantine.jsonl"
 require_contains scripts/verify-first-host-deploy.sh "--edge-internal-base"
+require_contains scripts/verify-first-host-deploy.sh "--clickhouse-database"
+require_contains scripts/verify-first-host-deploy.sh "operator_psql_database_url"
 require_contains scripts/verify-first-host-deploy.sh "/v/not-a-uuid/hls/master.m3u8"
 require_contains scripts/verify-first-host-deploy.sh "rend_edge_telemetry_spool_bytes"
 
@@ -274,6 +290,8 @@ require_contains docs/edge-host-runbook-v1.md "scripts/preflight-edge-host.sh"
 require_contains docs/edge-host-runbook-v1.md "scripts/deploy-control-plane-host.sh"
 require_contains docs/edge-host-runbook-v1.md "scripts/deploy-edge-host.sh"
 require_contains docs/edge-host-runbook-v1.md "scripts/verify-first-host-deploy.sh"
+require_contains docs/edge-host-runbook-v1.md "sslrootcert=system"
+require_contains docs/edge-host-runbook-v1.md "docs/releases"
 require_contains docs/deployment-v1.md "docs/edge-host-runbook-v1.md"
 require_contains docs/deployment-v1.md "REND_ENV=local|trial|production"
 require_contains docs/deployment-v1.md "REND_EXPECTED_EDGES"
@@ -284,9 +302,12 @@ require_contains docs/deployment-v1.md "scripts/preflight-control-plane-host.sh"
 require_contains docs/deployment-v1.md "scripts/preflight-edge-host.sh"
 require_contains docs/deployment-v1.md "scripts/verify-first-host-deploy.sh"
 require_contains docs/deployment-v1.md "manifest image pull readiness"
+require_contains docs/deployment-v1.md "pulled image OS/architecture"
 require_contains docs/release-images-v1.md "Canonical Images"
 require_contains docs/release-images-v1.md "Production Gates"
 require_contains docs/release-images-v1.md "image_digest"
+require_contains docs/release-images-v1.md "linux/amd64"
+require_contains docs/release-images-v1.md "docs/releases"
 require_contains docs/release-images-v1.md "docker login ghcr.io"
 require_contains docs/release-images-v1.md "--allow-dirty"
 require_contains docs/release-images-v1.md '`--push` requires'
