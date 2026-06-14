@@ -76,6 +76,7 @@ worker_image="$(operator_manifest_image_ref "$manifest" rend-media-worker "$allo
 
 if [[ "$dry_run" != "true" ]]; then
   operator_check_docker_compose
+  operator_require_command curl
   operator_info "checking manifest image pull readiness and platform"
   operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
   operator_finish
@@ -88,6 +89,11 @@ operator_run_or_dry_run "$dry_run" \
 operator_run_or_dry_run "$dry_run" \
   env "REND_API_IMAGE=$api_image" "REND_MEDIA_WORKER_IMAGE=$worker_image" \
   docker compose -f "$compose_file" up -d --no-deps rend-api
+
+if [[ "$dry_run" != "true" ]]; then
+  curl -fsS --retry 12 --retry-delay 5 --retry-all-errors http://127.0.0.1:4000/readyz >/dev/null
+  echo "rend-api is ready"
+fi
 
 operator_run_or_dry_run "$dry_run" \
   env "REND_API_IMAGE=$api_image" "REND_MEDIA_WORKER_IMAGE=$worker_image" \
