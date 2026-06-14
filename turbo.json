@@ -7,7 +7,12 @@
   ],
   "globalEnv": [
     "CI",
-    "NODE_ENV"
+    "NODE_ENV",
+    "AUTH_SECRET",
+    "BETTER_AUTH_*",
+    "REND_AUTH_*",
+    "REND_SITE_MAX_UPLOAD_BYTES",
+    "RESEND_API_KEY"
   ],
   "tasks": {
     "build": {
