@@ -143,7 +143,7 @@ fetch_playback_bootstrap() {
   local status_code
 
   status_code="$(
-    curl -sS -o "$response_file" -w "%{http_code}" \
+    curl -sS -c "$(playback_cookie_jar)" -o "$response_file" -w "%{http_code}" \
       "$api_base/v1/assets/$asset_id/playback" \
       -H "authorization: Bearer $dev_api_key"
   )"
@@ -168,22 +168,15 @@ if not response.get("prefetch_hints"):
 PY
 }
 
+playback_cookie_jar() {
+  printf '%s\n' "${REND_PLAYBACK_COOKIE_JAR:-$tmp_dir/playback.cookies}"
+}
+
 playback_url_from_bootstrap() {
   python3 - "$1" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     print(json.load(f)["playback_url"])
-PY
-}
-
-playback_token_from_url() {
-  python3 - "$1" <<'PY'
-import sys
-from urllib.parse import parse_qs, urlparse
-values = parse_qs(urlparse(sys.argv[1]).query).get("token", [])
-if not values or not values[0]:
-    raise SystemExit("playback URL missing token")
-print(values[0])
 PY
 }
 
@@ -275,7 +268,7 @@ fetch_and_expect_cache() {
   local headers_file="$tmp_dir/$label.headers"
   local status_code
 
-  status_code="$(curl -sS -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
+  status_code="$(curl -sS -b "$(playback_cookie_jar)" -D "$headers_file" -o "$body_file" -w "%{http_code}" "$url")"
   if [[ "$status_code" != "200" ]]; then
     echo "$label playback fetch expected HTTP 200, got $status_code" >&2
     cat "$body_file" >&2 || true

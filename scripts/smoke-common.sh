@@ -109,7 +109,7 @@ fetch_playback_bootstrap() {
   local bootstrap_response="$2"
   local status_code
   status_code="$(
-    curl -sS -o "$bootstrap_response" -w "%{http_code}" \
+    curl -sS -c "$(playback_cookie_jar)" -o "$bootstrap_response" -w "%{http_code}" \
       "$api_base/v1/assets/$asset_id/playback" \
       -H "authorization: Bearer $REND_DEV_API_KEY"
   )"
@@ -119,6 +119,10 @@ fetch_playback_bootstrap() {
     cat "$bootstrap_response" >&2
     exit 1
   fi
+}
+
+playback_cookie_jar() {
+  printf '%s\n' "${REND_PLAYBACK_COOKIE_JAR:-$tmp_dir/playback.cookies}"
 }
 
 playback_url_from_bootstrap() {
