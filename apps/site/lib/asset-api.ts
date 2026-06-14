@@ -12,9 +12,14 @@ import type {
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 const DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 8 * 1024;
+const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
 
 type JsonRecord = Record<string, unknown>;
 type RequestInitWithDuplex = RequestInit & { duplex?: "half" };
+
+export type AssetApiAuthContext = {
+  organizationId: string;
+};
 
 export class AssetApiError extends Error {
   status: number;
@@ -56,8 +61,15 @@ function controlPlaneUrl(path: string) {
   return `${baseUrl}${path}`;
 }
 
-function devApiKey() {
-  return envString("REND_DEV_API_KEY");
+function isProductionProfile() {
+  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "local";
+  return ["production", "prod"].includes(profile.toLowerCase());
+}
+
+function siteInternalToken() {
+  const configured = envString("REND_SITE_INTERNAL_TOKEN");
+  if (configured) return configured;
+  return isProductionProfile() ? "" : LOCAL_SITE_INTERNAL_TOKEN;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -208,9 +220,13 @@ async function readUpstreamJson(upstream: Response) {
   }
 }
 
-async function controlPlaneFetch(path: string, init: RequestInitWithDuplex = {}) {
-  const apiKey = devApiKey();
-  if (!apiKey) {
+async function controlPlaneFetch(
+  auth: AssetApiAuthContext,
+  path: string,
+  init: RequestInitWithDuplex = {}
+) {
+  const internalToken = siteInternalToken();
+  if (!internalToken) {
     throw new AssetApiError(500, {
       status: "error",
       error: "rend_api_not_configured",
@@ -219,7 +235,8 @@ async function controlPlaneFetch(path: string, init: RequestInitWithDuplex = {})
   }
 
   const headers = new Headers(init.headers);
-  headers.set("authorization", `Bearer ${apiKey}`);
+  headers.set("x-rend-site-token", internalToken);
+  headers.set("x-rend-organization-id", auth.organizationId);
   headers.set("accept", "application/json");
 
   let upstream: Response;
@@ -436,9 +453,12 @@ function sanitizeAnalytics(value: unknown): AssetPlaybackAnalytics | null {
   };
 }
 
-export async function listAssets(limit = 50): Promise<AssetListResponse> {
+export async function listAssets(
+  auth: AssetApiAuthContext,
+  limit = 50
+): Promise<AssetListResponse> {
   const boundedLimit = Math.min(Math.max(Math.trunc(limit) || 50, 1), 100);
-  const upstream = await controlPlaneFetch(`/v1/assets?limit=${boundedLimit}`);
+  const upstream = await controlPlaneFetch(auth, `/v1/assets?limit=${boundedLimit}`);
   const data = await readUpstreamJson(upstream);
   const assets = isRecord(data) && Array.isArray(data.assets)
     ? data.assets.flatMap((asset) => {
@@ -450,7 +470,10 @@ export async function listAssets(limit = 50): Promise<AssetListResponse> {
   return { status: "ok", assets };
 }
 
-export async function fetchAssetDetail(assetId: string): Promise<AssetDetail> {
+export async function fetchAssetDetail(
+  auth: AssetApiAuthContext,
+  assetId: string
+): Promise<AssetDetail> {
   const normalizedAssetId = normalizeAssetId(assetId);
   if (!normalizedAssetId) {
     throw new AssetApiError(400, {
@@ -460,7 +483,7 @@ export async function fetchAssetDetail(assetId: string): Promise<AssetDetail> {
     });
   }
 
-  const upstream = await controlPlaneFetch(`/v1/assets/${encodeURIComponent(normalizedAssetId)}`);
+  const upstream = await controlPlaneFetch(auth, `/v1/assets/${encodeURIComponent(normalizedAssetId)}`);
   const data = await readUpstreamJson(upstream);
   const asset = sanitizeAssetDetail(data);
   if (!asset) {
@@ -474,7 +497,10 @@ export async function fetchAssetDetail(assetId: string): Promise<AssetDetail> {
   return asset;
 }
 
-export async function deleteAsset(assetId: string): Promise<AssetDeleteResponse> {
+export async function deleteAsset(
+  auth: AssetApiAuthContext,
+  assetId: string
+): Promise<AssetDeleteResponse> {
   const normalizedAssetId = normalizeAssetId(assetId);
   if (!normalizedAssetId) {
     throw new AssetApiError(400, {
@@ -484,7 +510,7 @@ export async function deleteAsset(assetId: string): Promise<AssetDeleteResponse>
     });
   }
 
-  const upstream = await controlPlaneFetch(`/v1/assets/${encodeURIComponent(normalizedAssetId)}`, {
+  const upstream = await controlPlaneFetch(auth, `/v1/assets/${encodeURIComponent(normalizedAssetId)}`, {
     method: "DELETE",
   });
   const data = await readUpstreamJson(upstream);
@@ -501,6 +527,7 @@ export async function deleteAsset(assetId: string): Promise<AssetDeleteResponse>
 }
 
 export async function fetchAssetPlaybackAnalytics(
+  auth: AssetApiAuthContext,
   assetId: string,
   windowSeconds = 3600
 ): Promise<AssetPlaybackAnalytics> {
@@ -515,6 +542,7 @@ export async function fetchAssetPlaybackAnalytics(
 
   const boundedWindow = Math.min(Math.max(Math.trunc(windowSeconds) || 3600, 60), 7 * 24 * 60 * 60);
   const upstream = await controlPlaneFetch(
+    auth,
     `/v1/assets/${encodeURIComponent(normalizedAssetId)}/analytics/playback?window_seconds=${boundedWindow}`
   );
   const data = await readUpstreamJson(upstream);
@@ -530,7 +558,10 @@ export async function fetchAssetPlaybackAnalytics(
   return analytics;
 }
 
-export async function uploadAsset(request: Request): Promise<AssetUploadResponse> {
+export async function uploadAsset(
+  auth: AssetApiAuthContext,
+  request: Request
+): Promise<AssetUploadResponse> {
   const contentType = request.headers.get("content-type");
   if (!supportedUploadContentType(contentType)) {
     throw new AssetApiError(415, {
@@ -562,7 +593,7 @@ export async function uploadAsset(request: Request): Promise<AssetUploadResponse
   headers.set("content-type", contentType || "application/octet-stream");
   if (length.bytes !== undefined) headers.set("content-length", String(length.bytes));
 
-  const upstream = await controlPlaneFetch("/v1/videos", {
+  const upstream = await controlPlaneFetch(auth, "/v1/videos", {
     method: "POST",
     headers,
     body: limitedRequestBody(request.body, maxBytes),
