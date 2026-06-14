@@ -67,9 +67,11 @@ function uploadFile(file: File, onProgress: (progress: number | null) => void) {
 export default function AssetsClient({
   initialAssets,
   initialError,
+  readOnlyReason,
 }: {
   initialAssets: AssetSummary[];
   initialError?: string;
+  readOnlyReason?: string;
 }) {
   const [assets, setAssets] = useState(initialAssets);
   const [listError, setListError] = useState(initialError ?? "");
@@ -107,6 +109,10 @@ export default function AssetsClient({
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
+    if (readOnlyReason) {
+      setUpload({ status: "error", message: readOnlyReason });
+      return;
+    }
 
     setUpload({ status: "uploading", progress: null });
     try {
@@ -146,11 +152,17 @@ export default function AssetsClient({
             <p className="app-kicker">Rend app</p>
             <h1>Assets</h1>
           </div>
-          <label className="app-upload-button">
-            <input accept="video/*" onChange={onFileChange} type="file" />
-            Upload video
+          <label className="app-upload-button" aria-disabled={Boolean(readOnlyReason)}>
+            <input accept="video/*" disabled={Boolean(readOnlyReason)} onChange={onFileChange} type="file" />
+            {readOnlyReason ? "Uploads disabled" : "Upload video"}
           </label>
         </section>
+
+        {readOnlyReason ? (
+          <section className="app-callout app-callout-error">
+            <span>{readOnlyReason}</span>
+          </section>
+        ) : null}
 
         {upload.status !== "idle" ? (
           <section className={`app-callout app-callout-${upload.status}`}>
@@ -185,6 +197,7 @@ export default function AssetsClient({
                     <th>Asset</th>
                     <th>Source</th>
                     <th>Playable</th>
+                    <th>Access</th>
                     <th>Size</th>
                     <th>Updated</th>
                     <th />
@@ -203,6 +216,13 @@ export default function AssetsClient({
                         <span className={`app-pill app-state-${asset.playable_state}`}>
                           {asset.playable_state}
                         </span>
+                      </td>
+                      <td>
+                        {asset.suspended_at || asset.organization_suspended_at ? (
+                          <span className="app-pill app-state-suspended">suspended</span>
+                        ) : (
+                          <span className="app-pill app-state-ready">active</span>
+                        )}
                       </td>
                       <td>{formatBytes(asset.source_byte_size)}</td>
                       <td>{formatTimestamp(asset.updated_at)}</td>
