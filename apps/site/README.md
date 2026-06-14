@@ -30,6 +30,15 @@ the required environment variables are injected automatically:
 
 To read the list back, run `SMEMBERS waitlist` from the Upstash console.
 
+## Player telemetry
+
+The embed and watch players post beta startup telemetry to
+`/api/player/telemetry`. This data is separate from edge request telemetry and is
+not billing-grade watch accounting. Recent sanitized events are available at
+`/api/player/telemetry/recent` on localhost and non-production builds; set
+`REND_PLAYER_TELEMETRY_DEBUG=1` to expose that JSON endpoint for a hosted beta
+debug session.
+
 ## Deploy
 
 Deploy on Vercel with the project Root Directory set to `apps/site`. No other
