@@ -54,7 +54,13 @@ export type PlayerTelemetryValidationResult =
   | { ok: true; events: SanitizedPlayerTelemetryEvent[] }
   | { ok: false; status: number; error: string };
 
-const telemetryRing: SanitizedPlayerTelemetryEvent[] = [];
+function telemetryRing() {
+  const globalScope = globalThis as typeof globalThis & {
+    __rendPlayerTelemetryRing?: SanitizedPlayerTelemetryEvent[];
+  };
+  globalScope.__rendPlayerTelemetryRing ??= [];
+  return globalScope.__rendPlayerTelemetryRing;
+}
 
 function isRecord(value: unknown): value is RawRecord {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -251,9 +257,10 @@ export function sanitizePlayerTelemetryPayload(
 }
 
 export function recordPlayerTelemetryEvents(events: SanitizedPlayerTelemetryEvent[]) {
+  const ring = telemetryRing();
   for (const event of events) {
-    telemetryRing.push(event);
-    if (telemetryRing.length > PLAYER_TELEMETRY_RING_SIZE) telemetryRing.shift();
+    ring.push(event);
+    if (ring.length > PLAYER_TELEMETRY_RING_SIZE) ring.shift();
   }
 }
 
@@ -267,7 +274,7 @@ export function recentPlayerTelemetryEvents({
   playbackSessionId?: string | null;
 } = {}) {
   const safeLimit = Math.min(Math.max(Math.trunc(limit) || 50, 1), 100);
-  const events = telemetryRing
+  const events = telemetryRing()
     .filter((event) => {
       if (assetId && event.asset_id !== assetId) return false;
       if (playbackSessionId && event.playback_session_id !== playbackSessionId) return false;
@@ -280,5 +287,5 @@ export function recentPlayerTelemetryEvents({
 }
 
 export function clearPlayerTelemetryEventsForTests() {
-  telemetryRing.length = 0;
+  telemetryRing().length = 0;
 }
