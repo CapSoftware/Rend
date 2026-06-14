@@ -2,7 +2,7 @@
 
 ARG RUST_VERSION=1.93.0
 ARG DEBIAN_VERSION=bookworm
-# Local compose builds use these defaults. Production/trial releases must be
+# Local compose builds use these defaults. Production releases must be
 # built through scripts/release-images.sh, which overrides and validates them.
 ARG REND_GIT_SHA=unknown
 ARG REND_BUILD_TIME=unknown
