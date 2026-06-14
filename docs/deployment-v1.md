@@ -300,7 +300,7 @@ After deploy, verify the first-host path:
 
 ```sh
 scripts/verify-first-host-deploy.sh \
-  --api-base https://api.example.com \
+  --api-base https://api.rend.so \
   --edge-base https://edge-us-east.example.com \
   --edge-internal-base http://10.0.10.12:4100 \
   --edge-base https://edge-london.example.com \
@@ -341,7 +341,7 @@ then verifies `rend-edge-us-east` on `http://127.0.0.1:4101` and
 Production-style run:
 
 ```sh
-REND_API_BASE_URL=https://api.example.com \
+REND_API_BASE_URL=https://api.rend.so \
 REND_READINESS_API_KEY=<api-key-with-upload-read-delete-analytics> \
 REND_EDGE_INTERNAL_TOKEN=<edge-internal-token> \
 REND_READINESS_EDGES='edge-us=us-east=https://edge-us.example.com=http://10.0.10.12:4100,edge-eu=london=https://edge-eu.example.com=http://10.0.20.12:4100' \
@@ -358,7 +358,7 @@ To include the gate in first-host verification:
 
 ```sh
 scripts/verify-first-host-deploy.sh \
-  --api-base https://api.example.com \
+  --api-base https://api.rend.so \
   --edge-base https://edge-us-east.example.com \
   --edge-internal-base http://10.0.10.12:4100 \
   --edge-base https://edge-london.example.com \

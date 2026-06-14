@@ -138,8 +138,9 @@ own public TLS. Checked Caddy templates live in:
 - `docs/templates/control-plane.Caddyfile`
 - `docs/templates/edge-host.Caddyfile`
 
-The control-plane template allows only configured edge source IPs to
-`/internal/*` and returns `404` for every other path on that internal hostname.
+The control-plane template exposes `api.rend.so` for the public `/v1/*` API and
+`/readyz`, blocks `/internal/*` on that public hostname, and allows only
+configured edge source IPs to `/internal/*` on `api-internal.play.rend.so`.
 The edge template has a public hostname that blocks `/internal/*` and
 `/metrics`, proxies only canonical lowercase UUID playback paths, and returns
 `404` for `/v/probe`, non-UUID `/v/*`, and every other path. It also has a
@@ -149,6 +150,7 @@ restricted by source IP.
 Set Caddy environment with space-separated source IP lists before reloading:
 
 ```sh
+export REND_PUBLIC_API_HOSTNAME=api.rend.so
 export REND_CONTROL_PLANE_HOSTNAME=api-internal.play.rend.so
 export REND_CONTROL_PLANE_ALLOWED_EDGE_IPS="152.236.8.67 206.223.236.177 127.0.0.1 ::1"
 export REND_EDGE_PUBLIC_HOSTNAME=ash-1.play.rend.so
@@ -362,7 +364,7 @@ Set these variables from the operator laptop or a bastion. `EDGE_INTERNAL_BASE`
 should use a private address or VPN path when available.
 
 ```sh
-API_BASE=https://api.example.com
+API_BASE=https://api.rend.so
 EDGE_BASE_US_EAST=https://edge-us-east.example.com
 EDGE_BASE_LONDON=https://edge-london.example.com
 EDGE_INTERNAL_US_EAST=http://10.0.10.12:4100
