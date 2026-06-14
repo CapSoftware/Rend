@@ -352,6 +352,17 @@ async fn current_asset_endpoint_requires_dev_api_key() {
 }
 
 #[tokio::test]
+async fn list_assets_endpoint_requires_dev_api_key() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+
+    let response = route_response(app.clone(), "/v1/assets", None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = route_response(app, "/v1/assets", Some("Bearer wrong-secret")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn delete_asset_endpoint_requires_dev_api_key() {
     let app = build_app(test_state(), Duration::from_secs(10));
 

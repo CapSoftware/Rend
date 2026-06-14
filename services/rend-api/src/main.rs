@@ -57,6 +57,8 @@ const HARD_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const EDGE_WARM_LOG_BODY_LIMIT_BYTES: usize = 1024;
 const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
+const DEFAULT_ASSET_LIST_LIMIT: usize = 50;
+const MAX_ASSET_LIST_LIMIT: usize = 100;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
 const MAX_ASSET_EVENTS_LIMIT: usize = 100;
 const DEFAULT_EVENT_STREAM_BATCH_LIMIT: usize = 100;
@@ -357,6 +359,27 @@ struct CreateVideoResponse {
     byte_size: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     playback_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AssetListResponse {
+    assets: Vec<AssetListItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct AssetListItem {
+    asset_id: String,
+    source_state: String,
+    playable_state: String,
+    created_at: String,
+    updated_at: String,
+    source_byte_size: Option<i64>,
+    artifact_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetListQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -758,6 +781,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
         .route("/v1/events", get(get_event_stream))
+        .route("/v1/assets", get(list_assets))
         .route(
             "/v1/assets/{asset_id}",
             get(get_asset_current).delete(delete_asset),
@@ -1109,6 +1133,26 @@ async fn create_video(
     }
 }
 
+async fn list_assets(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AssetListQuery>,
+) -> Response {
+    match list_assets_inner(state, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_assets_inner(
+    state: Arc<AppState>,
+    query: AssetListQuery,
+) -> Result<AssetListResponse, AppError> {
+    let limit = normalize_asset_list_limit(query.limit);
+    let assets = fetch_asset_list_items(&state.db, limit).await?;
+
+    Ok(AssetListResponse { assets })
+}
+
 async fn get_asset_current(
     State(state): State<Arc<AppState>>,
     AxumPath(asset_id): AxumPath<String>,
@@ -1278,6 +1322,54 @@ async fn fetch_asset_state_record(
             updated_at,
         },
     ))
+}
+
+async fn fetch_asset_list_items(db: &PgPool, limit: usize) -> Result<Vec<AssetListItem>, AppError> {
+    let limit = i64::try_from(limit).map_err(AppError::internal)?;
+    let rows: Vec<(String, String, String, String, String, Option<i64>, i64)> = sqlx::query_as(
+        "
+        SELECT asset.id::text,
+               asset.source_state,
+               asset.playable_state,
+               to_char(asset.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+               max(artifact.byte_size) FILTER (WHERE artifact.kind = 'source') AS source_byte_size,
+               count(artifact.id)::bigint AS artifact_count
+        FROM rend.assets asset
+        LEFT JOIN rend.artifacts artifact ON artifact.asset_id = asset.id
+        WHERE asset.deleted_at IS NULL
+        GROUP BY asset.id
+        ORDER BY asset.created_at DESC, asset.id DESC
+        LIMIT $1
+        ",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                asset_id,
+                source_state,
+                playable_state,
+                created_at,
+                updated_at,
+                source_byte_size,
+                artifact_count,
+            )| AssetListItem {
+                asset_id,
+                source_state,
+                playable_state,
+                created_at,
+                updated_at,
+                source_byte_size,
+                artifact_count,
+            },
+        )
+        .collect())
 }
 
 async fn fetch_asset_artifact_summaries(
@@ -1652,6 +1744,12 @@ fn asset_current_response(
         updated_at: asset.updated_at,
         artifacts,
     })
+}
+
+fn normalize_asset_list_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_ASSET_LIST_LIMIT)
+        .clamp(1, MAX_ASSET_LIST_LIMIT)
 }
 
 fn normalize_asset_events_query(query: AssetEventsQuery) -> NormalizedAssetEventsQuery {
