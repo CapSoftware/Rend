@@ -6,6 +6,10 @@ export type AssetSummary = {
   updated_at: string;
   source_byte_size?: number;
   artifact_count: number;
+  suspended_at?: string;
+  suspension_reason?: string;
+  organization_suspended_at?: string;
+  organization_suspension_reason?: string;
 };
 
 export type AssetArtifact = {
