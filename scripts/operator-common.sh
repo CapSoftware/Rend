@@ -403,11 +403,11 @@ operator_check_rend_env() {
   local value
   value="$(operator_env_value "$file" REND_ENV 2>/dev/null || true)"
   case "$value" in
-    local | trial | production)
+    local | production)
       operator_ok "REND_ENV is $value"
       ;;
     *)
-      operator_fail "REND_ENV must be one of: local, trial, production"
+      operator_fail "REND_ENV must be one of: local, production"
       return 0
       ;;
   esac
@@ -457,7 +457,7 @@ from urllib.parse import urlparse
 value, rend_env, allow_insecure, allow_dev_defaults = sys.argv[1:5]
 allow_insecure = allow_insecure.lower() == "true"
 allow_dev_defaults = allow_dev_defaults == "true"
-strict = rend_env in {"trial", "production"}
+strict = rend_env == "production"
 
 if allow_insecure and not allow_dev_defaults:
     print("REND_ALLOW_INSECURE_EDGE_URLS=true is only permitted with --allow-dev-defaults", file=sys.stderr)
@@ -465,7 +465,7 @@ if allow_insecure and not allow_dev_defaults:
 
 if not value.strip():
     if strict:
-        print("REND_EXPECTED_EDGES must not be empty when REND_ENV is trial or production", file=sys.stderr)
+        print("REND_EXPECTED_EDGES must not be empty when REND_ENV is production", file=sys.stderr)
         raise SystemExit(1)
     raise SystemExit(0)
 
@@ -973,9 +973,9 @@ PY
   fi
 
   if [[ "$allow_direct_exposure" == "true" ]]; then
-    operator_warn "edge publish address $publish_addr is directly exposed; use only for short trial debugging"
+    operator_warn "edge publish address $publish_addr is directly exposed; use only for short production debugging"
   else
-    operator_fail "edge publish address $publish_addr is directly exposed; use 127.0.0.1/private IP or pass --allow-direct-edge-exposure for short trial debugging"
+    operator_fail "edge publish address $publish_addr is directly exposed; use 127.0.0.1/private IP or pass --allow-direct-edge-exposure for short production debugging"
   fi
 }
 
