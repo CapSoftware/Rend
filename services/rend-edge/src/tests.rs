@@ -355,14 +355,20 @@ fn signed_playback_uri(asset_id: &str, artifact_path: &str) -> String {
 }
 
 async fn get_playback(app: Router, uri: impl AsRef<str>) -> PlaybackTestResponse {
+    get_playback_with_cookie(app, uri, None).await
+}
+
+async fn get_playback_with_cookie(
+    app: Router,
+    uri: impl AsRef<str>,
+    cookie: Option<String>,
+) -> PlaybackTestResponse {
+    let mut request = Request::builder().method("GET").uri(uri.as_ref());
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(uri.as_ref())
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -1184,6 +1190,30 @@ async fn unauthorized_playback_is_rejected_before_cache_origin_or_coalescing() {
     assert!(response.cache_status.is_none());
     assert_eq!(metrics.request_count(), 0);
     assert_eq!(state.in_flight_fills.len(), 0);
+}
+
+#[tokio::test]
+async fn playback_accepts_token_from_http_only_cookie() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"cookie-opener".to_vec()),
+    );
+    let (origin_endpoint, _metrics) = spawn_fake_origin_with_metrics(objects).await;
+    let state = test_state(test_cache_dir("cookie-playback"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let (_keyring, issuer) = test_auth();
+    let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
+
+    let response = get_playback_with_cookie(
+        app,
+        "/v/asset-123/opener.mp4",
+        Some(format!("theme=dark; __rend_playback={token}; other=1")),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, b"cookie-opener");
 }
 
 #[test]
