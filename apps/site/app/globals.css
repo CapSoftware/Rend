@@ -73,6 +73,9 @@
   .app-topbar button,
   .app-detail-actions button,
   .app-panel-title-row button,
+  .app-key-form button,
+  .app-key-callout button,
+  .app-table button,
   .app-upload-button,
   .app-link-button,
   .app-topbar a {
@@ -94,6 +97,7 @@
   }
 
   .app-login-form button,
+  .app-key-form button,
   .app-upload-button {
     border-color: #17191c;
     background: #17191c;
@@ -103,7 +107,10 @@
   .app-login-form button:disabled,
   .app-topbar button:disabled,
   .app-detail-actions button:disabled,
-  .app-panel-title-row button:disabled {
+  .app-panel-title-row button:disabled,
+  .app-key-form button:disabled,
+  .app-key-callout button:disabled,
+  .app-table button:disabled {
     cursor: not-allowed;
     opacity: 0.55;
   }
@@ -412,6 +419,54 @@
     padding: 10px;
   }
 
+  .app-key-form {
+    display: grid;
+    max-width: 520px;
+    gap: 12px;
+  }
+
+  .app-key-form label {
+    color: #4c5563;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .app-key-form input[type="text"] {
+    min-height: 40px;
+    border: 1px solid #c8d0da;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #ffffff;
+    color: #17191c;
+    font: inherit;
+  }
+
+  .app-scope-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .app-scope-grid label {
+    display: flex;
+    min-width: 0;
+    min-height: 34px;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid #d9dee6;
+    border-radius: 6px;
+    padding: 7px 9px;
+  }
+
+  .app-key-callout {
+    align-items: stretch;
+  }
+
+  .app-key-callout .app-code-block {
+    flex: 1;
+    margin-top: 0;
+  }
+
   .app-preview-panel {
     margin-bottom: 16px;
     padding: 0;
@@ -479,7 +534,8 @@
     }
 
     .app-stats,
-    .app-counts {
+    .app-counts,
+    .app-scope-grid {
       grid-template-columns: 1fr;
     }
   }
