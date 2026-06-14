@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const curlTimingFormat =
   "http_code=%{http_code}\\ntime_connect=%{time_connect}\\ntime_starttransfer=%{time_starttransfer}\\ntime_total=%{time_total}\\nsize_download=%{size_download}\\nsize_upload=%{size_upload}\\n";
+const coldMissPurgeAttempts = 5;
+const coldMissRetryDelayMs = 1_000;
 
 const defaultThresholds = {
   upload_response_ms: { warn: 5_000, fail: 15_000 },
@@ -709,8 +711,11 @@ async function measurePlayback(config, edge, assetId, artifact, expectedCache, p
     throw new SafeError(`${edge.edge_id} ${artifact.label} expected HTTP 200, got ${response.http_code}`);
   }
   const cache = response.headers.get("x-rend-cache") || "";
-  if (cache !== expectedCache) {
-    throw new SafeError(`${edge.edge_id} ${artifact.label} expected X-Rend-Cache ${expectedCache}, got ${cache || "missing"}`);
+  if (expectedCache) {
+    const expectedValues = Array.isArray(expectedCache) ? expectedCache : [expectedCache];
+    if (!expectedValues.includes(cache)) {
+      throw new SafeError(`${edge.edge_id} ${artifact.label} expected X-Rend-Cache ${expectedValues.join(" or ")}, got ${cache || "missing"}`);
+    }
   }
   const contentType = (response.headers.get("content-type") || "").split(";", 1)[0];
   if (contentType !== artifact.content_type) {
@@ -732,6 +737,28 @@ async function measurePlayback(config, edge, assetId, artifact, expectedCache, p
     total_ms: roundMs(response.time_total_ms),
     byte_size: response.body.length,
   };
+}
+
+async function purgeAndMeasureColdPlayback(config, edge, assetId, artifact, cookieJar) {
+  const purgeSummaries = [];
+  let lastCacheStatus = "";
+  for (let attempt = 1; attempt <= coldMissPurgeAttempts; attempt += 1) {
+    purgeSummaries.push(await purgeEdge(config, edge, assetId, [artifact.artifact_path]));
+    const result = await measurePlayback(config, edge, assetId, artifact, null, "cold_miss", cookieJar);
+    lastCacheStatus = result.cache_status;
+    if (result.cache_status === "MISS") {
+      return { result, purgeSummaries };
+    }
+    if (result.cache_status !== "HIT") {
+      throw new SafeError(`${edge.edge_id} ${artifact.label} expected X-Rend-Cache MISS after purge, got ${result.cache_status || "missing"}`);
+    }
+    if (attempt < coldMissPurgeAttempts) {
+      await sleep(coldMissRetryDelayMs);
+    }
+  }
+  throw new SafeError(`${edge.edge_id} ${artifact.label} expected X-Rend-Cache MISS after purge, got ${lastCacheStatus || "missing"}`, {
+    purge_attempts: coldMissPurgeAttempts,
+  });
 }
 
 async function fetchEdgeMetrics(config, edge) {
@@ -1073,8 +1100,9 @@ async function runFixture(config, fixtureName, thresholds, warnings, failures, c
       const warmSummaries = [];
       const purgeSummaries = [];
       for (const artifact of artifacts) {
-        purgeSummaries.push(await purgeEdge(config, edge, assetId, [artifact.artifact_path]));
-        const miss = await measurePlayback(config, edge, assetId, artifact, "MISS", "cold_miss", cookieJar);
+        const cold = await purgeAndMeasureColdPlayback(config, edge, assetId, artifact, cookieJar);
+        purgeSummaries.push(...cold.purgeSummaries);
+        const miss = cold.result;
         miss.fixture = fixtureName;
         edgeResults.push(miss);
         expectedTelemetryEvents += 1;
