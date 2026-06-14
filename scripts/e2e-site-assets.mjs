@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const siteDir = path.join(repoRoot, "apps", "site");
-const goalDir = path.join(repoRoot, ".rend", "goal29");
+const goalDir = path.join(repoRoot, ".rend", "goal31");
 const runId = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 const runDir = path.join(goalDir, `site-assets-${runId}`);
 const resultPath = path.join(runDir, "site-assets-e2e.json");
@@ -18,8 +18,9 @@ const latestPath = path.join(goalDir, "latest-site-assets-e2e.json");
 const apiBaseUrl = trimTrailingSlash(process.env.REND_API_BASE_URL || "http://127.0.0.1:4000");
 const edgeBaseUrl = trimTrailingSlash(process.env.REND_EDGE_BASE_URL || "http://127.0.0.1:4100");
 const apiKey = process.env.REND_DEV_API_KEY || "dev-api-key";
-const operatorToken = process.env.REND_SITE_OPERATOR_TOKEN || `site-operator-${runId}`;
-const fixturePath = process.env.REND_SMOKE_FIXTURE || path.join(runDir, "rend-goal29-fixture.mp4");
+const siteInternalToken = process.env.REND_SITE_INTERNAL_TOKEN || "local-site-internal-token";
+const authEmail = (process.env.REND_LOCAL_ADMIN_EMAIL || "admin@rend.test").trim().toLowerCase();
+const fixturePath = process.env.REND_SMOKE_FIXTURE || path.join(runDir, "rend-goal31-fixture.mp4");
 const siteBaseOverride = process.env.REND_SITE_BASE_URL
   ? trimTrailingSlash(process.env.REND_SITE_BASE_URL)
   : "";
@@ -52,7 +53,7 @@ function sleep(ms) {
 }
 
 function log(message) {
-  console.log(`[goal29] ${message}`);
+  console.log(`[goal31] ${message}`);
 }
 
 function bindAddrFromBaseUrl(value, fallback) {
@@ -85,6 +86,7 @@ function backendEnv() {
     REND_API_BIND_ADDR: process.env.REND_API_BIND_ADDR || bindAddrFromBaseUrl(apiBaseUrl, "127.0.0.1:4000"),
     REND_API_AUTO_MIGRATE: process.env.REND_API_AUTO_MIGRATE || "true",
     REND_DEV_API_KEY: apiKey,
+    REND_SITE_INTERNAL_TOKEN: siteInternalToken,
     REND_PLAYBACK_BASE_URL: process.env.REND_PLAYBACK_BASE_URL || edgeBaseUrl,
     REND_EDGE_WARM_URL: process.env.REND_EDGE_WARM_URL || `${edgeBaseUrl}/internal/warm`,
     REND_EDGE_PURGE_URL: process.env.REND_EDGE_PURGE_URL || `${edgeBaseUrl}/internal/purge`,
@@ -255,6 +257,7 @@ async function ensureLocalBackend() {
     timeoutMs: 180_000,
     accept: (response) => response.status === 200,
   });
+  await resetLocalAuthRateLimits();
 
   const edge = startLoggedProcess(
     "rend-edge",
@@ -288,6 +291,22 @@ async function ensureLocalBackend() {
     worker_log: worker.logPath,
     started: true,
   };
+}
+
+async function resetLocalAuthRateLimits() {
+  await runCommand("docker", [
+    "compose",
+    "exec",
+    "-T",
+    "postgres",
+    "psql",
+    "-U",
+    "rend",
+    "-d",
+    "rend",
+    "-c",
+    "delete from rend_auth.rate_limit where key like '%/email-otp/%' or key like '%/sign-in/email-otp%';",
+  ], { timeoutMs: 30_000 });
 }
 
 async function waitForHttp(url, options = {}) {
@@ -362,12 +381,16 @@ async function startSite() {
     env: {
       ...process.env,
       REND_API_BASE_URL: apiBaseUrl,
-      REND_DEV_API_KEY: apiKey,
-      REND_SITE_OPERATOR_TOKEN: operatorToken,
+      REND_SITE_INTERNAL_TOKEN: siteInternalToken,
+      BETTER_AUTH_SECRET:
+        process.env.BETTER_AUTH_SECRET || "local-better-auth-secret-only-for-rend-development",
+      BETTER_AUTH_URL: process.env.BETTER_AUTH_URL || baseUrl,
+      REND_AUTH_EMAIL_FROM: process.env.REND_AUTH_EMAIL_FROM || "Rend Local <auth@rend.test>",
+      REND_LOCAL_ADMIN_EMAIL: authEmail,
       REND_PLAYER_PLAYBACK_BASE_URL: edgeBaseUrl,
       REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS: [...new Set(allowedPlaybackBases)].join(","),
       REND_PLAYER_TELEMETRY_DEBUG: "1",
-      NEXT_PUBLIC_REND_APP_VERSION: `goal29-${runId}`,
+      NEXT_PUBLIC_REND_APP_VERSION: `goal31-${runId}`,
       NODE_ENV: "development",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -570,46 +593,98 @@ async function waitForBrowser(page, predicateExpression, timeoutMs = 30_000) {
   throw new Error(`timed out waiting in browser for: ${predicateExpression}`);
 }
 
-async function loginThroughApi(siteBaseUrl) {
+function logSize(logPath) {
+  if (!logPath || !existsSync(logPath)) return 0;
+  return readFileSync(logPath).byteLength;
+}
+
+async function waitForLocalOtp(logPath, afterBytes) {
+  if (!logPath) {
+    throw new Error("local OTP log path is required for the site-assets E2E auth flow");
+  }
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 30_000) {
+    const logText = existsSync(logPath) ? readFileSync(logPath).subarray(afterBytes).toString("utf8") : "";
+    const matches = Array.from(logText.matchAll(/code:\s*['"]([0-9]{6})['"]/g));
+    if (matches.length > 0) return matches.at(-1)[1];
+    await sleep(250);
+  }
+  throw new Error("timed out waiting for local OTP code in site log");
+}
+
+function splitSetCookie(value) {
+  if (!value) return [];
+  return value.split(/,(?=\s*[^;,=\s]+=)/g).map((cookie) => cookie.trim()).filter(Boolean);
+}
+
+function cookieHeaderFromResponse(response) {
+  const cookies =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : splitSetCookie(response.headers.get("set-cookie") || "");
+  return cookies
+    .map((cookie) => cookie.split(";")[0])
+    .filter(Boolean)
+    .join("; ");
+}
+
+async function requestOtp(siteBaseUrl, logPath) {
+  const afterBytes = logSize(logPath);
+  const response = await fetch(`${siteBaseUrl}/api/auth/email-otp/send-verification-otp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: authEmail, type: "sign-in" }),
+  });
+  const bodyText = response.ok ? "" : await response.text().catch(() => "");
+  assertCheck("OTP request succeeds", response.status === 200, {
+    http_status: response.status,
+    body: bodyText.slice(0, 500),
+  });
+  return waitForLocalOtp(logPath, afterBytes);
+}
+
+async function loginThroughApi(siteBaseUrl, logPath) {
   const unauthenticated = await fetch(`${siteBaseUrl}/api/assets`, { cache: "no-store" });
   assertCheck("asset API rejects unauthenticated requests", unauthenticated.status === 401, {
     http_status: unauthenticated.status,
   });
 
-  const response = await fetch(`${siteBaseUrl}/api/session`, {
+  const otp = await requestOtp(siteBaseUrl, logPath);
+  const response = await fetch(`${siteBaseUrl}/api/auth/sign-in/email-otp`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: operatorToken }),
+    body: JSON.stringify({ email: authEmail, otp }),
   });
   const body = await response.json().catch(() => ({}));
-  const setCookie = response.headers.get("set-cookie") || "";
-  const sessionCookie = setCookie.split(";")[0];
+  const sessionCookie = cookieHeaderFromResponse(response);
 
-  assertCheck("login API sets dashboard session", response.status === 200 && sessionCookie.includes("rend_dashboard_session="), {
+  assertCheck("login API sets Better Auth session", response.status === 200 && sessionCookie.length > 0, {
     http_status: response.status,
   });
-  assertCheck("login response does not echo operator token", !JSON.stringify(body).includes(operatorToken), {
+  assertCheck("login response does not echo OTP", !JSON.stringify(body).includes(otp), {
     response_bytes: JSON.stringify(body).length,
   });
 
   return sessionCookie;
 }
 
-async function loginThroughBrowser(page, siteBaseUrl) {
-  await navigate(page, `${siteBaseUrl}/login`);
-  await evaluate(
-    page,
-    `(() => {
-      const input = document.querySelector("#operator-token");
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-      setter.call(input, ${JSON.stringify(operatorToken)});
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      document.querySelector("form").requestSubmit();
-      return true;
-    })()`
-  );
+async function loginThroughBrowser(page, siteBaseUrl, sessionCookie) {
+  for (const cookie of sessionCookie.split(/;\s*/).filter(Boolean)) {
+    const separator = cookie.indexOf("=");
+    if (separator <= 0) continue;
+    await page.send("Network.setCookie", {
+      httpOnly: true,
+      name: cookie.slice(0, separator),
+      path: "/",
+      sameSite: "Lax",
+      secure: siteBaseUrl.startsWith("https://"),
+      url: siteBaseUrl,
+      value: cookie.slice(separator + 1),
+    });
+  }
+  await navigate(page, `${siteBaseUrl}/dashboard/assets`);
   await waitForBrowser(page, `location.pathname === "/dashboard/assets"`, 60_000);
-  addCheck("browser login reaches dashboard", true);
+  addCheck("browser session reaches dashboard", true);
 }
 
 async function uploadFixtureThroughSite(siteBaseUrl, sessionCookie) {
@@ -667,12 +742,12 @@ async function waitForPlayable(siteBaseUrl, sessionCookie, assetId) {
   throw new Error(`timed out waiting for ${assetId} to become playable: ${JSON.stringify(lastAsset)}`);
 }
 
-async function verifyOperatorUi(page, siteBaseUrl, assetId) {
+async function verifyDashboardUi(page, siteBaseUrl, assetId) {
   await navigate(page, `${siteBaseUrl}/dashboard/assets/${assetId}`);
   await waitForBrowser(page, `document.body.innerText.includes("${assetId}")`, 60_000);
 
   const detailText = await evaluate(page, "document.body.innerText");
-  assertCheck("operator detail page renders asset state", detailText.includes("State") && detailText.includes("Embed") && detailText.includes(assetId), {
+  assertCheck("dashboard detail page renders asset state", detailText.includes("State") && detailText.includes("Embed") && detailText.includes(assetId), {
     text_length: detailText.length,
     sample: detailText.slice(0, 240),
   });
@@ -697,7 +772,7 @@ async function verifyOperatorUi(page, siteBaseUrl, assetId) {
     `Array.from(document.querySelectorAll("button")).find((button) => button.textContent.trim() === "Copy iframe").click()`
   );
   const copied = await evaluate(page, "window.__rendCopied");
-  assertCheck("operator UI copy actions produce safe embed snippets", copied.length === 2 && copied[0].includes(`/embed/${assetId}`) && copied[1].includes("<iframe") && !JSON.stringify(copied).includes("token="), {
+  assertCheck("dashboard UI copy actions produce safe embed snippets", copied.length === 2 && copied[0].includes(`/embed/${assetId}`) && copied[1].includes("<iframe") && !JSON.stringify(copied).includes("token="), {
     copied,
   });
 }
@@ -721,7 +796,38 @@ async function playerSnapshot(page) {
   );
 }
 
-async function verifyPlayback(page, siteBaseUrl, assetId) {
+function assertExpectedPlaybackSource(asset, snapshot) {
+  if (asset.playable_state === "hls_ready") {
+    assertCheck(
+      "hls_ready asset plays HLS, not opener fallback",
+      ["native_hls", "hls_js"].includes(snapshot.selected) &&
+        snapshot.artifact === "hls/master.m3u8" &&
+        typeof snapshot.duration === "number" &&
+        snapshot.duration > 5.5,
+      {
+        playable_state: asset.playable_state,
+        selected: snapshot.selected,
+        artifact: snapshot.artifact,
+        duration: snapshot.duration,
+      }
+    );
+    return;
+  }
+
+  if (asset.playable_state === "opener_ready") {
+    assertCheck(
+      "opener_ready asset plays opener fallback",
+      snapshot.selected === "opener" && snapshot.artifact === "opener.mp4",
+      {
+        playable_state: asset.playable_state,
+        selected: snapshot.selected,
+        artifact: snapshot.artifact,
+      }
+    );
+  }
+}
+
+async function verifyPlayback(page, siteBaseUrl, assetId, asset) {
   await navigate(page, `${siteBaseUrl}/watch/${assetId}?autoplay=1`);
   const startedAt = Date.now();
   let snapshot = null;
@@ -733,6 +839,7 @@ async function verifyPlayback(page, siteBaseUrl, assetId) {
     ) {
       artifact.local.playback = snapshot;
       addCheck("watch page reaches playable state", true, snapshot);
+      assertExpectedPlaybackSource(asset, snapshot);
       return snapshot;
     }
     await sleep(500);
@@ -793,7 +900,7 @@ async function deleteThroughUi(page, siteBaseUrl, assetId) {
     `document.body.innerText.includes("Deleted and playback bootstrap no longer returns a playable source.")`,
     90_000
   );
-  addCheck("operator UI deletes asset and verifies playback unavailable", true);
+  addCheck("dashboard UI deletes asset and verifies playback unavailable", true);
 }
 
 async function verifyNoPlaybackRefill(siteBaseUrl, assetId) {
@@ -811,7 +918,6 @@ async function verifyNoPlaybackRefill(siteBaseUrl, assetId) {
 function assertNoLeaks(name, text) {
   const needles = [
     ["REND_DEV_API_KEY value", apiKey],
-    ["REND_SITE_OPERATOR_TOKEN value", operatorToken],
     ["raw edge signed prefix", `${edgeBaseUrl}/v/`],
   ].filter(([, value]) => value);
 
@@ -874,18 +980,18 @@ async function main() {
 
   try {
     log("signing in to dashboard");
-    const sessionCookie = await loginThroughApi(site.baseUrl);
-    await loginThroughBrowser(page, site.baseUrl);
+    const sessionCookie = await loginThroughApi(site.baseUrl, site.logPath);
+    await loginThroughBrowser(page, site.baseUrl, sessionCookie);
 
     log("uploading fixture through apps/site");
     const assetId = await uploadFixtureThroughSite(site.baseUrl, sessionCookie);
-    await waitForPlayable(site.baseUrl, sessionCookie, assetId);
+    const playableAsset = await waitForPlayable(site.baseUrl, sessionCookie, assetId);
 
-    log("verifying operator UI");
-    await verifyOperatorUi(page, site.baseUrl, assetId);
+    log("verifying dashboard UI");
+    await verifyDashboardUi(page, site.baseUrl, assetId);
 
     log("verifying watch playback");
-    await verifyPlayback(page, site.baseUrl, assetId);
+    await verifyPlayback(page, site.baseUrl, assetId, playableAsset);
 
     log("waiting for telemetry and analytics");
     const telemetryBody = await waitForPlayerTelemetry(site.baseUrl, sessionCookie, assetId);
@@ -916,10 +1022,10 @@ main()
   .then(async () => {
     await writeArtifact();
     if (failures.length > 0) {
-      console.error(`[goal29] failed; artifact: ${resultPath}`);
+      console.error(`[goal31] failed; artifact: ${resultPath}`);
       process.exit(1);
     }
-    console.log(`[goal29] passed; artifact: ${resultPath}`);
+    console.log(`[goal31] passed; artifact: ${resultPath}`);
   })
   .catch(async (error) => {
     failures.push({ name: "unhandled error", details: { message: error.message, stack: error.stack } });
@@ -927,6 +1033,6 @@ main()
     shuttingDown = true;
     for (const child of children) child.kill("SIGTERM");
     console.error(error);
-    console.error(`[goal29] failed; artifact: ${resultPath}`);
+    console.error(`[goal31] failed; artifact: ${resultPath}`);
     process.exit(1);
   });
