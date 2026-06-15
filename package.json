@@ -48,6 +48,8 @@
     "backend:smoke:lifecycle-sse": "scripts/smoke-lifecycle-sse.sh",
     "backend:smoke:playback-bootstrap": "scripts/smoke-playback-bootstrap.sh",
     "backend:smoke:playback-telemetry": "scripts/smoke-playback-telemetry.sh",
+    "backend:smoke:billing-denial": "node scripts/smoke-billing-denial.mjs",
+    "billing:setup-autumn": "node scripts/with-root-env.mjs --profile local node scripts/setup-autumn-billing.mjs",
     "e2e:player-telemetry": "node scripts/e2e-player-telemetry.mjs",
     "e2e:site-assets": "node scripts/e2e-site-assets.mjs",
     "backend:smoke:edge-warming": "scripts/smoke-edge-warming.sh",
