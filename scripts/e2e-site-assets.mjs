@@ -61,6 +61,18 @@ function log(message) {
   console.log(`[goal31] ${message}`);
 }
 
+function localBillingProcessEnv(env = process.env) {
+  return {
+    ...env,
+    REND_ENV: "local",
+    REND_ENV_PROFILE: "local",
+    REND_BILLING_MODE: "local",
+    AUTUMN_SECRET_KEY: "",
+    AUTUMN_API_URL: "",
+    REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT: "false",
+  };
+}
+
 function bindAddrFromBaseUrl(value, fallback) {
   try {
     const parsed = new URL(value);
@@ -73,7 +85,7 @@ function bindAddrFromBaseUrl(value, fallback) {
 function backendEnv() {
   const internalToken = process.env.REND_EDGE_INTERNAL_TOKEN || "dev-internal-token";
   return {
-    ...process.env,
+    ...localBillingProcessEnv(),
     DATABASE_URL: process.env.DATABASE_URL || "postgres://rend:rend@localhost:5432/rend",
     REND_ENV: process.env.REND_SMOKE_REND_ENV || "local",
     REND_REDIS_URL: process.env.REND_REDIS_URL || "redis://localhost:6379",
@@ -495,7 +507,7 @@ async function startSite() {
   const child = spawn(nextBin, ["dev", "-H", "127.0.0.1", "-p", String(port)], {
     cwd: siteDir,
     env: {
-      ...process.env,
+      ...localBillingProcessEnv(),
       REND_API_BASE_URL: apiBaseUrl,
       REND_SITE_INTERNAL_TOKEN: siteInternalToken,
       BETTER_AUTH_SECRET: localAuthSecret,
