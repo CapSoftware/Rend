@@ -1,5 +1,12 @@
+import type { Metadata } from "next";
 import Effects from "@/components/Effects";
 import WaitlistForm from "@/components/WaitlistForm";
+
+export const metadata: Metadata = {
+  alternates: {
+    canonical: "/",
+  },
+};
 
 type CmpCell = { kind: "yes" | "no" | "mid" } | { kind: "text"; value: string };
 
@@ -14,16 +21,34 @@ const cmpRows: { feature: string; cells: CmpCell[] }[] = [
   {
     feature: "Pricing model",
     cells: [
-      { kind: "text", value: "Two meters, in minutes" },
+      { kind: "text", value: "Delivery + storage by resolution" },
       { kind: "text", value: "Per minute, plus tiers" },
       { kind: "text", value: "Per GB, by region" },
       { kind: "text", value: "Whatever the bill says" },
     ],
   },
   {
+    feature: "Plans",
+    cells: [
+      { kind: "text", value: "PAYG, Builder, Scale, Enterprise" },
+      { kind: "text", value: "Monthly bundles" },
+      { kind: "text", value: "Usage commitments" },
+      { kind: "text", value: "Your own budget" },
+    ],
+  },
+  {
+    feature: "Included credits",
+    cells: [
+      { kind: "text", value: "$0, $100, $1k, or $10k" },
+      { kind: "text", value: "Varies by plan" },
+      { kind: "text", value: "Usually none" },
+      { kind: "text", value: "None" },
+    ],
+  },
+  {
     feature: "1080p delivery",
     cells: [
-      { kind: "text", value: "$0.95 / 1k min" },
+      { kind: "text", value: "1080p delivered seconds" },
       { kind: "text", value: "Higher per minute" },
       { kind: "text", value: "Per GB streamed" },
       { kind: "text", value: "Egress $50–90 / TB" },
@@ -32,7 +57,7 @@ const cmpRows: { feature: string; cells: CmpCell[] }[] = [
   {
     feature: "4K delivery",
     cells: [
-      { kind: "text", value: "$3.20 / 1k min" },
+      { kind: "text", value: "4K delivered seconds" },
       { kind: "text", value: "Premium minute tier" },
       { kind: "text", value: "Per GB streamed" },
       { kind: "text", value: "Bitrate-dependent" },
@@ -41,7 +66,7 @@ const cmpRows: { feature: string; cells: CmpCell[] }[] = [
   {
     feature: "Storage",
     cells: [
-      { kind: "text", value: "$2.50 / 1k min·mo" },
+      { kind: "text", value: "Tiered second-months" },
       { kind: "text", value: "Per stored minute" },
       { kind: "text", value: "Per GB stored" },
       { kind: "text", value: "You run the disks" },
@@ -442,10 +467,10 @@ export default function Home() {
               <path className="anim-twinkle t2" d="M152 8 L152 16 M148 12 L156 12" />
             </svg>
             <h2 className="mb-[18px] text-[clamp(27px,6vw,42px)]">How Rend compares</h2>
-            <p className="mx-auto max-w-[640px] text-[17px] text-muted">
-              Two honest meters, hardware we own, and a licence that outlives us, lined up against
-              how the rest of the category tends to work.
-            </p>
+          <p className="mx-auto max-w-[640px] text-[17px] text-muted">
+              Delivery seconds, storage second-months, hardware we own, and a licence that outlives
+              us, lined up against how the rest of the category tends to work.
+          </p>
           </div>
 
           <div className="hidden overflow-x-auto md:block">
