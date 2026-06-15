@@ -159,6 +159,88 @@ function safeUrl(value: unknown) {
   }
 }
 
+function envBoolean(name: string) {
+  const value = envString(name).toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
+function checkoutUrlCandidate(result: unknown) {
+  if (!isRecord(result)) return undefined;
+  return (
+    safeString(result.payment_url, 2048) ??
+    safeString(result.paymentUrl, 2048) ??
+    safeString(result.checkout_url, 2048) ??
+    safeString(result.checkoutUrl, 2048) ??
+    safeString(result.url, 2048)
+  );
+}
+
+function stripeCheckoutMode(url: string) {
+  const match = url.match(/\bcs_(test|live)_[A-Za-z0-9]+/);
+  return match?.[1] as "test" | "live" | undefined;
+}
+
+function externalCheckoutRedirectsEnabled() {
+  if (isProductionProfile()) return true;
+  return envBoolean("REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT");
+}
+
+export function checkoutRedirectUrlFromAutumnResponse(result: unknown) {
+  const redirectUrl = safeUrl(checkoutUrlCandidate(result));
+  if (!redirectUrl) return null;
+
+  if (!externalCheckoutRedirectsEnabled()) {
+    throw new BillingError(
+      502,
+      "billing_checkout_disabled",
+      "External checkout redirects are disabled for this environment."
+    );
+  }
+
+  const url = new URL(redirectUrl);
+  if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com") {
+    throw new BillingError(502, "billing_invalid_response", "Billing provider returned an unexpected checkout URL");
+  }
+
+  const mode = stripeCheckoutMode(redirectUrl);
+  if (isProductionProfile() && mode === "test") {
+    throw new BillingError(
+      502,
+      "billing_checkout_mode_mismatch",
+      "Billing checkout is not configured for live mode. Contact support."
+    );
+  }
+  if (!isProductionProfile() && mode === "live" && !envBoolean("REND_ALLOW_LIVE_CHECKOUT_REDIRECT")) {
+    throw new BillingError(
+      502,
+      "billing_checkout_mode_mismatch",
+      "Live checkout redirects are disabled outside production."
+    );
+  }
+
+  return redirectUrl;
+}
+
+function checkoutAttachBody(context: DashboardAccessContext, planId: string, returnUrl: string): JsonRecord {
+  const body: JsonRecord = {
+    customer_id: customerId(context),
+    plan_id: planId,
+    redirect_mode: "if_required",
+    success_url: returnUrl,
+    checkout_session_params: {
+      cancel_url: returnUrl,
+    },
+  };
+
+  if (!externalCheckoutRedirectsEnabled()) {
+    body.redirect_mode = "never";
+    body.no_billing_changes = true;
+    body.enable_plan_immediately = true;
+  }
+
+  return body;
+}
+
 function autumnPath(path: string) {
   const normalized = path.startsWith("/") ? path : `/${path}`;
   return `${autumnApiUrl()}${normalized}`;
@@ -680,17 +762,8 @@ export async function createCheckoutRedirect(
   await ensureBillingCustomer(context);
   const requestOrigin = new URL(input.requestUrl).origin;
   const returnUrl = safeReturnUrl(input.returnUrl, requestOrigin);
-  const result = await autumnPost("/billing.attach", {
-    customer_id: customerId(context),
-    plan_id: planId,
-    redirect_mode: "always",
-    success_url: returnUrl,
-  });
-  const redirectUrl = safeUrl(isRecord(result) ? result.payment_url ?? result.paymentUrl : undefined);
-  if (!redirectUrl) {
-    return returnUrl;
-  }
-  return redirectUrl;
+  const result = await autumnPost("/billing.attach", checkoutAttachBody(context, planId, returnUrl));
+  return checkoutRedirectUrlFromAutumnResponse(result) ?? returnUrl;
 }
 
 export async function createPortalRedirect(
