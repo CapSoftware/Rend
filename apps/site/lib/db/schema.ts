@@ -1,7 +1,8 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   bigint,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -176,6 +177,11 @@ export const assets = rend.table("assets", {
     .references(() => organization.id, { onDelete: "restrict" }),
   source_state: text("source_state").notNull(),
   playable_state: text("playable_state").notNull(),
+  duration_ms: bigint("duration_ms", { mode: "number" }),
+  source_width: integer("source_width"),
+  source_height: integer("source_height"),
+  source_resolution_tier: text("source_resolution_tier"),
+  max_resolution_tier: text("max_resolution_tier"),
   created_at: timestamp("created_at", { withTimezone: true }).notNull(),
   updated_at: timestamp("updated_at", { withTimezone: true }).notNull(),
   deleted_at: timestamp("deleted_at", { withTimezone: true }),
@@ -233,6 +239,88 @@ export const operatorAuditRecords = rend.table(
   ]
 );
 
+export const billingCustomers = rend.table(
+  "billing_customers",
+  {
+    organization_id: uuid("organization_id")
+      .primaryKey()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    autumn_customer_id: text("autumn_customer_id").notNull(),
+    billing_mode: text("billing_mode").notNull().default("local"),
+    customer_synced_at: timestamp("customer_synced_at", { withTimezone: true }),
+    customer_sync_error: text("customer_sync_error"),
+    billing_state: jsonb("billing_state"),
+    billing_state_synced_at: timestamp("billing_state_synced_at", { withTimezone: true }),
+    billing_state_error: text("billing_state_error"),
+    delivery_usage_cursor_at: timestamp("delivery_usage_cursor_at", { withTimezone: true }),
+    delivery_usage_synced_at: timestamp("delivery_usage_synced_at", { withTimezone: true }),
+    delivery_usage_error: text("delivery_usage_error"),
+    storage_usage_cursor_at: timestamp("storage_usage_cursor_at", { withTimezone: true }),
+    storage_usage_synced_at: timestamp("storage_usage_synced_at", { withTimezone: true }),
+    storage_usage_error: text("storage_usage_error"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("billing_customers_mode_synced_idx").on(table.billing_mode, table.customer_synced_at),
+  ]
+);
+
+export const billingUsageEvents = rend.table(
+  "billing_usage_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organization_id: uuid("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    asset_id: uuid("asset_id"),
+    idempotency_key: text("idempotency_key").notNull(),
+    feature_id: text("feature_id").notNull(),
+    value: doublePrecision("value").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull().default("pending"),
+    error: text("error"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    tracked_at: timestamp("tracked_at", { withTimezone: true }),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("billing_usage_events_idempotency_key_uidx").on(table.idempotency_key),
+    index("billing_usage_events_org_created_idx").on(table.organization_id, table.created_at),
+    index("billing_usage_events_status_created_idx").on(table.status, table.created_at),
+  ]
+);
+
+export const billingStorageSpans = rend.table(
+  "billing_storage_spans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organization_id: uuid("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    asset_id: uuid("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "cascade" }),
+    duration_ms: bigint("duration_ms", { mode: "number" }).notNull(),
+    resolution_tier: text("resolution_tier").notNull(),
+    started_at: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    ended_at: timestamp("ended_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("billing_storage_spans_asset_open_uidx")
+      .on(table.asset_id)
+      .where(sql`${table.ended_at} IS NULL`),
+    index("billing_storage_spans_org_window_idx").on(
+      table.organization_id,
+      table.resolution_tier,
+      table.started_at,
+      table.ended_at
+    ),
+  ]
+);
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
@@ -254,6 +342,7 @@ export const accountRelations = relations(account, ({ one }) => ({
 export const organizationRelations = relations(organization, ({ many }) => ({
   members: many(member),
   invitations: many(invitation),
+  billingCustomers: many(billingCustomers),
 }));
 
 export const memberRelations = relations(member, ({ one }) => ({
@@ -288,6 +377,9 @@ export const schema = {
   assets,
   apiKeys,
   operatorAuditRecords,
+  billingCustomers,
+  billingUsageEvents,
+  billingStorageSpans,
   userRelations,
   sessionRelations,
   accountRelations,
