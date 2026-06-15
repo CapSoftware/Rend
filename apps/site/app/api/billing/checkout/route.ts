@@ -7,6 +7,7 @@ import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
 } from "../../../../lib/dashboard-auth.ts";
+import { LEGAL_ASSENT_VERSION } from "../../../../lib/legal-assent-constants.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,6 +33,12 @@ export async function POST(request: Request) {
 
   const formData = await request.formData();
   try {
+    if (
+      formString(formData, "legal_assent") !== "accepted" ||
+      formString(formData, "legal_assent_version") !== LEGAL_ASSENT_VERSION
+    ) {
+      throw new BillingError(400, "legal_assent_required", "Legal assent is required before checkout");
+    }
     const redirectUrl = await createCheckoutRedirect(access.context, {
       planId: formString(formData, "plan_id"),
       returnUrl: formString(formData, "return_url"),
