@@ -115,7 +115,14 @@
     opacity: 0.55;
   }
 
-  .app-login-form p {
+  .app-login-help {
+    margin: 0;
+    color: #586273;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .app-login-error {
     margin: 0;
     color: #b42318;
     font-size: 13px;
@@ -245,10 +252,26 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    justify-content: space-between;
     margin-bottom: 16px;
     padding: 12px 14px;
     color: #364152;
     font-size: 14px;
+  }
+
+  .app-callout > div:not(.app-progress) {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+  }
+
+  .app-callout strong {
+    color: inherit;
+    font-size: 13px;
+  }
+
+  .app-callout span {
+    min-width: 0;
   }
 
   .app-callout-error {
