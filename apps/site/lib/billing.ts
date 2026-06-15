@@ -221,7 +221,7 @@ export function checkoutRedirectUrlFromAutumnResponse(result: unknown) {
   return redirectUrl;
 }
 
-function checkoutAttachBody(context: DashboardAccessContext, planId: string, returnUrl: string): JsonRecord {
+export function checkoutAttachBody(context: DashboardAccessContext, planId: string, returnUrl: string): JsonRecord {
   const body: JsonRecord = {
     customer_id: customerId(context),
     plan_id: planId,
