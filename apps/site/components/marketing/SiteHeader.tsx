@@ -92,9 +92,8 @@ export function SiteHeader({
             rel="noopener noreferrer"
             className="ml-1 flex items-center gap-[5px] text-[9px] font-medium leading-none text-faint transition-colors hover:text-ink"
           >
-            A
+            by
             <img src="/cap-logo.svg" alt="Cap" className="block h-[10px] w-auto" />
-            company
           </a>
         </div>
 
