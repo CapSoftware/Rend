@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { LEGAL_ASSENT_VERSION } from "@/lib/legal-assent-constants";
 
 export default function LoginForm({
   configured,
@@ -12,6 +13,7 @@ export default function LoginForm({
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [codeSent, setCodeSent] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [error, setError] = useState(configured ? "" : "Dashboard authentication is not configured.");
   const [submitting, setSubmitting] = useState(false);
 
@@ -48,7 +50,12 @@ export default function LoginForm({
   async function sendCode() {
     await postAuth(
       "/api/auth/email-otp/send-verification-otp",
-      { email: normalizedEmail, type: "sign-in" },
+      {
+        email: normalizedEmail,
+        legal_assent: "accepted",
+        legal_assent_version: LEGAL_ASSENT_VERSION,
+        type: "sign-in",
+      },
       "Unable to send sign-in code"
     );
     setCodeSent(true);
@@ -118,12 +125,39 @@ export default function LoginForm({
                 value={code}
               />
             </>
-          ) : null}
+          ) : (
+            <div className="app-legal-check">
+              <input
+                aria-describedby="terms-assent-copy"
+                checked={acceptedTerms}
+                disabled={!configured || submitting}
+                id="terms-assent"
+                onChange={(event) => setAcceptedTerms(event.currentTarget.checked)}
+                required
+                type="checkbox"
+              />
+              <div>
+                <label htmlFor="terms-assent">I agree to Rend's legal terms.</label>
+                <p id="terms-assent-copy">
+                  This means the{" "}
+                  <a href="/terms" target="_blank" rel="noopener noreferrer">
+                    Terms
+                  </a>{" "}
+                  and{" "}
+                  <a href="/privacy" target="_blank" rel="noopener noreferrer">
+                    Privacy Notice
+                  </a>
+                  .
+                </p>
+              </div>
+            </div>
+          )}
           <button
             disabled={
               !configured ||
               submitting ||
               !normalizedEmail ||
+              (!codeSent && !acceptedTerms) ||
               (codeSent && normalizedCode.length !== 6)
             }
             type="submit"
