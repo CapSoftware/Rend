@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BillingError,
   billingReadinessFromOverview,
+  checkoutAttachBody,
   checkoutRedirectUrlFromAutumnResponse,
   type BillingOverview,
 } from "./billing.ts";
@@ -11,6 +12,7 @@ const ENV_KEYS = [
   "REND_ENV",
   "REND_ENV_PROFILE",
   "NODE_ENV",
+  "REND_BILLING_MODE",
   "REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT",
   "REND_ALLOW_LIVE_CHECKOUT_REDIRECT",
 ];
@@ -54,6 +56,15 @@ function overview(extra: Partial<BillingOverview> = {}): BillingOverview {
   };
 }
 
+const dashboardContext = {
+  userId: "00000000-0000-0000-0000-000000000010",
+  userEmail: "admin@rend.test",
+  organizationId: "00000000-0000-0000-0000-000000000001",
+  organizationName: "Rend Local",
+  organizationSlug: "local",
+  role: "owner" as const,
+};
+
 test("billing readiness requires an active billing relationship in Autumn mode", () => {
   const readiness = billingReadinessFromOverview(overview());
 
@@ -95,6 +106,32 @@ test("local billing is always ready", () => {
   );
 
   assert.equal(readiness.status, "ready");
+});
+
+test("local Autumn attach activates plans without external Checkout by default", async () => {
+  await withEnv({ REND_ENV: "local", REND_BILLING_MODE: "autumn" }, () => {
+    const returnUrl = "http://127.0.0.1:3000/dashboard/billing";
+    const body = checkoutAttachBody(dashboardContext, "builder", returnUrl);
+
+    assert.equal(body.customer_id, dashboardContext.organizationId);
+    assert.equal(body.plan_id, "builder");
+    assert.equal(body.redirect_mode, "never");
+    assert.equal(body.no_billing_changes, true);
+    assert.equal(body.enable_plan_immediately, true);
+    assert.deepEqual(body.checkout_session_params, { cancel_url: returnUrl });
+  });
+});
+
+test("production Autumn attach can redirect when Checkout is required", async () => {
+  await withEnv({ REND_ENV: "production", REND_BILLING_MODE: "autumn" }, () => {
+    const returnUrl = "https://rend.so/dashboard/billing";
+    const body = checkoutAttachBody(dashboardContext, "builder", returnUrl);
+
+    assert.equal(body.redirect_mode, "if_required");
+    assert.equal("no_billing_changes" in body, false);
+    assert.equal("enable_plan_immediately" in body, false);
+    assert.deepEqual(body.checkout_session_params, { cancel_url: returnUrl });
+  });
 });
 
 test("checkout redirect guard rejects local test checkout URLs by default", async () => {
