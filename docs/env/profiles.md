@@ -21,6 +21,8 @@ bun run env:local
 Rules for `.env.local`:
 
 - `REND_ENV=local`
+- `REND_BILLING_MODE=local` unless explicitly testing Autumn with a non-live
+  Autumn key
 - URLs must point at `localhost`, loopback, `.local`, or Docker service names
 - local/dev secrets are allowed
 - production provider URLs and production secrets are not allowed
@@ -50,6 +52,8 @@ bun run verify:production-local
 
 For real deploys, set production secrets in the host or platform environment
 instead of committing env files. `REND_ENV` must be `production`.
+`REND_BILLING_MODE` must be `autumn`, and `AUTUMN_SECRET_KEY` must be provided
+server-side only.
 
 Production validation rejects localhost/Docker service URLs, checked-in dev
 defaults, placeholders, insecure edge URLs, and `REND_ENV=local`.

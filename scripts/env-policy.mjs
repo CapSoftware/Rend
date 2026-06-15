@@ -47,7 +47,7 @@ const DEV_DEFAULTS = new Map([
 ]);
 
 const ENV_FILE_KEY_PATTERN =
-  /^(REND_|NEXT_PUBLIC_|BETTER_AUTH_|AUTH_SECRET$|RESEND_|DATABASE_URL$|REDIS_URL$|S3_|AWS_|CLICKHOUSE_|OBJECT_STORE_|KV_|UPSTASH_)/;
+  /^(REND_|NEXT_PUBLIC_|BETTER_AUTH_|AUTH_SECRET$|RESEND_|AUTUMN_|DATABASE_URL$|REDIS_URL$|S3_|AWS_|CLICKHOUSE_|OBJECT_STORE_|KV_|UPSTASH_)/;
 
 export function parseCliEnvOptions(argv) {
   const options = {
@@ -264,13 +264,14 @@ function validateRendEnv({ profile, env, errors }) {
 }
 
 function validateLocalEnv(env, errors) {
+  validateBillingEnv(env, errors, LOCAL_PROFILE);
   for (const [key, value] of relevantEnvEntries(env)) {
     const normalized = String(value || "").trim();
     if (!normalized) {
       continue;
     }
     if (isUrlKey(key)) {
-      validateLocalUrlishValue(key, normalized, errors);
+      validateLocalUrlishValue(key, normalized, errors, env);
     }
     if (isSecretKey(key) && isProductionSecretLike(key, normalized)) {
       errors.push(`${key} looks like a production secret; local profile must use dev/local-only secrets`);
@@ -280,6 +281,7 @@ function validateLocalEnv(env, errors) {
 
 function validateProductionEnv(env, errors, { allowPlaceholders }) {
   validateProductionAuthEnv(env, errors);
+  validateBillingEnv(env, errors, PRODUCTION_PROFILE);
   for (const [key, value] of relevantEnvEntries(env)) {
     const normalized = String(value || "").trim();
     if (!normalized) {
@@ -326,7 +328,27 @@ function validateProductionAuthEnv(env, errors) {
   }
 }
 
-function validateLocalUrlishValue(key, value, errors) {
+function validateBillingEnv(env, errors, profile) {
+  const mode = String(env.REND_BILLING_MODE || "")
+    .trim()
+    .toLowerCase();
+  const normalizedMode = mode || (profile === PRODUCTION_PROFILE ? "autumn" : "local");
+  if (!["local", "autumn"].includes(normalizedMode)) {
+    errors.push("REND_BILLING_MODE must be one of: local, autumn");
+    return;
+  }
+  if (profile === PRODUCTION_PROFILE && normalizedMode !== "autumn") {
+    errors.push("production profile requires REND_BILLING_MODE=autumn");
+  }
+  if (normalizedMode === "autumn" && !String(env.AUTUMN_SECRET_KEY || "").trim()) {
+    errors.push("REND_BILLING_MODE=autumn requires AUTUMN_SECRET_KEY");
+  }
+}
+
+function validateLocalUrlishValue(key, value, errors, env) {
+  if (key === "AUTUMN_API_URL" && localAutumnTestingEnabled(env) && isAutumnApiUrl(value)) {
+    return;
+  }
   for (const candidate of splitUrlCandidates(value)) {
     const parsed = parseUrlCandidate(candidate);
     if (!parsed) {
@@ -337,6 +359,17 @@ function validateLocalUrlishValue(key, value, errors) {
       errors.push(`${key} must point to localhost, loopback, .local, or a Docker service in local profile`);
     }
   }
+}
+
+function localAutumnTestingEnabled(env) {
+  return String(env.REND_BILLING_MODE || "")
+    .trim()
+    .toLowerCase() === "autumn";
+}
+
+function isAutumnApiUrl(value) {
+  const parsed = parseUrlCandidate(value);
+  return Boolean(parsed && parsed.protocol === "https:" && parsed.hostname === "api.useautumn.com");
 }
 
 function validateProductionUrlishValue(key, value, errors) {
@@ -496,6 +529,7 @@ function isProductionSecretLike(key, value) {
   return (
     /^sk_live_/i.test(trimmed) ||
     /^pk_live_/i.test(trimmed) ||
+    /^am_sk_live_/i.test(trimmed) ||
     /^whsec_/i.test(trimmed) ||
     /^AKIA[0-9A-Z]{16}$/.test(trimmed) ||
     /^ASIA[0-9A-Z]{16}$/.test(trimmed) ||
