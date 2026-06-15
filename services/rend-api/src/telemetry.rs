@@ -15,8 +15,8 @@ use rend_playback_auth::is_valid_hls_segment_name;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApiScope, AppError, AppState, RequestAuth, ensure_asset_not_suspended, normalize_asset_id,
-    require_scope,
+    ApiScope, AppError, AppState, RequestAuth, billing, ensure_asset_not_suspended,
+    normalize_asset_id, require_scope,
 };
 
 const DEFAULT_TELEMETRY_MAX_BODY_BYTES: usize = 256 * 1024;
@@ -163,6 +163,8 @@ struct ClickHousePlaybackEventRow {
     bytes_served: u64,
     content_type: String,
     duration_ms: u32,
+    delivered_duration_ms: u32,
+    resolution_tier: Option<String>,
     error_code: Option<String>,
 }
 
@@ -190,6 +192,20 @@ struct ClickHouseAnalyticsRow {
     bytes_served: u64,
     first_seen_ms: i64,
     last_seen_ms: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AssetPlaybackBillingMetadata {
+    organization_id: Option<String>,
+    duration_ms: Option<i64>,
+    max_resolution_tier: Option<String>,
+    artifacts: HashMap<String, ArtifactPlaybackBillingMetadata>,
+}
+
+#[derive(Clone, Debug)]
+struct ArtifactPlaybackBillingMetadata {
+    duration_ms: Option<i64>,
+    resolution_tier: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,12 +241,13 @@ async fn post_playback_telemetry_inner(
         state.config.playback_telemetry.max_events_per_batch,
         ingested_at,
     )?;
-    let organizations = fetch_asset_organizations(&state.db, &events).await?;
+    let billing_metadata = fetch_asset_playback_billing_metadata(&state.db, &events).await?;
     let rows = events
         .into_iter()
-        .map(|event| event.into_clickhouse_row(ingested_at, &organizations))
+        .map(|event| event.into_clickhouse_row(ingested_at, &billing_metadata))
         .collect::<Vec<_>>();
     insert_clickhouse_playback_events(&state.http, &state.config.playback_telemetry, &rows).await?;
+    billing::schedule_delivery_usage_sync(state);
 
     Ok(PlaybackTelemetryIngestResponse {
         accepted: rows.len(),
@@ -453,10 +470,10 @@ fn normalize_safe_text(
     Ok(value.to_owned())
 }
 
-async fn fetch_asset_organizations(
+async fn fetch_asset_playback_billing_metadata(
     db: &sqlx::PgPool,
     events: &[NormalizedPlaybackTelemetryEvent],
-) -> std::result::Result<HashMap<String, Option<String>>, AppError> {
+) -> std::result::Result<HashMap<String, AssetPlaybackBillingMetadata>, AppError> {
     let mut asset_ids = events
         .iter()
         .map(|event| event.asset_id.clone())
@@ -464,9 +481,12 @@ async fn fetch_asset_organizations(
     asset_ids.sort();
     asset_ids.dedup();
 
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+    let asset_rows: Vec<(String, Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
         "
-        SELECT id::text, organization_id::text
+        SELECT id::text,
+               organization_id::text,
+               duration_ms,
+               max_resolution_tier
         FROM rend.assets
         WHERE id::text = ANY($1::text[])
         ",
@@ -476,18 +496,83 @@ async fn fetch_asset_organizations(
     .await
     .map_err(AppError::internal)?;
 
-    Ok(rows.into_iter().collect())
+    let mut metadata = asset_rows
+        .into_iter()
+        .map(
+            |(asset_id, organization_id, duration_ms, max_resolution_tier)| {
+                (
+                    asset_id,
+                    AssetPlaybackBillingMetadata {
+                        organization_id,
+                        duration_ms,
+                        max_resolution_tier,
+                        artifacts: HashMap::new(),
+                    },
+                )
+            },
+        )
+        .collect::<HashMap<_, _>>();
+
+    if metadata.is_empty() {
+        return Ok(metadata);
+    }
+
+    let artifact_rows: Vec<(String, String, Option<i64>, Option<String>)> = sqlx::query_as(
+        "
+        SELECT asset_id::text,
+               object_key,
+               duration_ms,
+               resolution_tier
+        FROM rend.artifacts
+        WHERE asset_id::text = ANY($1::text[])
+        ",
+    )
+    .bind(&asset_ids)
+    .fetch_all(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    for (asset_id, object_key, duration_ms, resolution_tier) in artifact_rows {
+        let Some(asset_metadata) = metadata.get_mut(&asset_id) else {
+            continue;
+        };
+        let prefix = format!("videos/{asset_id}/");
+        let Some(artifact_path) = object_key.strip_prefix(&prefix) else {
+            continue;
+        };
+        asset_metadata.artifacts.insert(
+            artifact_path.to_owned(),
+            ArtifactPlaybackBillingMetadata {
+                duration_ms,
+                resolution_tier,
+            },
+        );
+    }
+
+    Ok(metadata)
 }
 
 impl NormalizedPlaybackTelemetryEvent {
     fn into_clickhouse_row(
         self,
         ingested_at: DateTime<Utc>,
-        organizations: &HashMap<String, Option<String>>,
+        billing_metadata: &HashMap<String, AssetPlaybackBillingMetadata>,
     ) -> ClickHousePlaybackEventRow {
-        let organization_id = organizations
-            .get(&self.asset_id)
-            .and_then(|value| value.clone());
+        let metadata = billing_metadata.get(&self.asset_id);
+        let artifact_metadata = metadata.and_then(|value| value.artifacts.get(&self.artifact_path));
+        let organization_id = metadata.and_then(|value| value.organization_id.clone());
+        let resolution_tier = artifact_metadata
+            .and_then(|value| value.resolution_tier.clone())
+            .or_else(|| metadata.and_then(|value| value.max_resolution_tier.clone()));
+        let delivered_duration_ms = if (200..400).contains(&self.status_code) {
+            artifact_metadata
+                .and_then(|value| value.duration_ms)
+                .or_else(|| fallback_delivered_duration_ms(&self.artifact_path, metadata))
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         ClickHousePlaybackEventRow {
             event_id: self.event_id,
@@ -503,8 +588,24 @@ impl NormalizedPlaybackTelemetryEvent {
             bytes_served: self.bytes_served,
             content_type: self.content_type,
             duration_ms: self.duration_ms,
+            delivered_duration_ms,
+            resolution_tier,
             error_code: self.error_code,
         }
+    }
+}
+
+fn fallback_delivered_duration_ms(
+    artifact_path: &str,
+    metadata: Option<&AssetPlaybackBillingMetadata>,
+) -> Option<i64> {
+    match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
+        ["opener.mp4"] => metadata
+            .and_then(|value| value.duration_ms)
+            .map(|duration_ms| duration_ms.min(5_000)),
+        ["hls", "master.m3u8"] => Some(0),
+        ["hls", segment_name] if is_valid_hls_segment_name(segment_name) => Some(2_000),
+        _ => None,
     }
 }
 
@@ -521,7 +622,7 @@ async fn insert_clickhouse_playback_events(
 
     let query = "\
         INSERT INTO playback_events \
-        (event_id, observed_at, ingested_at, asset_id, organization_id, artifact_path, edge_id, region, cache_status, status_code, bytes_served, content_type, duration_ms, error_code) \
+        (event_id, observed_at, ingested_at, asset_id, organization_id, artifact_path, edge_id, region, cache_status, status_code, bytes_served, content_type, duration_ms, delivered_duration_ms, resolution_tier, error_code) \
         FORMAT JSONEachRow";
 
     clickhouse_post(http, config, query, body).await.map(|_| ())
@@ -787,6 +888,56 @@ mod tests {
 
         assert!(query.contains("GROUP BY event_id"));
         assert!(query.contains("FORMAT JSONEachRow"));
+    }
+
+    #[test]
+    fn clickhouse_rows_use_artifact_billing_metadata_for_delivery() {
+        let ingested_at = DateTime::parse_from_rfc3339("2026-06-13T12:00:01.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let batch = serde_json::from_value::<PlaybackTelemetryBatch>(serde_json::json!({
+            "events": [{
+                "event_id": "evt-1",
+                "observed_at": "2026-06-13T12:00:00.000Z",
+                "asset_id": "00000000-0000-0000-0000-000000000001",
+                "artifact_path": "hls/segment_00000.ts",
+                "edge_id": "edge-1",
+                "region": "local",
+                "cache_status": "HIT",
+                "status_code": 200,
+                "bytes_served": 123,
+                "content_type": "video/mp2t",
+                "duration_ms": 9
+            }]
+        }))
+        .unwrap();
+        let event = normalize_playback_telemetry_batch(batch, 2, ingested_at)
+            .unwrap()
+            .remove(0);
+        let mut asset = AssetPlaybackBillingMetadata {
+            organization_id: Some("00000000-0000-0000-0000-000000000009".to_owned()),
+            duration_ms: Some(12_000),
+            max_resolution_tier: Some("1080p".to_owned()),
+            artifacts: HashMap::new(),
+        };
+        asset.artifacts.insert(
+            "hls/segment_00000.ts".to_owned(),
+            ArtifactPlaybackBillingMetadata {
+                duration_ms: Some(1_234),
+                resolution_tier: Some("720p".to_owned()),
+            },
+        );
+        let metadata = HashMap::from([("00000000-0000-0000-0000-000000000001".to_owned(), asset)]);
+
+        let row = event.into_clickhouse_row(ingested_at, &metadata);
+
+        assert_eq!(row.duration_ms, 9);
+        assert_eq!(row.delivered_duration_ms, 1_234);
+        assert_eq!(row.resolution_tier.as_deref(), Some("720p"));
+        assert_eq!(
+            row.organization_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000009")
+        );
     }
 
     #[test]
