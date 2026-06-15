@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import {
+  ogImageSize,
+  siteLocale,
+  siteName,
+} from "@/lib/seo";
 import DocsCommandPalette from "../../components/DocsCommandPalette";
 import DocsCopyButton from "../../components/DocsCopyButton";
 import {
@@ -13,10 +18,44 @@ import {
   docsNavItems,
 } from "./docs-content";
 
+const docsDescription =
+  "Rend public API docs for uploading video, waiting for playback, embedding the player, analytics, and deletion.";
+
 export const metadata: Metadata = {
   title: "Docs",
-  description:
-    "Rend public API docs for uploading video, waiting for playback, embedding the player, analytics, and deletion.",
+  description: docsDescription,
+  alternates: {
+    canonical: "/docs",
+  },
+  openGraph: {
+    type: "website",
+    url: "/docs",
+    siteName,
+    locale: siteLocale,
+    title: "Rend docs",
+    description: docsDescription,
+    images: [
+      {
+        url: "/opengraph-image",
+        width: ogImageSize.width,
+        height: ogImageSize.height,
+        alt: "Rend docs",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Rend docs",
+    description: docsDescription,
+    images: [
+      {
+        url: "/twitter-image",
+        width: ogImageSize.width,
+        height: ogImageSize.height,
+        alt: "Rend docs",
+      },
+    ],
+  },
 };
 
 function CodeBlock({
@@ -180,6 +219,22 @@ export default function DocsPage() {
                 <li>Use <code>manifest_url</code> first when present, then <code>playback_url</code>, then <code>opener_url</code>.</li>
                 <li>Artifact URLs are relative to the Rend site origin.</li>
                 <li>The hosted embed page is <code>/embed/{"{assetId}"}</code> and <code>/watch/{"{assetId}"}</code> aliases the same player.</li>
+              </ul>
+            </section>
+
+            <section id="billing-usage" aria-labelledby="billing-usage-title">
+              <p className="docs-section-label">Billing</p>
+              <h2 id="billing-usage-title">Autumn billing and usage limits</h2>
+              <p>
+                Hosted Rend uses Autumn as the source of truth for plans, credits, balances,
+                checkout, and the billing portal. Uploads can return <code>limit_exceeded</code>
+                before the source body is accepted when Autumn denies the organization billing state.
+              </p>
+              <ul>
+                <li>Customer-facing delivery usage is tracked as delivered video seconds by <code>720p</code>, <code>1080p</code>, <code>2K</code>, and <code>4K</code> tier.</li>
+                <li>Customer-facing storage usage is tracked as active asset duration prorated into second-months by the same tiers.</li>
+                <li>Upload/source bytes remain local safety limits and are not customer-facing Autumn meters.</li>
+                <li>Already-issued playback artifact URLs do not call Autumn, Postgres, or the Rend API on the playback hot path.</li>
               </ul>
             </section>
 

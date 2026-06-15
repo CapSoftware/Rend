@@ -36,6 +36,11 @@ export const docsNavItems: DocsNavItem[] = [
     description: "Tokenless same-origin bootstrap and artifact paths.",
   },
   {
+    href: "#billing-usage",
+    title: "Billing and usage",
+    description: "Autumn limits, tiered delivery seconds, and storage second-months.",
+  },
+  {
     href: "#error-states",
     title: "Error states",
     description: "not_playable, suspended, unauthorized, upload too large, and deleted.",
