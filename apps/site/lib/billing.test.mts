@@ -157,6 +157,17 @@ test("checkout redirect guard can opt into local test checkout URLs", async () =
   });
 });
 
+test("checkout redirect guard allows live checkout URLs in production", async () => {
+  await withEnv({ REND_ENV: "production" }, () => {
+    assert.equal(
+      checkoutRedirectUrlFromAutumnResponse({
+        payment_url: "https://checkout.stripe.com/c/pay/cs_live_123#fid",
+      }),
+      "https://checkout.stripe.com/c/pay/cs_live_123#fid"
+    );
+  });
+});
+
 test("checkout redirect guard rejects test checkout URLs in production", async () => {
   await withEnv({ REND_ENV: "production" }, () => {
     assert.throws(
