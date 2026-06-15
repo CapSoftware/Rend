@@ -115,7 +115,8 @@ API:
 - `REND_PLAYBACK_TOKEN_TTL_SECS`
 
 `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional single-edge
-fallbacks for local/dev environments when no healthy registry entries exist.
+fallbacks for local/dev or emergency debugging. Leave them unset in normal
+production so warm/purge fanout uses registered healthy edges.
 `REND_EXPECTED_EDGES` uses comma-separated
 `edge_id=region=base_url` entries. In `production`, edge base URLs must be
 HTTPS.

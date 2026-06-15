@@ -27,9 +27,9 @@ paths used by the local Docker stack.
 
 `rend.edge_nodes` is the source of registered edge nodes. API and media worker
 warm/purge fanout targets every row with `status='healthy'`, a non-empty
-`base_url`, and a fresh heartbeat. `REND_EDGE_WARM_URL` and
-`REND_EDGE_PURGE_URL` remain fallback-only local/dev settings when the registry
-has no healthy active edge.
+`base_url`, and a fresh heartbeat. Leave `REND_EDGE_WARM_URL` and
+`REND_EDGE_PURGE_URL` unset in normal production; they are single-edge
+fallbacks for local/dev or emergency debugging.
 
 ## Minimum Edge Host Requirements
 
@@ -212,7 +212,8 @@ API required set:
   `REND_PLAYBACK_TOKEN_TTL_SECS`, `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
 - Edge registry/fanout: `REND_EDGE_INTERNAL_TOKEN`,
   `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`.
-  `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are fallback-only.
+  `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional fallback-only
+  overrides and should be unset for normal production fanout.
 - Telemetry ingest/analytics: `REND_INTERNAL_TELEMETRY_TOKEN`,
   `REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES`,
   `REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH`,

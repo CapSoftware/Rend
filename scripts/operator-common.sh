@@ -605,9 +605,6 @@ operator_validate_api_env() {
   for key in "${required[@]}"; do
     operator_require_env_nonempty "$file" "$key"
   done
-  for key in "${optional[@]}"; do
-    operator_require_env_present "$file" "$key"
-  done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
   operator_check_rend_env "$file" "$allow_dev_defaults"
   operator_check_expected_edges "$file" "$allow_dev_defaults"
@@ -671,9 +668,6 @@ operator_validate_worker_env() {
   local key
   for key in "${required[@]}"; do
     operator_require_env_nonempty "$file" "$key"
-  done
-  for key in "${optional[@]}"; do
-    operator_require_env_present "$file" "$key"
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
   operator_check_rend_env "$file" "$allow_dev_defaults"
