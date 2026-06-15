@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { SiteHeader } from "@/components/marketing/SiteHeader";
+import { SiteFooter } from "@/components/marketing/SiteFooter";
 import {
   ogImageSize,
   siteLocale,
@@ -96,16 +97,9 @@ function DocsNav({ label }: { label: string }) {
 export default function DocsPage() {
   return (
     <div className="docs-page">
-      <header className="docs-header">
-        <Link href="/" aria-label="Rend home">
-          <img src="/rend-logo.svg" alt="Rend" className="docs-logo" />
-        </Link>
-        <nav aria-label="Primary docs navigation">
-          <Link href="/">Home</Link>
-          <Link href="/dashboard/assets">Dashboard</Link>
-          <DocsCommandPalette items={docsCommandItems} />
-        </nav>
-      </header>
+      <SiteHeader>
+        <DocsCommandPalette items={docsCommandItems} />
+      </SiteHeader>
 
       <main className="docs-main">
         <section className="docs-intro" aria-labelledby="docs-title">
@@ -346,6 +340,7 @@ export default function DocsPage() {
           </aside>
         </div>
       </main>
+      <SiteFooter />
     </div>
   );
 }
