@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import {
-  billingErrorResponse,
+  BillingError,
   createCheckoutRedirect,
 } from "../../../../lib/billing.ts";
 import {
@@ -16,6 +16,16 @@ function formString(formData: FormData, name: string) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function billingErrorRedirect(requestUrl: string, error: unknown) {
+  const code =
+    error instanceof BillingError && error.code
+      ? error.code
+      : "billing_request_failed";
+  const url = new URL("/dashboard/billing", requestUrl);
+  url.searchParams.set("billing_error", code);
+  return NextResponse.redirect(url, 303);
+}
+
 export async function POST(request: Request) {
   const access = await dashboardAccessFromRequest(request);
   if (!access.ok) return dashboardAccessErrorResponse(access);
@@ -29,6 +39,6 @@ export async function POST(request: Request) {
     });
     return NextResponse.redirect(redirectUrl);
   } catch (error) {
-    return billingErrorResponse(error);
+    return billingErrorRedirect(request.url, error);
   }
 }
