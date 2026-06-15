@@ -305,6 +305,13 @@ function validateProductionAuthEnv(env, errors) {
     errors.push("REND_DEV_API_KEY is local/dev only and must not be set in production profile");
   }
 
+  const selfServeEnabled = ["1", "true", "yes", "on"].includes(
+    String(env.REND_SELF_SERVE_SIGNUP_ENABLED || "").trim().toLowerCase(),
+  );
+  if (!selfServeEnabled) {
+    errors.push("production profile requires REND_SELF_SERVE_SIGNUP_ENABLED=true for public self-serve signup");
+  }
+
   const betterAuthSecret = String(env.BETTER_AUTH_SECRET || env.AUTH_SECRET || "").trim();
   if (!betterAuthSecret) {
     errors.push("production profile requires BETTER_AUTH_SECRET");
@@ -318,13 +325,21 @@ function validateProductionAuthEnv(env, errors) {
   const emailDisabled = ["1", "true", "yes", "on"].includes(
     String(env.REND_AUTH_EMAIL_DISABLED || "").trim().toLowerCase(),
   );
-  if (!emailDisabled) {
-    if (!String(env.RESEND_API_KEY || "").trim()) {
-      errors.push("production profile requires RESEND_API_KEY unless REND_AUTH_EMAIL_DISABLED=true");
-    }
-    if (!String(env.REND_AUTH_EMAIL_FROM || "").trim()) {
-      errors.push("production profile requires REND_AUTH_EMAIL_FROM unless REND_AUTH_EMAIL_DISABLED=true");
-    }
+  if (emailDisabled) {
+    errors.push("production self-serve signup requires REND_AUTH_EMAIL_DISABLED=false");
+  }
+  if (!String(env.RESEND_API_KEY || "").trim()) {
+    errors.push("production self-serve signup requires RESEND_API_KEY");
+  }
+  if (!String(env.REND_AUTH_EMAIL_FROM || "").trim()) {
+    errors.push("production self-serve signup requires REND_AUTH_EMAIL_FROM");
+  }
+
+  if (!String(env.REND_OPERATOR_EMAIL_ALLOWLIST || "").trim()) {
+    errors.push("production profile requires REND_OPERATOR_EMAIL_ALLOWLIST");
+  }
+  if (!String(env.REND_SITE_INTERNAL_TOKEN || "").trim()) {
+    errors.push("production profile requires REND_SITE_INTERNAL_TOKEN");
   }
 }
 
@@ -340,9 +355,34 @@ function validateBillingEnv(env, errors, profile) {
   if (profile === PRODUCTION_PROFILE && normalizedMode !== "autumn") {
     errors.push("production profile requires REND_BILLING_MODE=autumn");
   }
-  if (normalizedMode === "autumn" && !String(env.AUTUMN_SECRET_KEY || "").trim()) {
-    errors.push("REND_BILLING_MODE=autumn requires AUTUMN_SECRET_KEY");
+  if (normalizedMode === "autumn") {
+    const autumnSecretKey = String(env.AUTUMN_SECRET_KEY || "").trim();
+    if (!autumnSecretKey) {
+      errors.push("REND_BILLING_MODE=autumn requires AUTUMN_SECRET_KEY");
+    } else if (profile === PRODUCTION_PROFILE && !isPlaceholder(autumnSecretKey) && classifyAutumnKey(autumnSecretKey) !== "live") {
+      errors.push("production profile requires AUTUMN_SECRET_KEY to be visibly marked as live");
+    }
   }
+  if (profile === PRODUCTION_PROFILE) {
+    const failurePolicy = String(env.REND_BILLING_ENTITLEMENT_FAILURE_POLICY || "fail_closed")
+      .trim()
+      .toLowerCase();
+    if (!["fail_closed", "closed"].includes(failurePolicy)) {
+      errors.push("production profile requires REND_BILLING_ENTITLEMENT_FAILURE_POLICY=fail_closed");
+    }
+  }
+}
+
+function classifyAutumnKey(secretKey) {
+  if (/^am_sk_live_/i.test(secretKey) || /(?:^|[_-])live(?:[_-])/i.test(secretKey)) return "live";
+  if (
+    /^am_sk_test_/i.test(secretKey) ||
+    /(?:^|[_-])test(?:[_-])/i.test(secretKey) ||
+    /(?:^|[_-])sandbox(?:[_-])/i.test(secretKey)
+  ) {
+    return "sandbox";
+  }
+  return "unknown";
 }
 
 function validateLocalUrlishValue(key, value, errors, env) {
