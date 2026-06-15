@@ -61,17 +61,23 @@ function isLocalUrl(value: string) {
   }
 }
 
+export function selfServeSignupEnabled(env: Env = process.env) {
+  const configured = envString("REND_SELF_SERVE_SIGNUP_ENABLED", env);
+  if (!isProductionProfile(env)) return configured ? envBoolean("REND_SELF_SERVE_SIGNUP_ENABLED", env) : true;
+  return envBoolean("REND_SELF_SERVE_SIGNUP_ENABLED", env);
+}
+
 export function dashboardAuthConfigured(env: Env = process.env) {
   if (!isProductionProfile(env)) return true;
 
   const secret = envString("BETTER_AUTH_SECRET", env) || envString("AUTH_SECRET", env);
   const baseUrl = envString("BETTER_AUTH_URL", env) || envString("REND_AUTH_BASE_URL", env);
+  if (!selfServeSignupEnabled(env)) return false;
   if (!secret || secret === LOCAL_AUTH_SECRET) return false;
   if (!baseUrl || baseUrl === LOCAL_AUTH_URL || isLocalUrl(baseUrl)) return false;
-  if (!envBoolean("REND_AUTH_EMAIL_DISABLED", env)) {
-    if (!envString("RESEND_API_KEY", env) || !envString("REND_AUTH_EMAIL_FROM", env)) {
-      return false;
-    }
+  if (envBoolean("REND_AUTH_EMAIL_DISABLED", env)) return false;
+  if (!envString("RESEND_API_KEY", env) || !envString("REND_AUTH_EMAIL_FROM", env)) {
+    return false;
   }
   return true;
 }
