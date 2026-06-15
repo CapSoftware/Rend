@@ -1,9 +1,11 @@
 import {
   assetApiErrorResponse,
+  assetErrorResponse,
   assetJsonResponse,
   listAssets,
   uploadAsset,
 } from "../../../lib/asset-api.ts";
+import { BillingError, requireBillingReady } from "../../../lib/billing.ts";
 import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
@@ -44,8 +46,16 @@ export async function POST(request: Request) {
   }
 
   try {
+    await requireBillingReady(access.context);
     return assetJsonResponse(await uploadAsset(access.context, request), { status: 201 });
   } catch (error) {
+    if (error instanceof BillingError) {
+      return assetErrorResponse(
+        error.status === 402 ? 403 : error.status,
+        error.code === "billing_required" ? "limit_exceeded" : error.code,
+        error.message
+      );
+    }
     return assetApiErrorResponse(error);
   }
 }
