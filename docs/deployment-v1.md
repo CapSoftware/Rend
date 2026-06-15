@@ -12,6 +12,8 @@ manifest.
 Public V1 billing uses Autumn; see
 [`docs/billing-autumn-v1.md`](billing-autumn-v1.md) for the customer mapping,
 feature IDs, failure policy, and usage tracking model.
+Run the public launch gate before deploy or promotion; see
+[`docs/launch-gate-v1.md`](launch-gate-v1.md).
 
 ## Service Topology
 
