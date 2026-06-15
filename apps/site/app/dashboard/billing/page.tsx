@@ -19,6 +19,10 @@ export const metadata: Metadata = {
   },
 };
 
+type BillingPageProps = {
+  searchParams?: Promise<{ billing_error?: string | string[] }>;
+};
+
 function formatNumber(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value)) return "-";
   return new Intl.NumberFormat("en-US").format(value);
@@ -54,8 +58,34 @@ function balanceLabel(featureId: string) {
   return featureId;
 }
 
-export default async function BillingPage() {
+function firstParam(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function billingActionErrorMessage(code: string | undefined) {
+  if (!code) return "";
+  if (code === "billing_checkout_mode_mismatch") {
+    return "Checkout is not configured for this environment. Check the Autumn and Stripe mode, then try again.";
+  }
+  if (code === "billing_checkout_disabled") {
+    return "External checkout is disabled for this environment. Local plan activation should complete without Stripe.";
+  }
+  if (code === "billing_invalid_response") {
+    return "Billing returned an unexpected checkout response. Check the Autumn checkout configuration.";
+  }
+  if (code === "billing_provider_rejected_request") {
+    return "Billing rejected the plan activation request. Check the plan configuration in Autumn.";
+  }
+  if (code === "invalid_plan") {
+    return "The selected plan is not available.";
+  }
+  return "Plan activation could not be started. Check billing configuration and try again.";
+}
+
+export default async function BillingPage({ searchParams }: BillingPageProps) {
   const access = await requireDashboardAccess("/dashboard/billing");
+  const params = searchParams ? await searchParams : {};
+  const billingActionError = billingActionErrorMessage(firstParam(params.billing_error));
   const billing = await billingOverview(access);
   const dashboardState = dashboardStateFromBilling(billingReadinessFromOverview(billing));
   const returnUrl = "/dashboard/billing";
@@ -90,6 +120,12 @@ export default async function BillingPage() {
         {billing.error ? (
           <section className="app-callout app-callout-error">
             <span>{billing.error}</span>
+          </section>
+        ) : null}
+
+        {billingActionError ? (
+          <section className="app-callout app-callout-error">
+            <span>{billingActionError}</span>
           </section>
         ) : null}
 
