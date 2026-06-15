@@ -1,7 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { billingFeatureIds, billingOverview, type BillingBalance } from "../../../lib/billing.ts";
+import {
+  billingFeatureIds,
+  billingOverview,
+  billingReadinessFromOverview,
+  type BillingBalance,
+} from "../../../lib/billing.ts";
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
+import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +57,7 @@ function balanceLabel(featureId: string) {
 export default async function BillingPage() {
   const access = await requireDashboardAccess("/dashboard/billing");
   const billing = await billingOverview(access);
+  const dashboardState = dashboardStateFromBilling(billingReadinessFromOverview(billing));
   const returnUrl = "/dashboard/billing";
 
   return (
@@ -85,6 +92,17 @@ export default async function BillingPage() {
             <span>{billing.error}</span>
           </section>
         ) : null}
+
+        <section
+          className={`app-callout ${
+            dashboardState.status === "ready_to_upload" ? "app-callout-done" : "app-callout-error"
+          }`}
+        >
+          <div>
+            <strong>{dashboardState.title}</strong>
+            <span>{dashboardState.message}</span>
+          </div>
+        </section>
 
         <section className="app-panel">
           <div className="app-panel-title-row">
