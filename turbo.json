@@ -10,21 +10,15 @@
     "NODE_ENV",
     "AUTH_SECRET",
     "AUTUMN_*",
+    "AWS_*",
+    "CLICKHOUSE_*",
     "DATABASE_URL",
+    "OBJECT_STORE_*",
     "REDIS_URL",
     "BETTER_AUTH_*",
-    "REND_API_BASE_URL",
-    "REND_AUTUMN_*",
-    "REND_AUTH_*",
-    "REND_BILLING_*",
-    "REND_ENV",
-    "REND_ENV_PROFILE",
-    "REND_OPERATOR_EMAIL_ALLOWLIST",
-    "REND_SELF_SERVE_SIGNUP_ENABLED",
-    "REND_SITE_BASE_URL",
-    "REND_SITE_INTERNAL_TOKEN",
-    "REND_SITE_MAX_UPLOAD_BYTES",
-    "RESEND_API_KEY"
+    "REND_*",
+    "RESEND_*",
+    "S3_*"
   ],
   "tasks": {
     "build": {
