@@ -116,6 +116,9 @@ test("common control-plane errors match the public OpenAPI schemas", () => {
   assertMatchesResponseSchema(spec, "/v1/assets/{assetId}", "delete", 403, {
     error: "organization is suspended",
   });
+  assertMatchesResponseSchema(spec, "/v1/videos", "post", 403, {
+    error: "limit_exceeded",
+  });
   assertMatchesResponseSchema(spec, "/v1/assets/{assetId}", "get", 404, {
     error: "asset not found",
   });
