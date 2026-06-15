@@ -9,6 +9,9 @@ operational runbook and production-style examples in
 Use the image release workflow in [`docs/release-images-v1.md`](release-images-v1.md)
 to build production images and deploy immutable digest refs from the release
 manifest.
+Public V1 billing uses Autumn; see
+[`docs/billing-autumn-v1.md`](billing-autumn-v1.md) for the customer mapping,
+feature IDs, failure policy, and usage tracking model.
 
 ## Service Topology
 
@@ -102,6 +105,23 @@ API:
 - `REND_API_BIND_ADDR`
 - `REND_API_AUTO_MIGRATE`
 - `REND_SITE_INTERNAL_TOKEN`
+- `REND_BILLING_MODE=local|autumn` (`autumn` is required in production)
+- `AUTUMN_SECRET_KEY` when `REND_BILLING_MODE=autumn`
+- `AUTUMN_API_URL`
+- `AUTUMN_API_VERSION`
+- `REND_BILLING_FEATURE_DELIVERY_720P`
+- `REND_BILLING_FEATURE_DELIVERY_1080P`
+- `REND_BILLING_FEATURE_DELIVERY_2K`
+- `REND_BILLING_FEATURE_DELIVERY_4K`
+- `REND_BILLING_FEATURE_STORAGE_720P`
+- `REND_BILLING_FEATURE_STORAGE_1080P`
+- `REND_BILLING_FEATURE_STORAGE_2K`
+- `REND_BILLING_FEATURE_STORAGE_4K`
+- `REND_BILLING_ENTITLEMENT_FAILURE_POLICY`
+- `REND_BILLING_DELIVERY_SYNC_LAG_SECS`
+- `REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS`
+- `REND_BILLING_STORAGE_SYNC_LAG_SECS`
+- `REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS`
 - `REND_PLAYBACK_BASE_URL`
 - `REND_PLAYBACK_COOKIE_DOMAIN`
 - `REND_MAX_UPLOAD_BYTES`
@@ -124,7 +144,7 @@ HTTPS.
 Worker:
 
 - all API dependency vars used for Postgres, Redis, S3, ClickHouse, playback
-  signing, and edge internal auth
+  signing, edge internal auth, and Autumn billing
 - `REND_API_AUTO_MIGRATE=false` after the API migration step is deployed
 - `REND_MEDIA_WORKER_ID`
 - `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`
