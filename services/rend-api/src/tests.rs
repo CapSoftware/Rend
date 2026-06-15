@@ -120,6 +120,7 @@ fn test_config() -> ApiConfig {
             default_analytics_window_secs: 24 * 60 * 60,
             max_analytics_window_secs: 7 * 24 * 60 * 60,
         },
+        billing: billing::BillingConfig::from_env(RendEnv::Local).unwrap(),
         media_processing: media::MediaProcessingConfig {
             ffmpeg_path: "ffmpeg".to_owned(),
             ffprobe_path: "ffprobe".to_owned(),

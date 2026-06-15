@@ -46,6 +46,7 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod billing;
 mod events;
 mod jobs;
 mod media;
@@ -98,6 +99,7 @@ struct ApiConfig {
     edge_warm: EdgeWarmConfig,
     edge_purge: EdgePurgeConfig,
     playback_telemetry: telemetry::TelemetryConfig,
+    billing: billing::BillingConfig,
     media_processing: media::MediaProcessingConfig,
     media_job_max_attempts: i32,
     inline_media_processing: bool,
@@ -212,6 +214,7 @@ impl ApiConfig {
         )?;
         let internal_telemetry_token = env_string("REND_INTERNAL_TELEMETRY_TOKEN", "");
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
+        let billing = billing::BillingConfig::from_env(rend_env)?;
 
         for (key, value) in [
             ("DATABASE_URL", &database_url),
@@ -321,6 +324,7 @@ impl ApiConfig {
                 internal_token: edge_internal_token,
             },
             playback_telemetry,
+            billing,
             media_processing: media::MediaProcessingConfig {
                 ffmpeg_path: env_string("REND_FFMPEG_PATH", "ffmpeg"),
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
@@ -953,6 +957,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         )
         .route("/assets/{asset_id}/suspend", post(suspend_asset))
         .route("/assets/{asset_id}/restore", post(restore_asset))
+        .route(
+            "/billing/delivery-sync",
+            post(billing::sync_delivery_usage_handler),
+        )
         .route_layer(DefaultBodyLimit::max(8 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1405,6 +1413,9 @@ async fn delete_asset_inner(
     let asset_id = normalize_asset_id(&asset_id)?;
     ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
     let already_deleted = mark_asset_deleted(&state.db, &auth.organization_id, &asset_id).await?;
+    if !already_deleted {
+        billing::track_asset_delete(&state, &auth.organization_id, &asset_id).await;
+    }
     let origin_object_keys =
         list_asset_origin_object_keys(&state.s3, &state.config.s3_bucket, &asset_id).await?;
     let origin_objects_deleted = delete_asset_origin_objects(
@@ -2011,6 +2022,10 @@ async fn mark_asset_deleted(
     )
     .await
     .map_err(AppError::internal)?;
+
+    billing::close_asset_storage_span(&mut tx, asset_id)
+        .await
+        .map_err(AppError::internal)?;
 
     sqlx::query(
         "
@@ -2968,36 +2983,62 @@ async fn create_video_inner(
     require_scope(&auth, ApiScope::Upload)?;
     let content_type = request_content_type(&headers);
     let content_length = request_content_length(&headers, state.config.max_upload_bytes)?;
+    let billing_content_length = content_length
+        .map(u64::try_from)
+        .transpose()
+        .map_err(AppError::internal)?;
     ensure_org_not_suspended(&state.db, &auth.organization_id).await?;
-    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
-    let asset_id: String = sqlx::query_scalar(
-        "
-        INSERT INTO rend.assets (organization_id, source_state, playable_state)
-        VALUES ($1::uuid, 'uploading', 'not_playable')
-        RETURNING id::text
-        ",
-    )
-    .bind(&auth.organization_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
-    events::insert_asset_event(
-        &mut tx,
+    let asset_id: String = sqlx::query_scalar("SELECT gen_random_uuid()::text")
+        .fetch_one(&state.db)
+        .await
+        .map_err(AppError::internal)?;
+    let billing_reservation = billing::reserve_upload(
+        &state,
+        &auth.organization_id,
         &asset_id,
-        events::EVENT_ASSET_CREATED,
-        events::asset_created_metadata("uploading", "not_playable"),
+        billing_content_length,
     )
-    .await
-    .map_err(AppError::internal)?;
-    events::insert_asset_event(
-        &mut tx,
-        &asset_id,
-        events::EVENT_SOURCE_UPLOAD_STARTED,
-        events::source_upload_started_metadata(&content_type, content_length),
-    )
-    .await
-    .map_err(AppError::internal)?;
-    tx.commit().await.map_err(AppError::internal)?;
+    .await?;
+    let create_asset_result = async {
+        let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+        sqlx::query(
+            "
+            INSERT INTO rend.assets (id, organization_id, source_state, playable_state)
+            VALUES ($1::uuid, $2::uuid, 'uploading', 'not_playable')
+            ",
+        )
+        .bind(&asset_id)
+        .bind(&auth.organization_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "failed to insert uploading asset");
+            AppError::internal("failed to insert uploading asset")
+        })?;
+        events::insert_asset_event(
+            &mut tx,
+            &asset_id,
+            events::EVENT_ASSET_CREATED,
+            events::asset_created_metadata("uploading", "not_playable"),
+        )
+        .await
+        .map_err(AppError::internal)?;
+        events::insert_asset_event(
+            &mut tx,
+            &asset_id,
+            events::EVENT_SOURCE_UPLOAD_STARTED,
+            events::source_upload_started_metadata(&content_type, content_length),
+        )
+        .await
+        .map_err(AppError::internal)?;
+        tx.commit().await.map_err(AppError::internal)?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(error) = create_asset_result {
+        billing::refund_upload_reservation(&state, &billing_reservation).await;
+        return Err(error);
+    }
 
     let source_object_key = source_object_key(&asset_id);
     let byte_count = Arc::new(AtomicU64::new(0));
@@ -3016,6 +3057,7 @@ async fn create_video_inner(
 
     if let Err(error) = put_object.send().await {
         mark_asset_failed(&state, &asset_id).await;
+        billing::refund_upload_reservation(&state, &billing_reservation).await;
         if byte_count.load(Ordering::Relaxed) > state.config.max_upload_bytes
             || upload_error_is_payload_too_large(&error)
         {
@@ -3032,71 +3074,87 @@ async fn create_video_inner(
         message: "uploaded body is too large".to_owned(),
     })?;
 
-    let mut tx = state.db.begin().await.map_err(AppError::internal)?;
-    let source_artifact_id: String = sqlx::query_scalar(
-        "
-        INSERT INTO rend.artifacts (asset_id, kind, object_key, content_type, byte_size)
-        VALUES ($1::uuid, 'source', $2, $3, $4)
-        RETURNING id::text
-        ",
-    )
-    .bind(&asset_id)
-    .bind(&source_object_key)
-    .bind(&content_type)
-    .bind(byte_size)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
-
-    events::insert_asset_event(
-        &mut tx,
-        &asset_id,
-        events::EVENT_SOURCE_UPLOADED,
-        events::source_uploaded_metadata(&content_type, byte_size),
-    )
-    .await
-    .map_err(AppError::internal)?;
-
-    sqlx::query(
-        "
-        UPDATE rend.assets
-        SET source_state = 'uploaded', playable_state = 'not_playable'
-        WHERE id = $1::uuid
-        ",
-    )
-    .bind(&asset_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
-
-    if !state.config.inline_media_processing {
-        let media_job_id = jobs::enqueue_media_processing_job(
-            &mut tx,
-            &asset_id,
-            state.config.media_job_max_attempts,
+    let persist_upload_result = async {
+        let mut tx = state.db.begin().await.map_err(AppError::internal)?;
+        let source_artifact_id: String = sqlx::query_scalar(
+            "
+            INSERT INTO rend.artifacts (asset_id, kind, object_key, content_type, byte_size)
+            VALUES ($1::uuid, 'source', $2, $3, $4)
+            RETURNING id::text
+            ",
         )
+        .bind(&asset_id)
+        .bind(&source_object_key)
+        .bind(&content_type)
+        .bind(byte_size)
+        .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+
         events::insert_asset_event(
             &mut tx,
             &asset_id,
-            events::EVENT_MEDIA_PROCESSING_QUEUED,
-            events::media_processing_queued_metadata(
-                &media_job_id,
+            events::EVENT_SOURCE_UPLOADED,
+            events::source_uploaded_metadata(&content_type, byte_size),
+        )
+        .await
+        .map_err(AppError::internal)?;
+
+        sqlx::query(
+            "
+            UPDATE rend.assets
+            SET source_state = 'uploaded', playable_state = 'not_playable'
+            WHERE id = $1::uuid
+            ",
+        )
+        .bind(&asset_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+
+        if !state.config.inline_media_processing {
+            let media_job_id = jobs::enqueue_media_processing_job(
+                &mut tx,
+                &asset_id,
                 state.config.media_job_max_attempts,
-            ),
-        )
-        .await
-        .map_err(AppError::internal)?;
-        events::insert_asset_event(
-            &mut tx,
-            &asset_id,
-            events::EVENT_UPLOAD_RESPONSE_READY,
-            events::upload_response_ready_metadata("uploaded", "not_playable", byte_size),
-        )
-        .await
-        .map_err(AppError::internal)?;
+            )
+            .await
+            .map_err(AppError::internal)?;
+            events::insert_asset_event(
+                &mut tx,
+                &asset_id,
+                events::EVENT_MEDIA_PROCESSING_QUEUED,
+                events::media_processing_queued_metadata(
+                    &media_job_id,
+                    state.config.media_job_max_attempts,
+                ),
+            )
+            .await
+            .map_err(AppError::internal)?;
+            events::insert_asset_event(
+                &mut tx,
+                &asset_id,
+                events::EVENT_UPLOAD_RESPONSE_READY,
+                events::upload_response_ready_metadata("uploaded", "not_playable", byte_size),
+            )
+            .await
+            .map_err(AppError::internal)?;
+        }
+
         tx.commit().await.map_err(AppError::internal)?;
+        Ok::<(String, bool), AppError>((source_artifact_id, !state.config.inline_media_processing))
+    }
+    .await;
+    let (source_artifact_id, queued_for_async_processing) = match persist_upload_result {
+        Ok(value) => value,
+        Err(error) => {
+            mark_asset_failed(&state, &asset_id).await;
+            billing::refund_upload_reservation(&state, &billing_reservation).await;
+            return Err(error);
+        }
+    };
+    if queued_for_async_processing {
+        billing::reconcile_upload_reservation(&state, &billing_reservation, byte_size as u64).await;
 
         return Ok(CreateVideoResponse {
             asset_id,
@@ -3108,8 +3166,6 @@ async fn create_video_inner(
             playback_url: None,
         });
     }
-
-    tx.commit().await.map_err(AppError::internal)?;
 
     events::insert_asset_event_pool(
         &state.db,
@@ -3162,6 +3218,7 @@ async fn create_video_inner(
         &media_outcome.playback_artifact_paths,
     )
     .await;
+    billing::schedule_delivery_usage_sync(state.clone());
 
     let now = current_unix_timestamp().map_err(AppError::internal)?;
     let playback_url = playback_url(
@@ -3181,6 +3238,8 @@ async fn create_video_inner(
     )
     .await
     .map_err(AppError::internal)?;
+
+    billing::reconcile_upload_reservation(&state, &billing_reservation, byte_size as u64).await;
 
     Ok(CreateVideoResponse {
         asset_id: asset_id.clone(),
@@ -3290,6 +3349,7 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
         &outcome.playback_artifact_paths,
     )
     .await;
+    billing::schedule_delivery_usage_sync(Arc::new(state.clone()));
 
     Ok(())
 }
@@ -4751,6 +4811,13 @@ impl AppError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+        }
+    }
+
+    fn limit_exceeded() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "limit_exceeded".to_owned(),
         }
     }
 
