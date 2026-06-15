@@ -137,6 +137,7 @@ export default function AssetsClient({
         </a>
         <nav>
           <Link href="/dashboard/api-keys">API keys</Link>
+          <Link href="/dashboard/billing">Billing</Link>
           <button onClick={refreshAssets} disabled={refreshing} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>

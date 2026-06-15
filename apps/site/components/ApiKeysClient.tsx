@@ -132,6 +132,7 @@ export default function ApiKeysClient({
         <nav>
           <Link href="/dashboard/assets">Assets</Link>
           <Link href="/dashboard/api-keys">API keys</Link>
+          <Link href="/dashboard/billing">Billing</Link>
           <button onClick={signOut} type="button">
             Sign out
           </button>
