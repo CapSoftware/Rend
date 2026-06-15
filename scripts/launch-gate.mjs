@@ -657,6 +657,15 @@ async function validateLoadedLaunchEnv(context) {
         if (!dashboardAuthConfigured(env)) {
           errors.push("production dashboard auth is not configured with secure Better Auth settings");
         }
+        if (!truthy(envString(env, "REND_SELF_SERVE_SIGNUP_ENABLED"))) {
+          errors.push("production-check requires REND_SELF_SERVE_SIGNUP_ENABLED=true");
+        }
+        if (truthy(envString(env, "REND_AUTH_EMAIL_DISABLED"))) {
+          errors.push("production-check requires REND_AUTH_EMAIL_DISABLED=false");
+        }
+        if (!envString(env, "RESEND_API_KEY") || !envString(env, "REND_AUTH_EMAIL_FROM")) {
+          errors.push("production-check requires Resend auth email configuration");
+        }
         if (!envString(env, "REND_OPERATOR_EMAIL_ALLOWLIST")) {
           errors.push("production operator access requires REND_OPERATOR_EMAIL_ALLOWLIST");
         }
@@ -685,6 +694,11 @@ async function validateLoadedLaunchEnv(context) {
             dev_only_auth_disabled_in_production: mode === "production-check" ? !envString(env, "REND_DEV_API_KEY") : true,
             operator_access_gated: mode === "production-check" ? Boolean(envString(env, "REND_OPERATOR_EMAIL_ALLOWLIST")) : true,
             dashboard_auth_configured: mode === "production-check" ? dashboardAuthConfigured(env) : true,
+            self_serve_signup_enabled: mode === "production-check" ? truthy(envString(env, "REND_SELF_SERVE_SIGNUP_ENABLED")) : true,
+            resend_configured:
+              mode === "production-check"
+                ? Boolean(envString(env, "RESEND_API_KEY") && envString(env, "REND_AUTH_EMAIL_FROM"))
+                : true,
           },
           errors,
           warnings,
@@ -704,11 +718,11 @@ function dashboardAuthConfigured(env) {
   if (!production) return true;
   const secret = envString(env, "BETTER_AUTH_SECRET") || envString(env, "AUTH_SECRET");
   const baseUrl = envString(env, "BETTER_AUTH_URL") || envString(env, "REND_AUTH_BASE_URL");
+  if (!truthy(envString(env, "REND_SELF_SERVE_SIGNUP_ENABLED"))) return false;
   if (!secret || secret === "local-better-auth-secret-only-for-rend-development") return false;
   if (!baseUrl || isLocalUrl(baseUrl)) return false;
-  if (!truthy(envString(env, "REND_AUTH_EMAIL_DISABLED"))) {
-    if (!envString(env, "RESEND_API_KEY") || !envString(env, "REND_AUTH_EMAIL_FROM")) return false;
-  }
+  if (truthy(envString(env, "REND_AUTH_EMAIL_DISABLED"))) return false;
+  if (!envString(env, "RESEND_API_KEY") || !envString(env, "REND_AUTH_EMAIL_FROM")) return false;
   return true;
 }
 
@@ -978,6 +992,53 @@ async function validateAutumnCatalogParity(context) {
   const recorded = context.steps.at(-1);
   if (recorded?.id === "autumn-catalog-parity") {
     recorded.artifacts = [...(recorded.artifacts || []), displayPath(artifactPath)];
+  }
+  return step;
+}
+
+async function validateSelfServeReadiness(context) {
+  if (context.args.mode !== "production-check") {
+    return skipStep(
+      context,
+      "self-serve-readiness",
+      "release",
+      "public V1 self-serve readiness artifact",
+      "skipped outside production-check",
+    );
+  }
+
+  const artifactPath = path.join(context.outputDir, "self-serve-readiness.json");
+  const commandArgs = [
+    "scripts/self-serve-readiness.mjs",
+    "--env-file",
+    context.args.envFile || ".env.production.local",
+    "--dry-run-artifact",
+    path.join(".rend", "launch", "production-dry-run-latest.json"),
+    "--launch-gate-artifact",
+    path.join(".rend", "launch", "launch-readiness-latest.json"),
+  ];
+  const step = await runCommandStep(
+    context,
+    command(
+      "self-serve-readiness",
+      "release",
+      "public V1 self-serve readiness artifact",
+      "node",
+      commandArgs,
+      { timeoutMs: 120_000 },
+    ),
+  );
+  const latest = path.join(launchDir, "self-serve-readiness-latest.json");
+  const recorded = context.steps.at(-1);
+  if (recorded?.id === "self-serve-readiness") {
+    recorded.artifacts = [
+      ...(recorded.artifacts || []),
+      displayPath(latest),
+      displayPath(artifactPath),
+    ];
+  }
+  if (existsSync(latest)) {
+    await copyFile(latest, artifactPath).catch(() => undefined);
   }
   return step;
 }
@@ -1394,6 +1455,7 @@ function buildSteps(context) {
     () => validateLoadedLaunchEnv(context),
     () => validateAutumnCatalog(context),
     () => validateAutumnCatalogParity(context),
+    () => validateSelfServeReadiness(context),
     () =>
       runCommandStep(context, command("openapi:check", "openapi", "OpenAPI check", "bun", ["run", "openapi:check"], { timeoutMs: 180_000 })),
     () =>
