@@ -13,7 +13,7 @@ export const docsNavItems: DocsNavItem[] = [
   {
     href: "#quickstart",
     title: "Quickstart",
-    description: "Create a key, upload, wait for playable, embed, and delete.",
+    description: "Sign up, choose a plan, create a key, upload, embed, and delete.",
   },
   {
     href: "#sdk-guide",
@@ -95,6 +95,9 @@ export const docsCommandItems: DocsCommandItem[] = [
 export const QUICKSTART_SDK_CODE = `import { readFile } from "node:fs/promises";
 import { RendClient } from "@rend/sdk";
 
+// 1. Sign in at https://rend.so/login with an email code.
+// 2. Choose a plan in the dashboard.
+// 3. Create an API key with upload, read, delete, and analytics scopes.
 const client = new RendClient({
   apiKey: process.env.REND_API_KEY,
 });
@@ -155,6 +158,8 @@ try {
 export const CURL_UPLOAD_CODE = `export REND_API_KEY="rend_live_..."
 export REND_API_BASE_URL="https://api.rend.so"
 export REND_SITE_BASE_URL="https://rend.so"
+
+# First: sign in at https://rend.so/login, choose a plan, and create an API key.
 
 curl -fsS -X POST "$REND_API_BASE_URL/v1/videos" \\
   -H "authorization: Bearer $REND_API_KEY" \\

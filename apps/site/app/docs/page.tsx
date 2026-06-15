@@ -130,8 +130,10 @@ export default function DocsPage() {
           <article className="docs-content">
             <section id="quickstart" aria-labelledby="quickstart-title">
               <p className="docs-section-label">Quickstart</p>
-              <h2 id="quickstart-title">Create a key, upload, embed, delete</h2>
+              <h2 id="quickstart-title">Sign up, upload, embed, delete</h2>
               <ol className="docs-steps">
+                <li>Sign in at <code>/login</code> with an email code. Rend creates your workspace automatically.</li>
+                <li>Choose a plan from the Billing page. Billable uploads and API-key creation stay disabled until billing is ready.</li>
                 <li>Create an API key from the Rend dashboard with <code>upload</code>, <code>read</code>, <code>delete</code>, and <code>analytics</code> scopes.</li>
                 <li>Upload a video with <code>POST /v1/videos</code> or <code>client.uploadAsset</code>.</li>
                 <li>Poll the asset until <code>playable_state</code> is <code>opener_ready</code> or <code>hls_ready</code>.</li>
@@ -227,8 +229,10 @@ export default function DocsPage() {
               <h2 id="billing-usage-title">Autumn billing and usage limits</h2>
               <p>
                 Hosted Rend uses Autumn as the source of truth for plans, credits, balances,
-                checkout, and the billing portal. Uploads can return <code>limit_exceeded</code>
-                before the source body is accepted when Autumn denies the organization billing state.
+                checkout, and the billing portal. New workspaces are created on first email-OTP
+                sign-in and synced to Autumn by organization ID. API-key creation and uploads can
+                return <code>billing_required</code> or <code>limit_exceeded</code> until a plan is active
+                and within limits; upload denials happen before the source body is accepted.
               </p>
               <ul>
                 <li>Customer-facing delivery usage is tracked as delivered video seconds by <code>720p</code>, <code>1080p</code>, <code>2K</code>, and <code>4K</code> tier.</li>
@@ -250,6 +254,16 @@ export default function DocsPage() {
                   </tr>
                 </thead>
                 <tbody>
+                  <tr>
+                    <td>billing_required</td>
+                    <td>Dashboard API key creation returns 402</td>
+                    <td>The workspace needs an active plan before creating API keys.</td>
+                  </tr>
+                  <tr>
+                    <td>limit_exceeded</td>
+                    <td><code>POST /v1/videos</code> returns 403</td>
+                    <td>Billing is missing, inactive, or out of plan balance before the upload body is accepted.</td>
+                  </tr>
                   <tr>
                     <td>not_playable</td>
                     <td><code>GET /api/player/{"{assetId}"}</code> returns 409</td>
@@ -295,8 +309,11 @@ export default function DocsPage() {
               <h2 id="production-notes-title">Production profile notes</h2>
               <ul>
                 <li>Use <code>REND_ENV=production</code> for hosted production services.</li>
+                <li>Set <code>REND_SELF_SERVE_SIGNUP_ENABLED=true</code> intentionally for public self-serve signup.</li>
+                <li>Configure Better Auth with secure production secrets and Resend email delivery.</li>
                 <li>Keep API keys and provider credentials out of <code>NEXT_PUBLIC_*</code> values.</li>
                 <li>Set <code>REND_API_BASE_URL</code> for server-side API calls and <code>REND_SITE_BASE_URL</code> for playback bootstrap clients.</li>
+                <li>Run <code>bun run launch:self-serve-readiness</code> and <code>bun run launch:gate -- --mode production-check</code> before public V1 launch.</li>
                 <li>Run <code>bun run openapi:check</code> after changing the public contract or SDK generator.</li>
               </ul>
             </section>
