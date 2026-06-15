@@ -33,3 +33,12 @@ bun run sdk:integration-smoke
 The smoke creates or uses a local Rend API key, uploads the synthetic fixture,
 checks playback bootstrap and embed paths, fetches analytics, deletes the asset,
 and verifies playback is unavailable after deletion.
+
+Billing and usage limits:
+
+Uploads can fail with `RendApiError` status `403` and response body
+`{ "error": "limit_exceeded" }` when Autumn denies the organization's billing
+state or usage balance. Public V1 usage is metered as delivery seconds and
+storage second-months by 720p/1080p/2K/4K resolution tier; upload/source bytes
+are only local request-size safeguards. Treat this as a plan/usage state, not as
+a retryable transport failure.
