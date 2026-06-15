@@ -1,6 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { billingReadinessFromOverview, type BillingOverview } from "./billing.ts";
+import {
+  BillingError,
+  billingReadinessFromOverview,
+  checkoutRedirectUrlFromAutumnResponse,
+  type BillingOverview,
+} from "./billing.ts";
+
+const ENV_KEYS = [
+  "REND_ENV",
+  "REND_ENV_PROFILE",
+  "NODE_ENV",
+  "REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT",
+  "REND_ALLOW_LIVE_CHECKOUT_REDIRECT",
+];
+
+async function withEnv<T>(values: Record<string, string | undefined>, run: () => T | Promise<T>) {
+  const previous = new Map<string, string | undefined>();
+  for (const key of ENV_KEYS) previous.set(key, process.env[key]);
+  try {
+    for (const key of ENV_KEYS) {
+      const value = values[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
 
 function overview(extra: Partial<BillingOverview> = {}): BillingOverview {
   return {
@@ -58,4 +95,57 @@ test("local billing is always ready", () => {
   );
 
   assert.equal(readiness.status, "ready");
+});
+
+test("checkout redirect guard rejects local test checkout URLs by default", async () => {
+  await withEnv({ REND_ENV: "local" }, () => {
+    assert.throws(
+      () =>
+        checkoutRedirectUrlFromAutumnResponse({
+          payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
+        }),
+      (error) => error instanceof BillingError && error.code === "billing_checkout_disabled"
+    );
+  });
+});
+
+test("checkout redirect guard can opt into local test checkout URLs", async () => {
+  await withEnv({ REND_ENV: "local", REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT: "true" }, () => {
+    assert.equal(
+      checkoutRedirectUrlFromAutumnResponse({
+        payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
+      }),
+      "https://checkout.stripe.com/c/pay/cs_test_123#fid"
+    );
+  });
+});
+
+test("checkout redirect guard rejects test checkout URLs in production", async () => {
+  await withEnv({ REND_ENV: "production" }, () => {
+    assert.throws(
+      () =>
+        checkoutRedirectUrlFromAutumnResponse({
+          payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
+        }),
+      (error) => error instanceof BillingError && error.code === "billing_checkout_mode_mismatch"
+    );
+  });
+});
+
+test("checkout redirect guard rejects live checkout URLs outside production by default", async () => {
+  await withEnv({ REND_ENV: "local" }, () => {
+    assert.throws(
+      () =>
+        checkoutRedirectUrlFromAutumnResponse({
+          payment_url: "https://checkout.stripe.com/c/pay/cs_live_123#fid",
+        }),
+      (error) => error instanceof BillingError && error.code === "billing_checkout_disabled"
+    );
+  });
+});
+
+test("checkout redirect guard treats null payment URL as no redirect required", async () => {
+  await withEnv({ REND_ENV: "production" }, () => {
+    assert.equal(checkoutRedirectUrlFromAutumnResponse({ payment_url: null }), null);
+  });
 });
