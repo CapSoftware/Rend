@@ -189,19 +189,28 @@ async function upstreamError(upstream: Response): Promise<AssetApiError> {
         : "Rend API request failed";
 
   let message = fallback;
+  let upstreamCode: string | undefined;
   try {
     const text = (await upstream.text()).slice(0, MAX_ERROR_BODY_BYTES);
     const parsed = JSON.parse(text) as unknown;
     if (isRecord(parsed)) {
+      upstreamCode = safeState(parsed.error);
       message = safeErrorMessage(parsed.message ?? parsed.error, fallback);
     }
   } catch {
     message = fallback;
   }
 
+  const publicError =
+    publicStatus === 413
+      ? "upload_too_large"
+      : publicStatus === 403 && upstreamCode === "limit_exceeded"
+        ? "limit_exceeded"
+        : "rend_api_rejected_request";
+
   return new AssetApiError(publicStatus, {
     status: "error",
-    error: publicStatus === 413 ? "upload_too_large" : "rend_api_rejected_request",
+    error: publicError,
     message,
   });
 }
