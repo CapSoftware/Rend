@@ -4,6 +4,7 @@ import { apiKeys } from "./db/schema.ts";
 import { getSiteDb } from "./server-db.ts";
 import type { DashboardAccessContext } from "./dashboard-auth.ts";
 import { API_KEY_SCOPES, type ApiKeyRecord, type ApiKeyScope } from "./api-key-types.ts";
+import { ensureBillingCustomer, BillingError } from "./billing.ts";
 
 export class ApiKeyError extends Error {
   status: number;
@@ -118,6 +119,14 @@ export async function createApiKey(
 ) {
   const name = normalizeName(input.name);
   const scopes = normalizeApiKeyScopes(input.scopes);
+  try {
+    await ensureBillingCustomer(context);
+  } catch (error) {
+    if (error instanceof BillingError) {
+      throw new ApiKeyError(error.status, error.code, error.message);
+    }
+    throw error;
+  }
   const generated = generateApiKey();
   const [row] = await getSiteDb()
     .insert(apiKeys)
