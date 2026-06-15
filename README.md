@@ -108,6 +108,15 @@ bun run openapi:sdk-test
 The generated TypeScript client lives at [`packages/sdk/`](./packages/sdk) and
 is generated from the single OpenAPI source file under `docs/openapi/`.
 
+Before public V1 deploy or promotion, run the launch gate:
+
+```bash
+bun run launch:gate
+```
+
+The checklist, modes, artifacts, and failure triage live in
+[`docs/launch-gate-v1.md`](./docs/launch-gate-v1.md).
+
 Root env files are loaded by explicit profile through
 `scripts/with-root-env.mjs` and `crates/rend-config`.
 Copy `.env.local.example` to `.env.local` for local-only secrets and run
