@@ -3,6 +3,10 @@ import { ensureLocalAuthSeed } from "./auth-seed.ts";
 import { getAuth } from "./auth.ts";
 import { ensureBillingCustomerSoft } from "./billing.ts";
 import { member, organization } from "./db/schema.ts";
+import {
+  legalAssentFromHeaders,
+  type LegalAssent,
+} from "./legal-assent.ts";
 import { getSiteDb } from "./server-db.ts";
 
 const LOCAL_AUTH_SECRET = "local-better-auth-secret-only-for-rend-development";
@@ -109,7 +113,7 @@ function defaultOrganizationName(email: string) {
   return `${localPart} workspace`;
 }
 
-async function provisionDefaultOrganization(userId: string, userEmail: string) {
+async function provisionDefaultOrganization(userId: string, userEmail: string, legalAssent: LegalAssent) {
   const db = getSiteDb();
   const now = new Date();
   const slug = defaultOrganizationSlug(userId);
@@ -120,7 +124,17 @@ async function provisionDefaultOrganization(userId: string, userEmail: string) {
     .values({
       name,
       slug,
-      metadata: { provisioned: "email-otp-signup" },
+      metadata: {
+        legal_assent: {
+          accepted_at: legalAssent.acceptedAt,
+          privacy_version: legalAssent.version,
+          source: "login_email_otp",
+          terms_version: legalAssent.version,
+          user_email: userEmail,
+          user_id: userId,
+        },
+        provisioned: "email-otp-signup",
+      },
       created_at: now,
       updated_at: now,
     })
@@ -223,7 +237,10 @@ export async function dashboardAccessFromHeaders(headers: Headers): Promise<Dash
   if (!row) {
     if (selectedOrgId) return { ok: false, reason: "forbidden" };
 
-    const provisioned = await provisionDefaultOrganization(userId, userEmail);
+    const legalAssent = legalAssentFromHeaders(headers, userEmail);
+    if (!legalAssent) return { ok: false, reason: "unauthorized" };
+
+    const provisioned = await provisionDefaultOrganization(userId, userEmail, legalAssent);
     if (!provisioned) return { ok: false, reason: "unauthorized" };
 
     const context: DashboardAccessContext = {
