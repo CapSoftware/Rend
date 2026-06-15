@@ -49,6 +49,20 @@ mutating live/API smoke by default. Only pass `--allow-live-billing-mutation`
 when an operator intentionally wants to call Autumn `customers.get_or_create`
 against the configured production account.
 
+Public self-serve readiness has its own artifact command:
+
+```sh
+bun run launch:self-serve-readiness
+```
+
+For final public V1 signoff, run it after the live dry-run and require both
+artifacts:
+
+```sh
+bun run launch:production-dry-run -- --allow-production-mutation --acknowledge-real-charge
+bun run launch:self-serve-readiness -- --require-dry-run --require-launch-gate
+```
+
 ## Required Checks
 
 The gate reports explicit `pass`, `warn`, or `fail` status for each group:
@@ -65,7 +79,8 @@ The gate reports explicit `pass`, `warn`, or `fail` status for each group:
 - Docker: build, up, and smoke.
 - playback: production readiness gate.
 - docs: public docs, `llms.txt`, public OpenAPI/static leak scan.
-- release: release image manifest validation or dry run when configured.
+- release: public V1 self-serve readiness artifact, plus release image manifest
+  validation or dry run when configured.
 
 Release image validation is opt-in:
 
@@ -81,6 +96,10 @@ Each run writes:
 - `.rend/launch/launch-readiness-<run-id>.json`
 - `.rend/launch/launch-readiness-latest.json`
 - `.rend/launch/<run-id>/logs/<step>.log`
+- `.rend/launch/self-serve-readiness-<run-id>.json` when
+  `launch:self-serve-readiness` runs
+- `.rend/launch/production-dry-run-<run-id>.json` when the live self-serve
+  dry-run runs
 
 The JSON is intended for both humans and agents. Every failed step includes the
 redacted command log path or artifact path needed for triage.
@@ -100,8 +119,9 @@ Common failures:
 - `env:local`: copy `.env.local.example` to `.env.local`, keep
   `REND_ENV=local`, and avoid production provider URLs or production secrets.
 - `production-env-validation`: replace placeholders, remove `REND_DEV_API_KEY`,
-  set secure Better Auth config, require `REND_BILLING_MODE=autumn`, and set an
-  operator email allowlist.
+  set `REND_SELF_SERVE_SIGNUP_ENABLED=true`, set secure Better Auth and Resend
+  config, require `REND_BILLING_MODE=autumn`, and set an operator email
+  allowlist.
 - `autumn-catalog`: run the sandbox setup helper or fix the configured plan,
   usage-credit feature, and meter feature IDs before re-running the gate.
 - `autumn-catalog-parity`: make production match the verified sandbox catalog in
