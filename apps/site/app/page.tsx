@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Effects from "@/components/Effects";
-import WaitlistForm from "@/components/WaitlistForm";
 
 export const metadata: Metadata = {
   alternates: {
@@ -159,10 +158,10 @@ export default function Home() {
             Docs
           </a>
           <a
-            href="#waitlist"
+            href="/login?next=%2Fdashboard%2Fassets"
             className="rounded-full bg-ink px-[18px] py-[9px] text-sm font-medium text-bg transition hover:-translate-y-px hover:shadow-[0_4px_14px_rgba(22,21,19,0.18)]"
           >
-            Join the waitlist
+            Start with email
           </a>
         </nav>
       </header>
@@ -183,7 +182,20 @@ export default function Home() {
             that plays instantly anywhere in the world. Encoding, storage, and delivery,
             all on hardware we own. And we&apos;re open source.
           </p>
-          <WaitlistForm id="waitlist" />
+          <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <a
+              href="/login?next=%2Fdashboard%2Fassets"
+              className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-bg transition hover:-translate-y-px hover:shadow-[0_4px_14px_rgba(22,21,19,0.18)]"
+            >
+              Start with email
+            </a>
+            <a
+              href="/docs"
+              className="rounded-full border border-line bg-card px-5 py-3 text-sm font-medium text-ink transition hover:-translate-y-px hover:border-ink"
+            >
+              Read the quickstart
+            </a>
+          </div>
         </section>
 
         <section
@@ -629,11 +641,16 @@ export default function Home() {
         </section>
 
         <section className="reveal mx-auto max-w-[560px] px-6 pb-20 text-center md:pb-[110px]">
-          <h2 className="mb-3.5 text-[clamp(25px,5.6vw,38px)]">Be first in line</h2>
+          <h2 className="mb-3.5 text-[clamp(25px,5.6vw,38px)]">Start in production</h2>
           <p className="mb-[30px] text-muted">
-            Rend is being built in the open. Leave your email and we will tell you the day it is ready.
+            Sign in with an email code, choose a plan, create an API key, upload a video, and embed playback from the dashboard.
           </p>
-          <WaitlistForm />
+          <a
+            href="/login?next=%2Fdashboard%2Fassets"
+            className="inline-flex rounded-full bg-ink px-5 py-3 text-sm font-medium text-bg transition hover:-translate-y-px hover:shadow-[0_4px_14px_rgba(22,21,19,0.18)]"
+          >
+            Open the dashboard
+          </a>
         </section>
       </main>
 
