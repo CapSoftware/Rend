@@ -14,26 +14,23 @@ const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const DEFAULT_PUBLIC_API_BASE_URL = "https://api.rend.so";
 const DEFAULT_PUBLIC_SITE_BASE_URL = "https://rend.so";
-const DEFAULT_PLAN_ID = "pay_as_you_go";
 const DEFAULT_INTERNAL_TEST_PLAN_ID = "internal_production_dry_run";
+const DEFAULT_PLAN_ID = DEFAULT_INTERNAL_TEST_PLAN_ID;
 const DEFAULT_FIXTURE_PATH = ".rend/launch/fixtures/production-dry-run.mp4";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_INTERVAL_MS = 2_000;
 const DEFAULT_USAGE_TIMEOUT_MS = 240_000;
-const INTERNAL_ORG_ID = "00000000-0000-4000-8000-000000000039";
-const INTERNAL_USER_ID = "00000000-0000-4000-8000-000000000040";
-const INTERNAL_ORG_NAME = "Rend Internal Production Dry Run";
-const INTERNAL_ORG_SLUG = "rend-internal-production-dry-run";
-const INTERNAL_USER_EMAIL = "internal-production-dry-run@rend.so";
-const INTERNAL_USER_NAME = "Rend Production Dry Run";
+const DEFAULT_DRY_RUN_EMAIL_DOMAIN = "rend.so";
+const SYNTHETIC_USER_NAME = "Rend Production Dry Run";
 const SECONDS_PER_BILLING_MONTH = 30 * 24 * 60 * 60;
 
 function usage() {
   return `Usage: bun scripts/production-dry-run.mjs --allow-production-mutation [options]
 
-Runs the controlled public-V1 production dry run. This command mutates live
-Rend, Autumn, and Stripe objects through Autumn, so it refuses to run without
---allow-production-mutation.
+Runs the controlled public-V1 self-serve production dry run. This command
+creates a fresh email-OTP user, lets the dashboard auto-create a workspace,
+mutates live Rend, Autumn, and Stripe objects through Autumn, and refuses to run
+without --allow-production-mutation.
 
 Options:
   --allow-production-mutation
@@ -47,10 +44,14 @@ Options:
   --site-base-url URL
       Public Rend site URL. Defaults to REND_PUBLIC_SITE_BASE_URL, BETTER_AUTH_URL, or https://rend.so.
   --plan-id PLAN
-      Autumn plan to attach. Defaults to pay_as_you_go. For no-checkout
-      verification, use the explicit internal test plan ${DEFAULT_INTERNAL_TEST_PLAN_ID}.
+      Autumn plan to attach. Defaults to the explicit internal dry-run plan
+      ${DEFAULT_INTERNAL_TEST_PLAN_ID}. Pass a public plan only when the account
+      can safely complete or simulate checkout.
   --fixture FILE
       Synthetic fixture path. Generated when missing.
+  --email-domain DOMAIN
+      Domain for the synthetic self-serve user. Defaults to
+      REND_PRODUCTION_DRY_RUN_EMAIL_DOMAIN or ${DEFAULT_DRY_RUN_EMAIL_DOMAIN}.
   --timeout-ms NUMBER
       Asset playable timeout. Defaults to ${DEFAULT_TIMEOUT_MS}.
   --usage-timeout-ms NUMBER
@@ -71,6 +72,7 @@ function parseArgs(argv) {
     siteBaseUrl: process.env.REND_PUBLIC_SITE_BASE_URL || process.env.REND_PRODUCTION_DRY_RUN_SITE_BASE_URL || "",
     planId: process.env.REND_PRODUCTION_DRY_RUN_PLAN_ID || DEFAULT_PLAN_ID,
     fixture: process.env.REND_PRODUCTION_DRY_RUN_FIXTURE || DEFAULT_FIXTURE_PATH,
+    emailDomain: process.env.REND_PRODUCTION_DRY_RUN_EMAIL_DOMAIN || DEFAULT_DRY_RUN_EMAIL_DOMAIN,
     artifact: process.env.REND_PRODUCTION_DRY_RUN_ARTIFACT || "",
     timeoutMs: positiveInteger(process.env.REND_PRODUCTION_DRY_RUN_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     intervalMs: positiveInteger(process.env.REND_PRODUCTION_DRY_RUN_INTERVAL_MS, DEFAULT_INTERVAL_MS),
@@ -97,6 +99,8 @@ function parseArgs(argv) {
     else if (arg.startsWith("--plan-id=")) args.planId = arg.slice("--plan-id=".length);
     else if (arg === "--fixture") args.fixture = next();
     else if (arg.startsWith("--fixture=")) args.fixture = arg.slice("--fixture=".length);
+    else if (arg === "--email-domain") args.emailDomain = next();
+    else if (arg.startsWith("--email-domain=")) args.emailDomain = arg.slice("--email-domain=".length);
     else if (arg === "--artifact") args.artifact = next();
     else if (arg.startsWith("--artifact=")) args.artifact = arg.slice("--artifact=".length);
     else if (arg === "--timeout-ms") args.timeoutMs = positiveInteger(next(), DEFAULT_TIMEOUT_MS);
@@ -113,6 +117,10 @@ function parseArgs(argv) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.trunc(number) : fallback;
+}
+
+function truthy(value) {
+  return ["1", "true", "yes", "on", "y"].includes(String(value || "").trim().toLowerCase());
 }
 
 function isoNow() {
@@ -158,6 +166,7 @@ function keyFingerprint(secretKey) {
 
 function redactUnsafeText(value) {
   return String(value ?? "")
+    .replace(/\bproduction-dry-run\+[a-z0-9-]+@[a-z0-9.-]+\.[a-z]{2,}\b/gi, "[redacted-synthetic-email]")
     .replace(/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9_]+/g, "[redacted-stripe-key]")
     .replace(/\bam_sk(?:_(?:live|test))?_[A-Za-z0-9_]+/g, "[redacted-autumn-key]")
     .replace(/\brend_(?:live|test)_[A-Za-z0-9_-]+/g, "[redacted-rend-api-key]")
@@ -192,6 +201,24 @@ function validateSafety(args, env) {
   }
   if (envString(env, "REND_BILLING_MODE").toLowerCase() !== "autumn") {
     errors.push("production dry run requires REND_BILLING_MODE=autumn");
+  }
+  if (!truthy(envString(env, "REND_SELF_SERVE_SIGNUP_ENABLED"))) {
+    errors.push("production dry run requires REND_SELF_SERVE_SIGNUP_ENABLED=true");
+  }
+  if (truthy(envString(env, "REND_AUTH_EMAIL_DISABLED"))) {
+    errors.push("production dry run requires REND_AUTH_EMAIL_DISABLED=false");
+  }
+  if (!envString(env, "BETTER_AUTH_SECRET") && !envString(env, "AUTH_SECRET")) {
+    errors.push("BETTER_AUTH_SECRET is required");
+  }
+  if (!envString(env, "BETTER_AUTH_URL") && !envString(env, "REND_AUTH_BASE_URL")) {
+    errors.push("BETTER_AUTH_URL or REND_AUTH_BASE_URL is required");
+  }
+  if (!envString(env, "RESEND_API_KEY") || !envString(env, "REND_AUTH_EMAIL_FROM")) {
+    errors.push("RESEND_API_KEY and REND_AUTH_EMAIL_FROM are required");
+  }
+  if (!/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(String(args.emailDomain || "").trim())) {
+    errors.push("--email-domain must be a DNS domain");
   }
   const autumnKey = envString(env, "AUTUMN_SECRET_KEY");
   if (!autumnKey) errors.push("AUTUMN_SECRET_KEY is required");
@@ -280,8 +307,8 @@ async function createDbClient(databaseUrl) {
   return client;
 }
 
-async function dbJson(context, sql) {
-  const result = await context.db.query(sql);
+async function dbJson(context, sql, params = []) {
+  const result = await context.db.query(sql, params);
   const row = result.rows[0];
   if (!row) throw new Error("database query did not return JSON");
   const value = Object.values(row)[0];
@@ -294,98 +321,144 @@ function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function hashApiKey(rawKey) {
-  return crypto.createHash("sha256").update(rawKey, "utf8").digest("hex");
+function syntheticUserEmail(context) {
+  const safeRunId = context.runId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  return `production-dry-run+${safeRunId}@${context.args.emailDomain}`;
 }
 
-function generateApiKey() {
-  return `rend_live_${crypto.randomBytes(32).toString("base64url")}`;
+async function createServerSideOtp(context, email) {
+  const otp = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+  const identifier = `sign-in-otp-${email.toLowerCase()}`;
+  const storedOtp = crypto.createHash("sha256").update(otp, "utf8").digest("base64url");
+  await context.db.query("DELETE FROM rend_auth.verification WHERE identifier = $1", [identifier]);
+  await context.db.query(
+    `
+INSERT INTO rend_auth.verification (identifier, value, expires_at, created_at, updated_at)
+VALUES ($1, $2, now() + interval '5 minutes', now(), now())
+`,
+    [identifier, `${storedOtp}:0`],
+  );
+  return otp;
 }
 
-function seedSql({ apiKeyHash, apiKeyPrefix, runIdValue }) {
+function setCookieHeaders(response) {
+  if (typeof response.headers.getSetCookie === "function") return response.headers.getSetCookie();
+  const combined = response.headers.get("set-cookie");
+  if (!combined) return [];
+  return combined.split(/,(?=\s*[^;,=\s]+=[^;,]+)/g);
+}
+
+function rememberCookies(context, response) {
+  for (const header of setCookieHeaders(response)) {
+    const [pair] = header.split(";");
+    const separator = pair.indexOf("=");
+    if (separator <= 0) continue;
+    const name = pair.slice(0, separator).trim();
+    const value = pair.slice(separator + 1).trim();
+    if (name && value) context.cookieJar.set(name, value);
+  }
+}
+
+function cookieHeader(context) {
+  return [...context.cookieJar.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+function dashboardHeaders(context, extra = {}) {
+  const cookie = cookieHeader(context);
+  return {
+    accept: "application/json",
+    ...(cookie ? { cookie } : {}),
+    ...extra,
+  };
+}
+
+async function signInWithOtp(context, email, otp) {
+  const { response, data } = await fetchJson(new URL("/api/auth/sign-in/email-otp", context.siteBaseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ email, otp, name: SYNTHETIC_USER_NAME }),
+  });
+  rememberCookies(context, response);
+  const userId = data?.user?.id;
+  if (typeof userId !== "string" || !userId) throw new Error("OTP sign-in did not return a user id");
+  context.userId = userId;
+  return {
+    user_id: userId,
+    user_email: email,
+    cookie_count: context.cookieJar.size,
+  };
+}
+
+async function assertDashboardSession(context, pathName) {
+  const response = await fetchOk(new URL(pathName, context.siteBaseUrl), {
+    headers: dashboardHeaders(context, { accept: "text/html" }),
+  });
+  const finalPath = new URL(response.url).pathname;
+  if (finalPath === "/login") throw new Error(`dashboard session redirected to login for ${pathName}`);
+  return {
+    path: pathName,
+    final_path: finalPath,
+    status: response.status,
+  };
+}
+
+function selfServeProvisioningSql() {
   return `
-WITH upsert_user AS (
-  INSERT INTO rend_auth."user" (id, name, email, email_verified, created_at, updated_at)
-  VALUES (
-    ${sqlLiteral(INTERNAL_USER_ID)}::uuid,
-    ${sqlLiteral(INTERNAL_USER_NAME)},
-    ${sqlLiteral(INTERNAL_USER_EMAIL)},
-    true,
-    now(),
-    now()
-  )
-  ON CONFLICT (id) DO UPDATE
-  SET name = EXCLUDED.name,
-      email = EXCLUDED.email,
-      email_verified = true,
-      updated_at = now()
-  RETURNING id
-),
-upsert_org AS (
-  INSERT INTO rend_auth.organization (id, name, slug, metadata, created_at, updated_at)
-  VALUES (
-    ${sqlLiteral(INTERNAL_ORG_ID)}::uuid,
-    ${sqlLiteral(INTERNAL_ORG_NAME)},
-    ${sqlLiteral(INTERNAL_ORG_SLUG)},
-    jsonb_build_object('source', 'rend-production-dry-run', 'run_id', ${sqlLiteral(runIdValue)}),
-    now(),
-    now()
-  )
-  ON CONFLICT (id) DO UPDATE
-  SET name = EXCLUDED.name,
-      slug = EXCLUDED.slug,
-      metadata = EXCLUDED.metadata,
-      updated_at = now()
-  RETURNING id
-),
-upsert_member AS (
-  INSERT INTO rend_auth.member (organization_id, user_id, role, created_at)
-  VALUES (${sqlLiteral(INTERNAL_ORG_ID)}::uuid, ${sqlLiteral(INTERNAL_USER_ID)}::uuid, 'owner', now())
-  ON CONFLICT (user_id, organization_id) DO UPDATE
-  SET role = 'owner'
-  RETURNING id
-),
-upsert_billing AS (
-  INSERT INTO rend.billing_customers (
-    organization_id,
-    autumn_customer_id,
-    billing_mode,
-    customer_synced_at,
-    customer_sync_error
-  )
-  VALUES (${sqlLiteral(INTERNAL_ORG_ID)}::uuid, ${sqlLiteral(INTERNAL_ORG_ID)}, 'autumn', now(), NULL)
-  ON CONFLICT (organization_id) DO UPDATE
-  SET autumn_customer_id = EXCLUDED.autumn_customer_id,
-      billing_mode = 'autumn',
-      customer_synced_at = now(),
-      customer_sync_error = NULL
-  RETURNING organization_id
-),
-api_key AS (
-  INSERT INTO rend.api_keys (organization_id, created_by_user_id, name, prefix, key_hash, scopes)
-  VALUES (
-    ${sqlLiteral(INTERNAL_ORG_ID)}::uuid,
-    ${sqlLiteral(INTERNAL_USER_ID)}::uuid,
-    ${sqlLiteral(`Production dry run ${runIdValue}`)},
-    ${sqlLiteral(apiKeyPrefix)},
-    ${sqlLiteral(apiKeyHash)},
-    ARRAY['upload', 'read', 'delete', 'analytics']::text[]
-  )
-  ON CONFLICT (key_hash) DO UPDATE
-  SET revoked_at = NULL,
-      scopes = EXCLUDED.scopes,
-      last_used_update_after = NULL
-  RETURNING id, prefix
-)
 SELECT json_build_object(
-  'organization_id', ${sqlLiteral(INTERNAL_ORG_ID)},
-  'organization_name', ${sqlLiteral(INTERNAL_ORG_NAME)},
-  'user_id', ${sqlLiteral(INTERNAL_USER_ID)},
-  'user_email', ${sqlLiteral(INTERNAL_USER_EMAIL)},
-  'api_key_id', (SELECT id::text FROM api_key),
-  'api_key_prefix', (SELECT prefix FROM api_key)
-)::text;
+  'user_id', user_row.id::text,
+  'user_email', user_row.email,
+  'email_verified', user_row.email_verified,
+  'organization_id', org.id::text,
+  'organization_name', org.name,
+  'organization_slug', org.slug,
+  'member_count', (
+    SELECT count(*)::int
+    FROM rend_auth.member member_count
+    WHERE member_count.user_id = user_row.id
+  ),
+  'billing_customer_count', (
+    SELECT count(*)::int
+    FROM rend.billing_customers billing_count
+    WHERE billing_count.organization_id = org.id
+  ),
+  'billing_mode', billing.billing_mode,
+  'customer_synced_at', billing.customer_synced_at::text,
+  'customer_sync_error', billing.customer_sync_error
+)::text
+FROM rend_auth."user" user_row
+JOIN rend_auth.member member_row ON member_row.user_id = user_row.id
+JOIN rend_auth.organization org ON org.id = member_row.organization_id
+LEFT JOIN rend.billing_customers billing ON billing.organization_id = org.id
+WHERE user_row.email = $1
+ORDER BY member_row.created_at ASC
+LIMIT 1;
 `;
+}
+
+async function createApiKeyThroughDashboard(context) {
+  const { data } = await fetchJson(new URL("/api/api-keys", context.siteBaseUrl), {
+    method: "POST",
+    headers: dashboardHeaders(context, { "content-type": "application/json" }),
+    body: JSON.stringify({
+      name: `Production dry run ${context.runId}`,
+      scopes: ["upload", "read", "delete", "analytics"],
+    }),
+  });
+  const rawKey = data?.secret;
+  const apiKey = data?.api_key;
+  if (typeof rawKey !== "string" || !rawKey.startsWith("rend_live_")) {
+    throw new Error("dashboard API key creation did not return a live key");
+  }
+  if (!apiKey || typeof apiKey.id !== "string") {
+    throw new Error("dashboard API key creation did not return an API key record");
+  }
+  context.rawApiKey = rawKey;
+  context.apiKeyId = apiKey.id;
+  return {
+    api_key_id: apiKey.id,
+    api_key_prefix: apiKey.prefix,
+    scopes: apiKey.scopes,
+  };
 }
 
 async function autumnPost(context, routePath, body) {
@@ -561,8 +634,8 @@ async function operatorBillingSync(context) {
       accept: "application/json",
       "content-type": "application/json",
       "x-rend-site-token": context.siteInternalToken,
-      "x-rend-operator-user-id": INTERNAL_USER_ID,
-      "x-rend-operator-email": INTERNAL_USER_EMAIL,
+      "x-rend-operator-user-id": context.userId,
+      "x-rend-operator-email": context.userEmail,
     },
     body: "{}",
   });
@@ -619,7 +692,7 @@ async function deliveryUsageRows(context, assetId, startMs, endMs) {
   const text = await clickhousePost(
     context,
     clickhouseDeliveryQuery({
-      organizationId: INTERNAL_ORG_ID,
+      organizationId: context.organizationId,
       assetId,
       startMs,
       endMs,
@@ -700,7 +773,7 @@ GROUP BY usage_spans.resolution_tier
 
 async function storageUsageRows(context, assetId, startIso, endIso) {
   const result = await context.db.query(storageUsageSql(), [
-    INTERNAL_ORG_ID,
+    context.organizationId,
     startIso,
     endIso,
     SECONDS_PER_BILLING_MONTH,
@@ -729,7 +802,7 @@ VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id::text
 `,
-    [INTERNAL_ORG_ID, assetId, idempotencyKey, featureId, value, source],
+    [context.organizationId, assetId, idempotencyKey, featureId, value, source],
   );
   if (result.rowCount > 0) return "inserted";
   const existing = await context.db.query(
@@ -759,7 +832,7 @@ async function trackAggregatedUsage(context, usage) {
   if (insertStatus === "already_finalized") return { ...usage, status: "already_finalized" };
   try {
     await autumnPost(context, "balances.track", {
-      customer_id: INTERNAL_ORG_ID,
+      customer_id: context.organizationId,
       feature_id: usage.featureId,
       value: usage.value,
       idempotency_key: usage.idempotencyKey,
@@ -788,7 +861,7 @@ SET ${cursorColumn} = GREATEST(COALESCE(${cursorColumn}, '-infinity'::timestampt
     ${errorColumn} = NULL
 WHERE organization_id = $1::uuid
 `,
-    [INTERNAL_ORG_ID, endIso],
+    [context.organizationId, endIso],
   );
 }
 
@@ -849,7 +922,7 @@ async function dryRunAggregatedBillingSync(context, assetId) {
   };
 }
 
-function usageQuery(assetId) {
+function usageQuery(context, assetId) {
   return `
 SELECT COALESCE(json_agg(row_to_json(row_data) ORDER BY row_data.created_at DESC), '[]'::json)::text
 FROM (
@@ -861,7 +934,7 @@ FROM (
          tracked_at::text,
          error
   FROM rend.billing_usage_events
-  WHERE organization_id = ${sqlLiteral(INTERNAL_ORG_ID)}::uuid
+  WHERE organization_id = ${sqlLiteral(context.organizationId)}::uuid
     AND (asset_id = ${sqlLiteral(assetId)}::uuid OR source IN ('delivery_aggregation', 'storage_aggregation'))
     AND created_at >= now() - interval '2 hours'
   ORDER BY created_at DESC
@@ -893,7 +966,7 @@ async function waitForBillingUsage(context, assetId) {
         fallback: await dryRunAggregatedBillingSync(context, assetId),
       };
     }
-    events = await dbJson(context, usageQuery(assetId));
+    events = await dbJson(context, usageQuery(context, assetId));
     if (
       hasTrackedUsage(events, "upload_gate", false) &&
       hasTrackedUsage(events, "delivery_aggregation", true) &&
@@ -908,15 +981,40 @@ async function waitForBillingUsage(context, assetId) {
   );
 }
 
-function cleanupQueries({ apiKeyId }) {
+function cleanupQueries({ apiKeyId, userId, userEmail, organizationId }) {
   return `
 WITH revoked AS (
   UPDATE rend.api_keys
   SET revoked_at = COALESCE(revoked_at, now())
   WHERE id = ${sqlLiteral(apiKeyId)}::uuid
   RETURNING id
+),
+sessions_deleted AS (
+  DELETE FROM rend_auth.session
+  WHERE user_id = ${sqlLiteral(userId)}::uuid
+  RETURNING id
+),
+verifications_deleted AS (
+  DELETE FROM rend_auth.verification
+  WHERE identifier LIKE '%' || ${sqlLiteral(userEmail)}
+  RETURNING id
+),
+asset_rows AS (
+  SELECT count(*)::int AS count
+  FROM rend.assets
+  WHERE organization_id = ${sqlLiteral(organizationId)}::uuid
 )
-SELECT json_build_object('api_key_revoked', EXISTS (SELECT 1 FROM revoked))::text;
+SELECT json_build_object(
+  'api_key_revoked', EXISTS (SELECT 1 FROM revoked),
+  'sessions_deleted', (SELECT count(*) FROM sessions_deleted),
+  'verifications_deleted', (SELECT count(*) FROM verifications_deleted),
+  'synthetic_user_retained', true,
+  'synthetic_org_retained', true,
+  'retention_reason', CASE
+    WHEN (SELECT count FROM asset_rows) > 0 THEN 'asset history retained'
+    ELSE 'safe hard-delete is intentionally manual'
+  END
+)::text;
 `;
 }
 
@@ -940,6 +1038,7 @@ async function main() {
     runId: id,
     startedAt,
     steps: [],
+    env,
     envFile: file,
     db: null,
     autumn: {
@@ -962,6 +1061,12 @@ async function main() {
     storageFeatureIds: storageTierFeatureIds(env),
     rawApiKey: "",
     apiKeyId: "",
+    cookieJar: new Map(),
+    userId: "",
+    userEmail: "",
+    organizationId: "",
+    organizationName: "",
+    organizationSlug: "",
     assetId: "",
     deleted: false,
     apiHealth: null,
@@ -1009,40 +1114,60 @@ async function main() {
       return ensureFixture(fixturePath);
     });
 
-    const seeded = await runStep(context, "rend-customer-api-key", "internal Rend org and API key", async () => {
-      context.rawApiKey = generateApiKey();
-      const result = await dbJson(
-        context,
-        seedSql({
-          apiKeyHash: hashApiKey(context.rawApiKey),
-          apiKeyPrefix: context.rawApiKey.slice(0, 18),
-          runIdValue: id,
-        }),
-      );
-      context.apiKeyId = result.api_key_id;
+    await runStep(context, "self-serve-otp-create", "server-side OTP for self-serve sign-in", async () => {
+      context.userEmail = syntheticUserEmail(context);
+      context.otp = await createServerSideOtp(context, context.userEmail);
+      return {
+        user_email: context.userEmail,
+        otp_created: true,
+      };
+    });
+
+    await runStep(context, "self-serve-otp-sign-in", "public email OTP sign-in", async () => {
+      const result = await signInWithOtp(context, context.userEmail, context.otp);
+      delete context.otp;
+      return result;
+    });
+
+    await runStep(context, "self-serve-org-provision", "dashboard workspace auto-creation", async () => {
+      await assertDashboardSession(context, "/dashboard/assets");
+      const result = await dbJson(context, selfServeProvisioningSql(), [context.userEmail]);
+      if (!result.email_verified) throw new Error("self-serve user email was not verified");
+      if (result.member_count !== 1) throw new Error(`expected exactly one membership, found ${result.member_count}`);
+      if (result.billing_customer_count !== 1) {
+        throw new Error(`expected exactly one billing customer row, found ${result.billing_customer_count}`);
+      }
+      context.organizationId = result.organization_id;
+      context.organizationName = result.organization_name;
+      context.organizationSlug = result.organization_slug;
       return result;
     });
 
     await runStep(context, "autumn-customer-plan", "Autumn customer and plan attach", async () => {
       await autumnPost(context, "customers.get_or_create", {
-        customer_id: INTERNAL_ORG_ID,
-        name: INTERNAL_ORG_NAME,
-        email: INTERNAL_USER_EMAIL,
+        customer_id: context.organizationId,
+        name: context.organizationName,
+        email: context.userEmail,
         metadata: { source: "rend-production-dry-run", run_id: id },
       });
-      const attach = await autumnAttachPlan(context, INTERNAL_ORG_ID, args.planId);
+      const attach = await autumnAttachPlan(context, context.organizationId, args.planId);
       const portal = isInternalTestPlan(context)
         ? null
-        : await autumnPost(context, `customers/${encodeURIComponent(INTERNAL_ORG_ID)}/billing_portal`, {
+        : await autumnPost(context, `customers/${encodeURIComponent(context.organizationId)}/billing_portal`, {
             return_url: `${context.siteBaseUrl}/dashboard/billing`,
           });
       return {
-        customer_id: INTERNAL_ORG_ID,
+        customer_id: context.organizationId,
         plan_id: args.planId,
         checkout_portal_applicable: !isInternalTestPlan(context),
         checkout_url: firstUrlSummary(attach),
         portal_url: firstUrlSummary(portal),
       };
+    });
+
+    await runStep(context, "dashboard-api-key", "dashboard API key creation after billing readiness", async () => {
+      await assertDashboardSession(context, "/dashboard/billing");
+      return createApiKeyThroughDashboard(context);
     });
 
     await runStep(context, "upload", "public API upload", async () => {
@@ -1066,7 +1191,7 @@ async function main() {
     });
 
     await runStep(context, "upload-billing-check", "Autumn upload check verification", async () => {
-      const events = await dbJson(context, usageQuery(context.assetId));
+      const events = await dbJson(context, usageQuery(context, context.assetId));
       if (!hasTrackedUsage(events, "upload_gate", false)) {
         throw new Error("upload_gate billing check was not tracked");
       }
@@ -1223,10 +1348,18 @@ async function main() {
     }
     if (context.db && context.apiKeyId) {
       try {
-        const cleanup = await dbJson(context, cleanupQueries({ apiKeyId: context.apiKeyId }));
+        const cleanup = await dbJson(
+          context,
+          cleanupQueries({
+            apiKeyId: context.apiKeyId,
+            userId: context.userId,
+            userEmail: context.userEmail,
+            organizationId: context.organizationId,
+          }),
+        );
         context.steps.push({
-          id: "api-key-cleanup",
-          title: "API key cleanup",
+          id: "self-serve-cleanup",
+          title: "self-serve cleanup",
           status: "pass",
           started_at: isoNow(),
           ended_at: isoNow(),
@@ -1235,8 +1368,8 @@ async function main() {
         });
       } catch (error) {
         context.steps.push({
-          id: "api-key-cleanup",
-          title: "API key cleanup",
+          id: "self-serve-cleanup",
+          title: "self-serve cleanup",
           status: "fail",
           started_at: isoNow(),
           ended_at: isoNow(),
@@ -1272,10 +1405,12 @@ async function main() {
       key_mode: context.autumn.secretKey ? classifyAutumnKey(context.autumn.secretKey) : "missing",
       key_fingerprint: context.autumn.secretKey ? keyFingerprint(context.autumn.secretKey) : null,
     },
-    internal_customer: {
-      organization_id: INTERNAL_ORG_ID,
-      organization_name: INTERNAL_ORG_NAME,
-      user_email: INTERNAL_USER_EMAIL,
+    self_serve_account: {
+      user_id: context.userId || null,
+      user_email: context.userEmail || null,
+      organization_id: context.organizationId || null,
+      organization_name: context.organizationName || null,
+      organization_slug: context.organizationSlug || null,
       plan_id: args.planId,
       internal_test_plan: args.planId === context.internalTestPlanId,
     },
@@ -1285,6 +1420,8 @@ async function main() {
       autumn_keys: false,
       stripe_keys: false,
       api_keys: false,
+      otps: false,
+      synthetic_emails: false,
       checkout_session_secrets: false,
       cookies: false,
       signed_playback_urls: false,
