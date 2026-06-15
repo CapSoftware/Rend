@@ -141,6 +141,9 @@ jobs:
       REND_EDGE_AMS_SSH_HOST: ${{ secrets.REND_EDGE_AMS_SSH_HOST }}
       REND_EDGE_AMS_SSH_USER: ${{ secrets.REND_EDGE_AMS_SSH_USER }}
       REND_EDGE_AMS_SSH_PORT: ${{ secrets.REND_EDGE_AMS_SSH_PORT }}
+      AUTUMN_SECRET_KEY: ${{ secrets.AUTUMN_SECRET_KEY }}
+      AUTUMN_API_URL: ${{ vars.AUTUMN_API_URL || 'https://api.useautumn.com/v1' }}
+      AUTUMN_API_VERSION: ${{ vars.AUTUMN_API_VERSION || '2.3.0' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -183,6 +186,17 @@ jobs:
           printf '%s\n' "$REND_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
           echo "REND_SSH_KEY_PATH=$SSH_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Sync control-plane billing env
+        if: env.DEPLOY_CONTROL_PLANE == 'true'
+        run: |
+          set -euo pipefail
+          : "${AUTUMN_SECRET_KEY:?AUTUMN_SECRET_KEY Production environment secret is required}"
+
+          scripts/sync-control-plane-billing-env-over-ssh.sh \
+            --host "$REND_CONTROL_PLANE_SSH_HOST" \
+            --user "$REND_CONTROL_PLANE_SSH_USER" \
+            --port "${REND_CONTROL_PLANE_SSH_PORT:-22}"
 
       - name: Deploy control plane
         if: env.DEPLOY_CONTROL_PLANE == 'true'

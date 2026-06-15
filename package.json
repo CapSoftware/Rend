@@ -18,6 +18,8 @@
     "env:production:example": "node scripts/validate-env.mjs --profile production --env-file .env.production.example --allow-placeholders",
     "verify:production-local": "bun run env:production && REND_ENV_PROFILE=production turbo build --filter=@rend/site && REND_ENV_PROFILE=production turbo typecheck --filter=@rend/site && cargo check --workspace",
     "launch:gate": "node scripts/launch-gate.mjs",
+    "billing:autumn-parity": "node scripts/autumn-catalog-parity.mjs",
+    "launch:production-dry-run": "bun scripts/production-dry-run.mjs",
     "backend:up": "bun run env:local && REND_ENV_PROFILE=local docker compose up -d",
     "backend:down": "docker compose down",
     "backend:api": "bun run env:local && REND_ENV_PROFILE=local cargo run -p rend-api",

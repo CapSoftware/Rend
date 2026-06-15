@@ -148,6 +148,11 @@ Worker:
 - all API dependency vars used for Postgres, Redis, S3, ClickHouse, playback
   signing, edge internal auth, and Autumn billing
 - `REND_API_AUTO_MIGRATE=false` after the API migration step is deployed
+
+The `Release and Deploy Backend` workflow syncs the billing-only allowlist into
+the control-plane API and worker env files before deployment. The Production
+GitHub environment must include `AUTUMN_SECRET_KEY`; the sync helper refuses to
+run unless it is visibly a live Autumn key, and logs only key names.
 - `REND_MEDIA_WORKER_ID`
 - `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`
 - `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`

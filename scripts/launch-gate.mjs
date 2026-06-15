@@ -49,6 +49,12 @@ const requiredPlanEnv = [
   ["enterprise", "REND_AUTUMN_PLAN_ENTERPRISE_ID", "enterprise"],
 ];
 
+const requiredUsageCreditFeatureEnv = [
+  "usage_credits",
+  "REND_AUTUMN_USAGE_CREDIT_FEATURE_ID",
+  "rend_usage_credits",
+];
+
 const publicDocsFiles = [
   "apps/site/app/docs/docs-content.ts",
   "apps/site/app/docs/page.tsx",
@@ -79,6 +85,12 @@ Options:
   --production-env-file FILE
       Production env file to validate in any mode. Env:
       REND_LAUNCH_PRODUCTION_ENV_FILE.
+  --autumn-sandbox-env-file FILE
+      Autumn sandbox env file for production catalog parity. Defaults to
+      .env.local. Env: REND_AUTUMN_SANDBOX_ENV_FILE.
+  --autumn-production-env-file FILE
+      Autumn live env file for production catalog parity. Defaults to
+      .env.production.local. Env: REND_AUTUMN_PRODUCTION_ENV_FILE.
   --allow-live-billing-mutation
       Permit production-check to call Autumn customers.get_or_create. Without
       this, production-check stays read-only for billing.
@@ -103,6 +115,8 @@ function parseArgs(argv) {
     profile: process.env.REND_LAUNCH_GATE_PROFILE || "",
     envFile: process.env.REND_LAUNCH_GATE_ENV_FILE || "",
     productionEnvFile: process.env.REND_LAUNCH_PRODUCTION_ENV_FILE || "",
+    autumnSandboxEnvFile: process.env.REND_AUTUMN_SANDBOX_ENV_FILE || "",
+    autumnProductionEnvFile: process.env.REND_AUTUMN_PRODUCTION_ENV_FILE || "",
     releaseManifest: process.env.REND_RELEASE_MANIFEST || "",
     releaseDryRun: truthy(process.env.REND_LAUNCH_RELEASE_DRY_RUN),
     allowLiveBillingMutation: truthy(process.env.REND_LAUNCH_ALLOW_LIVE_BILLING_MUTATION),
@@ -126,6 +140,12 @@ function parseArgs(argv) {
     else if (arg === "--production-env-file") args.productionEnvFile = next();
     else if (arg.startsWith("--production-env-file=")) {
       args.productionEnvFile = arg.slice("--production-env-file=".length);
+    } else if (arg === "--autumn-sandbox-env-file") args.autumnSandboxEnvFile = next();
+    else if (arg.startsWith("--autumn-sandbox-env-file=")) {
+      args.autumnSandboxEnvFile = arg.slice("--autumn-sandbox-env-file=".length);
+    } else if (arg === "--autumn-production-env-file") args.autumnProductionEnvFile = next();
+    else if (arg.startsWith("--autumn-production-env-file=")) {
+      args.autumnProductionEnvFile = arg.slice("--autumn-production-env-file=".length);
     } else if (arg === "--release-manifest") args.releaseManifest = next();
     else if (arg.startsWith("--release-manifest=")) {
       args.releaseManifest = arg.slice("--release-manifest=".length);
@@ -643,6 +663,7 @@ async function validateLoadedLaunchEnv(context) {
         if (!envString(env, "REND_SITE_INTERNAL_TOKEN")) {
           errors.push("production operator control-plane actions require REND_SITE_INTERNAL_TOKEN");
         }
+        validateProductionAutumnKeySource(context, env, errors);
         if (context.args.includeMutatingSmoke) {
           warnings.push("production-check is running mutating smoke because --include-mutating-smoke was passed");
         }
@@ -697,6 +718,46 @@ function isLocalUrl(value) {
     return host === "localhost" || host === "0.0.0.0" || host === "::1" || host.startsWith("127.");
   } catch {
     return true;
+  }
+}
+
+function classifyAutumnKey(secretKey) {
+  if (/^am_sk_live_/i.test(secretKey) || /(?:^|[_-])live(?:[_-])/i.test(secretKey)) return "live";
+  if (
+    /^am_sk_test_/i.test(secretKey) ||
+    /(?:^|[_-])test(?:[_-])/i.test(secretKey) ||
+    /(?:^|[_-])sandbox(?:[_-])/i.test(secretKey)
+  ) {
+    return "sandbox";
+  }
+  return "unknown";
+}
+
+function validateProductionAutumnKeySource(context, env, errors) {
+  const productionFile = resolvePath(
+    context.args.envFile || context.args.autumnProductionEnvFile || ".env.production.local",
+  );
+  if (!existsSync(productionFile)) {
+    errors.push("production-check requires .env.production.local for the live Autumn key");
+    return;
+  }
+  if (path.basename(productionFile) !== ".env.production.local") {
+    errors.push("production-check must load AUTUMN_SECRET_KEY from .env.production.local");
+    return;
+  }
+
+  const fileEnv = parseEnvFile(productionFile);
+  const fileKey = envString(fileEnv, "AUTUMN_SECRET_KEY");
+  const activeKey = envString(env, "AUTUMN_SECRET_KEY");
+  if (!fileKey) {
+    errors.push(".env.production.local must contain AUTUMN_SECRET_KEY");
+    return;
+  }
+  if (activeKey !== fileKey) {
+    errors.push("production-check AUTUMN_SECRET_KEY must come from .env.production.local; unset inherited AUTUMN_SECRET_KEY");
+  }
+  if (classifyAutumnKey(fileKey) !== "live") {
+    errors.push(".env.production.local AUTUMN_SECRET_KEY must be visibly marked as live");
   }
 }
 
@@ -783,11 +844,12 @@ async function validateAutumnCatalog(context) {
     async () => {
       const env = context.env;
       const featureIds = Object.fromEntries(requiredFeatureEnv.map(([key, envKey, fallback]) => [key, envString(env, envKey, fallback)]));
+      const usageCreditFeatureId = envString(env, requiredUsageCreditFeatureEnv[1], requiredUsageCreditFeatureEnv[2]);
       const planIds = Object.fromEntries(requiredPlanEnv.map(([key, envKey, fallback]) => [key, envString(env, envKey, fallback)]));
       const errors = [];
       const warnings = [];
 
-      for (const [key, value] of Object.entries({ ...featureIds, ...planIds })) {
+      for (const [key, value] of Object.entries({ ...featureIds, [requiredUsageCreditFeatureEnv[0]]: usageCreditFeatureId, ...planIds })) {
         if (!isSafeCatalogId(value)) errors.push(`${key} catalog id is invalid`);
       }
 
@@ -795,6 +857,7 @@ async function validateAutumnCatalog(context) {
       const data = {
         billing_mode: billingMode,
         feature_ids: featureIds,
+        usage_credit_feature_id: usageCreditFeatureId,
         plan_ids: planIds,
         customer_mapping: {
           source: "rend organization UUID",
@@ -821,7 +884,7 @@ async function validateAutumnCatalog(context) {
       if (errors.length === 0) {
         const config = { apiUrl, apiVersion, secretKey };
         const featureResults = [];
-        for (const id of Object.values(featureIds)) {
+        for (const id of [...Object.values(featureIds), usageCreditFeatureId]) {
           featureResults.push(await autumnPost(config, "features.get", { feature_id: id }));
         }
         const planResults = [];
@@ -873,6 +936,50 @@ async function validateAutumnCatalog(context) {
       };
     },
   );
+}
+
+async function validateAutumnCatalogParity(context) {
+  if (context.args.mode !== "production-check") {
+    return skipStep(
+      context,
+      "autumn-catalog-parity",
+      "billing",
+      "Autumn sandbox/production catalog parity",
+      "skipped outside production-check",
+    );
+  }
+
+  const artifactPath = path.join(context.outputDir, "autumn-catalog-parity.json");
+  const sandboxFile = context.args.autumnSandboxEnvFile || ".env.local";
+  const productionFile =
+    context.args.autumnProductionEnvFile || context.args.envFile || ".env.production.local";
+  const commandArgs = [
+    "scripts/autumn-catalog-parity.mjs",
+    "--sandbox-env-file",
+    sandboxFile,
+    "--production-env-file",
+    productionFile,
+    "--artifact",
+    artifactPath,
+    "--timeout-ms",
+    String(Math.min(context.args.timeoutMs, 120_000)),
+  ];
+  const step = await runCommandStep(
+    context,
+    command(
+      "autumn-catalog-parity",
+      "billing",
+      "Autumn sandbox/production catalog parity",
+      "node",
+      commandArgs,
+      { timeoutMs: 180_000 },
+    ),
+  );
+  const recorded = context.steps.at(-1);
+  if (recorded?.id === "autumn-catalog-parity") {
+    recorded.artifacts = [...(recorded.artifacts || []), displayPath(artifactPath)];
+  }
+  return step;
 }
 
 function isSafeCatalogId(value) {
@@ -1286,6 +1393,7 @@ function buildSteps(context) {
     () => validateProductionEnvWhenProvided(context),
     () => validateLoadedLaunchEnv(context),
     () => validateAutumnCatalog(context),
+    () => validateAutumnCatalogParity(context),
     () =>
       runCommandStep(context, command("openapi:check", "openapi", "OpenAPI check", "bun", ["run", "openapi:check"], { timeoutMs: 180_000 })),
     () =>

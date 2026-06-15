@@ -36,13 +36,18 @@ Production-check mode validates real production env/config without mutating live
 billing:
 
 ```sh
-bun run launch:gate -- --mode production-check
+bun run launch:gate -- --mode production-check --autumn-sandbox-env-file .env.local
 ```
 
+Production-check requires `.env.production.local` to supply the live Autumn key
+used as `AUTUMN_SECRET_KEY`; inherited shell keys are rejected when they differ.
 Use `--production-env-file FILE` to validate a specific production env file from
-any mode. Production-check skips mutating live/API smoke by default. Only pass
-`--allow-live-billing-mutation` when an operator intentionally wants to call
-Autumn `customers.get_or_create` against the configured production account.
+any mode, but the Autumn live key check remains tied to `.env.production.local`.
+Production-check also runs read-only Autumn sandbox/live catalog parity using
+`--autumn-sandbox-env-file` and `--autumn-production-env-file`. It skips
+mutating live/API smoke by default. Only pass `--allow-live-billing-mutation`
+when an operator intentionally wants to call Autumn `customers.get_or_create`
+against the configured production account.
 
 ## Required Checks
 
@@ -50,8 +55,8 @@ The gate reports explicit `pass`, `warn`, or `fail` status for each group:
 
 - env: `env:local`, `env:production:example`, loaded profile policy, and
   production env validation when supplied.
-- billing: launch mode policy, Autumn catalog expectations, customer mapping,
-  and billing denial smoke.
+- billing: launch mode policy, Autumn catalog expectations, sandbox/live
+  catalog parity, customer mapping, and billing denial smoke.
 - OpenAPI: lint/generated client check and public contract tests.
 - SDK: unit tests and integration smoke.
 - site: tests, typecheck, build, and E2E flows.
@@ -97,8 +102,11 @@ Common failures:
 - `production-env-validation`: replace placeholders, remove `REND_DEV_API_KEY`,
   set secure Better Auth config, require `REND_BILLING_MODE=autumn`, and set an
   operator email allowlist.
-- `autumn-catalog`: run the sandbox setup helper or fix the configured plan and
-  feature IDs before re-running the gate.
+- `autumn-catalog`: run the sandbox setup helper or fix the configured plan,
+  usage-credit feature, and meter feature IDs before re-running the gate.
+- `autumn-catalog-parity`: make production match the verified sandbox catalog in
+  Autumn. Do not copy customers/subscriptions and do not create Stripe
+  products/prices directly outside Autumn.
 - `site:build`: production-profile env is missing or incompatible with the
   Next.js build.
 - `docker:up` or `docker:smoke`: inspect Docker Compose health and service logs,

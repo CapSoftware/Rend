@@ -57,6 +57,7 @@ REND_BILLING_FEATURE_STORAGE_720P=storage_720p_second_months
 REND_BILLING_FEATURE_STORAGE_1080P=storage_1080p_second_months
 REND_BILLING_FEATURE_STORAGE_2K=storage_2k_second_months
 REND_BILLING_FEATURE_STORAGE_4K=storage_4k_second_months
+REND_AUTUMN_USAGE_CREDIT_FEATURE_ID=rend_usage_credits
 ```
 
 The Autumn dev/sandbox catalog should include:
@@ -68,6 +69,62 @@ The Autumn dev/sandbox catalog should include:
 
 Overages should be billed by Autumn/Stripe. Rend does not hardcode plan prices
 except display fallback copy.
+
+The public V1 production plan IDs must be:
+
+```sh
+REND_AUTUMN_PLAN_PAYG_ID=pay_as_you_go
+REND_AUTUMN_PLAN_BUILDER_ID=builder
+REND_AUTUMN_PLAN_SCALE_ID=scale
+REND_AUTUMN_PLAN_ENTERPRISE_ID=enterprise
+```
+
+`rend_usage_credits` is the Autumn credit-system feature attached to those
+plans. It is not a Stripe object managed by Rend.
+
+## Sandbox and Live Separation
+
+Sandbox and production Autumn keys must never be loaded into the same runtime as
+the active `AUTUMN_SECRET_KEY`. The production launch gate requires the live
+Autumn key to come from `.env.production.local`, and the key must be visibly
+marked as live. The sandbox parity input should be a separate env file, usually
+`.env.local`, containing a visibly marked test/sandbox Autumn key.
+
+Read-only parity check:
+
+```sh
+bun run billing:autumn-parity -- \
+  --sandbox-env-file .env.local \
+  --production-env-file .env.production.local
+```
+
+This fetches only the required Autumn features and plans, compares production to
+sandbox, verifies the credit-system schema and plan attachments, and writes a
+redacted artifact under `.rend/launch/`. It does not copy customers,
+subscriptions, or Stripe objects.
+
+If production parity fails because live Autumn catalog objects are missing,
+upsert the catalog through Autumn with the explicit mutation flag:
+
+```sh
+node scripts/with-root-env.mjs --profile production --env-file .env.production.local \
+  node scripts/setup-autumn-billing.mjs --plans --mux-basic-rates --allow-production-mutation
+```
+
+This command may create or update Autumn products/plans and the Stripe live
+objects Autumn manages for them. It must not be replaced with manual Stripe
+product or price creation.
+
+The controlled dry run can use an explicit internal plan that is managed by
+Autumn and does not create a structural Stripe product/price:
+
+```sh
+node scripts/with-root-env.mjs --profile production --env-file .env.production.local \
+  node scripts/setup-autumn-billing.mjs \
+    --internal-dry-run-plan \
+    --mux-basic-rates \
+    --allow-production-mutation
+```
 
 Use the setup helper to upsert the required feature IDs:
 
@@ -177,3 +234,39 @@ POST /internal/operator/billing/delivery-sync
 Use the dashboard operator billing panel to inspect customer sync status and
 manually resync an organization. Operators must not mutate plan state directly
 in Rend; plan/product changes should go through Autumn.
+
+## Production Dry Run
+
+Run the production dry run only after parity and the production launch gate pass:
+
+```sh
+bun run launch:gate -- --mode production-check --autumn-sandbox-env-file .env.local
+
+bun run launch:production-dry-run -- \
+  --allow-production-mutation \
+  --acknowledge-real-charge \
+  --plan-id internal_production_dry_run
+```
+
+Before running it, deploy or restart the production API on the current build and
+confirm migrations through `0011_billing_storage_spans.sql` are applied. The dry
+run intentionally fails if upload does not create the `upload_gate` billing
+event or if storage/delivery usage does not track through Autumn.
+
+`--acknowledge-real-charge` is required for every production dry run because
+tracked usage can create live Autumn/Stripe billing artifacts even on
+`pay_as_you_go`. For `internal_production_dry_run`, the expected charge is `$0`;
+it exists to verify production Autumn checks/tracks without requiring a completed
+public checkout first. Document the intended plan and expected charge before
+running it. The dry run creates or syncs the internal customer
+`Rend Internal Production Dry Run`, attaches the requested Autumn plan, creates a
+scoped live API key, uploads a synthetic fixture through the public API, waits
+for playable media, verifies upload check plus delivery/storage usage tracking,
+verifies checkout/portal URL creation, verifies public embed/watch playback
+through the edge, deletes the asset, revokes the generated API key, and writes a
+redacted artifact under `.rend/launch/`.
+
+The dry run intentionally leaves the Autumn customer, plan relationship,
+balances, usage, and Autumn-generated Stripe objects visible for dashboard
+inspection. It must not be used to create structural Stripe products or prices
+outside Autumn.

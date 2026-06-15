@@ -1243,13 +1243,13 @@ fn clickhouse_delivery_seconds_query(
     format!(
         "\
         SELECT \
-          resolution_tier, \
-          sum(delivered_duration_ms) / 1000.0 AS value \
+          tier AS resolution_tier, \
+          sum(delivered_duration_ms_value) / 1000.0 AS value \
         FROM ( \
           SELECT \
             event_id, \
-            any(resolution_tier) AS resolution_tier, \
-            any(delivered_duration_ms) AS delivered_duration_ms \
+            any(resolution_tier) AS tier, \
+            any(delivered_duration_ms) AS delivered_duration_ms_value \
           FROM playback_events \
           WHERE organization_id = toUUID('{organization_id}') \
             AND observed_at >= fromUnixTimestamp64Milli({}) \
@@ -1260,7 +1260,7 @@ fn clickhouse_delivery_seconds_query(
             AND resolution_tier IN ('720p', '1080p', '2k', '4k') \
           GROUP BY event_id \
         ) \
-        GROUP BY resolution_tier \
+        GROUP BY tier \
         FORMAT JSONEachRow",
         start.timestamp_millis(),
         end.timestamp_millis(),

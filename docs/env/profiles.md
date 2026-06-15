@@ -55,6 +55,12 @@ instead of committing env files. `REND_ENV` must be `production`.
 `REND_BILLING_MODE` must be `autumn`, and `AUTUMN_SECRET_KEY` must be provided
 server-side only.
 
+Autumn production launch checks require the live `AUTUMN_SECRET_KEY` to be in
+`.env.production.local`. Keep sandbox/test Autumn keys in a separate file such as
+`.env.local` and pass that file to catalog parity with
+`--autumn-sandbox-env-file`; do not export a sandbox `AUTUMN_SECRET_KEY` in the
+shell while running production-check.
+
 Production validation rejects localhost/Docker service URLs, checked-in dev
 defaults, placeholders, insecure edge URLs, and `REND_ENV=local`.
 

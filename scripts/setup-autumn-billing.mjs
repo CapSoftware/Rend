@@ -3,6 +3,7 @@
 const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const USAGE_CREDIT_FEATURE_ID = "rend_usage_credits";
+const INTERNAL_DRY_RUN_PLAN_ID = "internal_production_dry_run";
 const MUX_BASIC_RATE_SOURCE = "https://www.mux.com/pricing";
 
 const featureSpecs = [
@@ -12,8 +13,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_DELIVERY_720P",
     id: "delivery_720p_seconds",
     name: "Delivery 720p seconds",
-    singular: "delivery second",
-    plural: "delivery seconds",
+    singular: "delivery 720p second",
+    plural: "delivery 720p seconds",
   },
   {
     key: "DELIVERY_1080P",
@@ -21,8 +22,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_DELIVERY_1080P",
     id: "delivery_1080p_seconds",
     name: "Delivery 1080p seconds",
-    singular: "delivery second",
-    plural: "delivery seconds",
+    singular: "delivery 1080p second",
+    plural: "delivery 1080p seconds",
   },
   {
     key: "DELIVERY_2K",
@@ -30,8 +31,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_DELIVERY_2K",
     id: "delivery_2k_seconds",
     name: "Delivery 2K seconds",
-    singular: "delivery second",
-    plural: "delivery seconds",
+    singular: "delivery 2K second",
+    plural: "delivery 2K seconds",
   },
   {
     key: "DELIVERY_4K",
@@ -39,8 +40,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_DELIVERY_4K",
     id: "delivery_4k_seconds",
     name: "Delivery 4K seconds",
-    singular: "delivery second",
-    plural: "delivery seconds",
+    singular: "Delivery 4K second",
+    plural: "Delivery 4K seconds",
   },
   {
     key: "STORAGE_720P",
@@ -48,8 +49,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_STORAGE_720P",
     id: "storage_720p_second_months",
     name: "Storage 720p second-months",
-    singular: "storage second-month",
-    plural: "storage second-months",
+    singular: "storage 720p second-month",
+    plural: "storage 720p second-months",
   },
   {
     key: "STORAGE_1080P",
@@ -57,8 +58,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_STORAGE_1080P",
     id: "storage_1080p_second_months",
     name: "Storage 1080p second-months",
-    singular: "storage second-month",
-    plural: "storage second-months",
+    singular: "storage 1080p second-month",
+    plural: "storage 1080p second-months",
   },
   {
     key: "STORAGE_2K",
@@ -66,8 +67,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_STORAGE_2K",
     id: "storage_2k_second_months",
     name: "Storage 2K second-months",
-    singular: "storage second-month",
-    plural: "storage second-months",
+    singular: "storage 2k second-month",
+    plural: "storage 2k second-months",
   },
   {
     key: "STORAGE_4K",
@@ -75,8 +76,8 @@ const featureSpecs = [
     costEnv: "REND_AUTUMN_UNIT_COST_STORAGE_4K",
     id: "storage_4k_second_months",
     name: "Storage 4K second-months",
-    singular: "storage second-month",
-    plural: "storage second-months",
+    singular: "Storage 4K second-month",
+    plural: "Storage 4K second-months",
   },
 ];
 
@@ -115,6 +116,14 @@ const planSpecs = [
   },
 ];
 
+const internalDryRunPlanSpec = {
+  env: "REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID",
+  id: INTERNAL_DRY_RUN_PLAN_ID,
+  name: "Internal Production Dry Run",
+  description: "Internal-only plan for controlled Rend production billing dry runs.",
+  includedCredit: 10,
+};
+
 const muxBasicUnitCosts = new Map([
   ["REND_AUTUMN_UNIT_COST_DELIVERY_720P", 0.0008 / 60],
   ["REND_AUTUMN_UNIT_COST_DELIVERY_1080P", 0.001 / 60],
@@ -127,14 +136,17 @@ const muxBasicUnitCosts = new Map([
 ]);
 
 function usage() {
-  return `Usage: node scripts/setup-autumn-billing.mjs [--features-only] [--plans] [--mux-basic-rates] [--verify-customer] [--verify-attach] [--verify-portal]
+  return `Usage: node scripts/setup-autumn-billing.mjs [--features-only] [--plans] [--internal-dry-run-plan] [--mux-basic-rates] [--allow-production-mutation] [--verify-customer] [--verify-attach] [--verify-portal]
 
-Upserts the Rend V1 Autumn sandbox catalog using AUTUMN_SECRET_KEY and AUTUMN_API_URL.
+Upserts the Rend V1 Autumn catalog using AUTUMN_SECRET_KEY and AUTUMN_API_URL.
 
 By default this upserts only the eight required meter features. Passing --plans
 also upserts the usage-credit feature and the PAYG/Builder/Scale/Enterprise
 plans, but requires all REND_AUTUMN_UNIT_COST_* env vars to be set.
+Passing --internal-dry-run-plan upserts an internal-only, non-Stripe dry-run
+plan with included usage credits for controlled production verification.
 Pass --mux-basic-rates to fill those costs from Mux Basic public pricing.
+Production/live keys require --allow-production-mutation.
 
 Verification flags:
   --verify-customer  calls customers.get_or_create for REND_AUTUMN_VERIFY_CUSTOMER_ID
@@ -155,6 +167,8 @@ function parseArgs(argv) {
     verifyAttach: false,
     verifyPortal: false,
     muxBasicRates: false,
+    allowProductionMutation: false,
+    internalDryRunPlan: false,
   };
   for (const arg of argv) {
     if (arg === "--features-only") args.featuresOnly = true;
@@ -163,6 +177,8 @@ function parseArgs(argv) {
     else if (arg === "--verify-attach") args.verifyAttach = true;
     else if (arg === "--verify-portal") args.verifyPortal = true;
     else if (arg === "--mux-basic-rates") args.muxBasicRates = true;
+    else if (arg === "--allow-production-mutation") args.allowProductionMutation = true;
+    else if (arg === "--internal-dry-run-plan") args.internalDryRunPlan = true;
     else if (arg === "-h" || arg === "--help") {
       console.log(usage());
       process.exit(0);
@@ -170,8 +186,8 @@ function parseArgs(argv) {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
-  if (args.featuresOnly && args.plans) {
-    throw new Error("--features-only and --plans are mutually exclusive");
+  if (args.featuresOnly && (args.plans || args.internalDryRunPlan)) {
+    throw new Error("--features-only cannot be combined with plan setup flags");
   }
   return args;
 }
@@ -186,6 +202,33 @@ function autumnConfig() {
     apiVersion: envString("AUTUMN_API_VERSION", DEFAULT_AUTUMN_API_VERSION),
     secretKey,
   };
+}
+
+function classifyAutumnKey(secretKey) {
+  if (/^am_sk_live_/i.test(secretKey) || /(?:^|[_-])live(?:[_-])/i.test(secretKey)) return "live";
+  if (
+    /^am_sk_test_/i.test(secretKey) ||
+    /(?:^|[_-])test(?:[_-])/i.test(secretKey) ||
+    /(?:^|[_-])sandbox(?:[_-])/i.test(secretKey)
+  ) {
+    return "sandbox";
+  }
+  return "unknown";
+}
+
+function isProductionProfile() {
+  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "";
+  return ["production", "prod"].includes(profile.toLowerCase());
+}
+
+function enforceMutationSafety(config, args) {
+  const liveKey = classifyAutumnKey(config.secretKey) === "live";
+  if ((isProductionProfile() || liveKey) && !args.allowProductionMutation) {
+    throw new Error("refusing production/live Autumn mutation without --allow-production-mutation");
+  }
+  if (isProductionProfile() && classifyAutumnKey(config.secretKey) !== "live") {
+    throw new Error("production Autumn setup requires a visibly live AUTUMN_SECRET_KEY");
+  }
 }
 
 async function autumnPost(config, path, body) {
@@ -306,8 +349,8 @@ async function upsertUsageCreditFeature(config, costs) {
     consumable: true,
     credit_schema: creditSchema,
     display: {
-      singular: "usage credit",
-      plural: "usage credits",
+      singular: "rend usage credit",
+      plural: "rend usage credits",
     },
   });
   console.log(`${action} feature ${featureId}`);
@@ -351,6 +394,38 @@ async function upsertPlans(config, creditFeatureId) {
     const action = await upsertPlan(config, body);
     console.log(`${action} plan ${body.plan_id}`);
   }
+}
+
+function internalDryRunPlanBody(creditFeatureId) {
+  const included = Number(
+    envString("REND_AUTUMN_INTERNAL_DRY_RUN_INCLUDED_CREDIT", String(internalDryRunPlanSpec.includedCredit)),
+  );
+  if (!Number.isFinite(included) || included <= 0) {
+    throw new Error("REND_AUTUMN_INTERNAL_DRY_RUN_INCLUDED_CREDIT must be a positive number");
+  }
+  return {
+    plan_id: envString(internalDryRunPlanSpec.env, internalDryRunPlanSpec.id),
+    name: internalDryRunPlanSpec.name,
+    description: internalDryRunPlanSpec.description,
+    group: envString("REND_AUTUMN_PLAN_GROUP", "rend_v1"),
+    items: [
+      {
+        feature_id: creditFeatureId,
+        included,
+        reset: { interval: "month" },
+      },
+    ],
+    config: {
+      ignore_past_due: true,
+    },
+    create_in_stripe: false,
+  };
+}
+
+async function upsertInternalDryRunPlan(config, creditFeatureId) {
+  const body = internalDryRunPlanBody(creditFeatureId);
+  const action = await upsertPlan(config, body);
+  console.log(`${action} plan ${body.plan_id}`);
 }
 
 async function verifyCustomer(config) {
@@ -401,12 +476,18 @@ async function verifyPortal(config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = autumnConfig();
+  enforceMutationSafety(config, args);
   await upsertMeterFeatures(config);
 
-  if (args.plans) {
+  if (args.plans || args.internalDryRunPlan) {
     const costs = parseUnitCosts({ muxBasicRates: args.muxBasicRates });
     const creditFeatureId = await upsertUsageCreditFeature(config, costs);
-    await upsertPlans(config, creditFeatureId);
+    if (args.plans) {
+      await upsertPlans(config, creditFeatureId);
+    }
+    if (args.internalDryRunPlan) {
+      await upsertInternalDryRunPlan(config, creditFeatureId);
+    }
   } else if (!args.featuresOnly) {
     console.log("skipped plans; pass --plans with explicit REND_AUTUMN_UNIT_COST_* env vars");
   }
