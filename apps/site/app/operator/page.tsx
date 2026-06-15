@@ -6,6 +6,7 @@ import {
 } from "../../lib/dashboard-auth.ts";
 import {
   canUseOperatorSurface,
+  recentBillingSyncRecords,
   recentOperatorAuditRecords,
   type OperatorAction,
   type OperatorTargetType,
@@ -71,6 +72,22 @@ function OperatorForm({
       <button className={action === "suspend" ? "app-danger" : undefined} type="submit">
         {label}
       </button>
+    </form>
+  );
+}
+
+function BillingResyncForm() {
+  return (
+    <form action="/operator/billing-resync" className="app-key-form" method="post">
+      <label htmlFor="billing-resync-organization">Organization ID</label>
+      <input
+        id="billing-resync-organization"
+        name="organization_id"
+        placeholder="00000000-0000-0000-0000-000000000000"
+        required
+        type="text"
+      />
+      <button type="submit">Resync billing</button>
     </form>
   );
 }
@@ -224,10 +241,11 @@ export default async function OperatorPage({ searchParams }: OperatorPageProps) 
   if (!access.ok) redirect(`/login?next=${encodeURIComponent("/operator")}`);
   if (!canUseOperatorSurface(access.context)) notFound();
 
-  const [query, audits, readiness] = await Promise.all([
+  const [query, audits, readiness, billingSync] = await Promise.all([
     searchParams,
     recentOperatorAuditRecords(),
     latestPlaybackReadinessResult(),
+    recentBillingSyncRecords(),
   ]);
   const status = firstParam(query.status);
   const message = firstParam(query.message);
@@ -242,6 +260,7 @@ export default async function OperatorPage({ searchParams }: OperatorPageProps) 
         <nav>
           <a href="/dashboard/assets">Assets</a>
           <a href="/dashboard/api-keys">API keys</a>
+          <a href="/dashboard/billing">Billing</a>
         </nav>
       </header>
 
@@ -260,6 +279,65 @@ export default async function OperatorPage({ searchParams }: OperatorPageProps) 
         ) : null}
 
         <ReadinessPanel result={readiness} />
+
+        <section className="app-panel">
+          <div className="app-panel-title-row">
+            <h2>Billing sync</h2>
+          </div>
+          <BillingResyncForm />
+          <div className="app-form-spacer" />
+          {billingSync.length === 0 ? (
+            <div className="app-empty">No billing sync records yet.</div>
+          ) : (
+            <div className="app-table-wrap">
+              <table className="app-table">
+                <thead>
+                  <tr>
+                    <th>Organization</th>
+                    <th>Mode</th>
+                    <th>Customer</th>
+                    <th>State</th>
+                    <th>Delivery</th>
+                    <th>Storage</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {billingSync.map((record) => (
+                    <tr key={record.organization_id}>
+                      <td>
+                        <span>{record.organization_name}</span>
+                        <span className="app-muted app-mono"> {record.organization_id}</span>
+                      </td>
+                      <td>{record.billing_mode}</td>
+                      <td>{formatTimestamp(record.customer_synced_at || "")}</td>
+                      <td>{formatTimestamp(record.billing_state_synced_at || "")}</td>
+                      <td>
+                        {formatTimestamp(record.delivery_usage_synced_at || "")}
+                        {record.delivery_usage_cursor_at ? (
+                          <span className="app-muted"> cursor {formatTimestamp(record.delivery_usage_cursor_at)}</span>
+                        ) : null}
+                      </td>
+                      <td>
+                        {formatTimestamp(record.storage_usage_synced_at || "")}
+                        {record.storage_usage_cursor_at ? (
+                          <span className="app-muted"> cursor {formatTimestamp(record.storage_usage_cursor_at)}</span>
+                        ) : null}
+                      </td>
+                      <td>
+                        {record.customer_sync_error ||
+                          record.billing_state_error ||
+                          record.delivery_usage_error ||
+                          record.storage_usage_error ||
+                          "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         <section className="app-detail-grid">
           <div className="app-panel">

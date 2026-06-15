@@ -1,8 +1,9 @@
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { DashboardAccessContext } from "./dashboard-auth.ts";
 import { localAdminEmail } from "./auth-seed.ts";
-import { operatorAuditRecords } from "./db/schema.ts";
-import { getSiteDb } from "./server-db.ts";
+import { billingCustomers, operatorAuditRecords, organization } from "./db/schema.ts";
+import { getSiteDb, getSitePgPool } from "./server-db.ts";
+import { billingOverview } from "./billing.ts";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
@@ -37,6 +38,22 @@ export type OperatorAuditRecord = {
   target_id: string;
   reason: string;
   created_at: string;
+};
+
+export type BillingSyncRecord = {
+  organization_id: string;
+  organization_name: string;
+  billing_mode: string;
+  customer_synced_at?: string;
+  customer_sync_error?: string;
+  billing_state_synced_at?: string;
+  billing_state_error?: string;
+  delivery_usage_cursor_at?: string;
+  delivery_usage_synced_at?: string;
+  delivery_usage_error?: string;
+  storage_usage_cursor_at?: string;
+  storage_usage_synced_at?: string;
+  storage_usage_error?: string;
 };
 
 export class OperatorActionError extends Error {
@@ -105,6 +122,13 @@ function safeReason(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function safeUuid(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)
+    ? normalized
+    : null;
+}
+
 export async function performOperatorAction(
   context: DashboardAccessContext,
   input: OperatorActionInput
@@ -153,7 +177,8 @@ export async function performOperatorAction(
   return body as OperatorActionResult;
 }
 
-function isoDate(value: Date | string) {
+function isoDate(value: Date | string | null | undefined) {
+  if (!value) return undefined;
   const date = value instanceof Date ? value : new Date(value);
   return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
 }
@@ -175,6 +200,93 @@ export async function recentOperatorAuditRecords(limit = 20): Promise<OperatorAu
 
   return rows.map((row) => ({
     ...row,
-    created_at: isoDate(row.created_at),
+    created_at: isoDate(row.created_at) ?? new Date().toISOString(),
   }));
+}
+
+export async function recentBillingSyncRecords(limit = 20): Promise<BillingSyncRecord[]> {
+  const rows = await getSiteDb()
+    .select({
+      organization_id: billingCustomers.organization_id,
+      organization_name: organization.name,
+      billing_mode: billingCustomers.billing_mode,
+      customer_synced_at: billingCustomers.customer_synced_at,
+      customer_sync_error: billingCustomers.customer_sync_error,
+      billing_state_synced_at: billingCustomers.billing_state_synced_at,
+      billing_state_error: billingCustomers.billing_state_error,
+      delivery_usage_cursor_at: billingCustomers.delivery_usage_cursor_at,
+      delivery_usage_synced_at: billingCustomers.delivery_usage_synced_at,
+      delivery_usage_error: billingCustomers.delivery_usage_error,
+      storage_usage_cursor_at: billingCustomers.storage_usage_cursor_at,
+      storage_usage_synced_at: billingCustomers.storage_usage_synced_at,
+      storage_usage_error: billingCustomers.storage_usage_error,
+    })
+    .from(billingCustomers)
+    .innerJoin(organization, eq(organization.id, billingCustomers.organization_id))
+    .orderBy(desc(billingCustomers.updated_at))
+    .limit(Math.min(Math.max(Math.trunc(limit) || 20, 1), 50));
+
+  return rows.map((row) => ({
+    organization_id: row.organization_id,
+    organization_name: row.organization_name,
+    billing_mode: row.billing_mode,
+    customer_synced_at: isoDate(row.customer_synced_at ?? undefined),
+    customer_sync_error: row.customer_sync_error ?? undefined,
+    billing_state_synced_at: isoDate(row.billing_state_synced_at ?? undefined),
+    billing_state_error: row.billing_state_error ?? undefined,
+    delivery_usage_cursor_at: isoDate(row.delivery_usage_cursor_at ?? undefined),
+    delivery_usage_synced_at: isoDate(row.delivery_usage_synced_at ?? undefined),
+    delivery_usage_error: row.delivery_usage_error ?? undefined,
+    storage_usage_cursor_at: isoDate(row.storage_usage_cursor_at ?? undefined),
+    storage_usage_synced_at: isoDate(row.storage_usage_synced_at ?? undefined),
+    storage_usage_error: row.storage_usage_error ?? undefined,
+  }));
+}
+
+export async function performBillingCustomerResync(
+  context: DashboardAccessContext,
+  organizationId: string
+) {
+  if (!canUseOperatorSurface(context)) {
+    throw new OperatorActionError(403, operatorDeniedMessage());
+  }
+  const normalizedOrgId = safeUuid(organizationId);
+  if (!normalizedOrgId) {
+    throw new OperatorActionError(400, "Organization ID must be a UUID.");
+  }
+
+  const result = await getSitePgPool().query<{
+    organization_id: string;
+    organization_name: string;
+    organization_slug: string;
+    owner_email: string | null;
+  }>(
+    `
+      SELECT org.id::text AS organization_id,
+             org.name AS organization_name,
+             org.slug AS organization_slug,
+             min(owner_user.email) AS owner_email
+      FROM rend_auth.organization org
+      LEFT JOIN rend_auth.member owner_member
+        ON owner_member.organization_id = org.id
+       AND owner_member.role = 'owner'
+      LEFT JOIN rend_auth."user" owner_user
+        ON owner_user.id = owner_member.user_id
+      WHERE org.id = $1::uuid
+      GROUP BY org.id
+    `,
+    [normalizedOrgId]
+  );
+  const row = result.rows[0];
+  if (!row) throw new OperatorActionError(404, "Organization was not found.");
+
+  const syncContext: DashboardAccessContext = {
+    userId: context.userId,
+    userEmail: row.owner_email || context.userEmail,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    organizationSlug: row.organization_slug,
+    role: "owner",
+  };
+  return billingOverview(syncContext);
 }
