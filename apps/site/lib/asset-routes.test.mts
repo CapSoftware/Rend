@@ -198,3 +198,31 @@ test("asset client propagates only redacted safe upstream errors", async () => {
     });
   });
 });
+
+test("asset client preserves documented billing limit errors", async () => {
+  await withEnv(routeEnv(), async () => {
+    await withMockFetch(async () => {
+      return Response.json({ error: "limit_exceeded" }, { status: 403 });
+    }, async () => {
+      await assert.rejects(
+        uploadAsset(
+          AUTH_CONTEXT,
+          new Request("https://rend.example/api/assets", {
+            method: "POST",
+            headers: {
+              "content-length": "3",
+              "content-type": "video/mp4",
+            },
+            body: "abc",
+          })
+        ),
+        (error) => {
+          assert.equal(error instanceof AssetApiError, true);
+          assert.equal((error as AssetApiError).status, 403);
+          assert.equal((error as AssetApiError).body.error, "limit_exceeded");
+          return true;
+        }
+      );
+    });
+  });
+});
