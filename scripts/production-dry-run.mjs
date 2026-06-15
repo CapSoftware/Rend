@@ -1092,6 +1092,10 @@ async function main() {
       const artifact = await fetchOk(new URL(source, context.siteBaseUrl), {
         headers: { accept: "*/*" },
       });
+      const billableArtifactPath = `/api/player/${context.assetId}/artifact/opener.mp4`;
+      const billableArtifact = await fetchOk(new URL(billableArtifactPath, context.siteBaseUrl), {
+        headers: { accept: "*/*" },
+      });
       const embed = await fetchOk(new URL(`/embed/${context.assetId}`, context.siteBaseUrl));
       const watch = await fetchOk(new URL(`/watch/${context.assetId}`, context.siteBaseUrl));
       return {
@@ -1101,6 +1105,11 @@ async function main() {
         artifact_content_type: artifact.headers.get("content-type"),
         artifact_cache: artifact.headers.get("x-rend-cache"),
         artifact_edge: artifact.headers.get("x-rend-edge"),
+        billable_artifact_path: billableArtifactPath,
+        billable_artifact_status: billableArtifact.status,
+        billable_artifact_content_type: billableArtifact.headers.get("content-type"),
+        billable_artifact_cache: billableArtifact.headers.get("x-rend-cache"),
+        billable_artifact_edge: billableArtifact.headers.get("x-rend-edge"),
         embed_status: embed.status,
         watch_status: watch.status,
       };
