@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sendAuthOtpEmail } from "./auth.ts";
+import {
+  legalAssentAccepted,
+  legalAssentCookieHeader,
+  legalAssentFromHeaders,
+} from "./legal-assent.ts";
+import { LEGAL_ASSENT_VERSION } from "./legal-assent-constants.ts";
 
 const ENV_KEYS = [
   "REND_ENV",
@@ -111,4 +117,35 @@ test("production OTP email fails when Resend is required but missing", async () 
       );
     }
   );
+});
+
+test("legal assent accepts only the current version", () => {
+  assert.equal(
+    legalAssentAccepted({
+      legal_assent: "accepted",
+      legal_assent_version: LEGAL_ASSENT_VERSION,
+    }),
+    true
+  );
+  assert.equal(
+    legalAssentAccepted({
+      legal_assent: "accepted",
+      legal_assent_version: "2025-01-01",
+    }),
+    false
+  );
+});
+
+test("legal assent cookie is signed and email scoped", () => {
+  const env = { AUTH_SECRET: "test-legal-assent-secret" };
+  const cookie = legalAssentCookieHeader("Admin@Rend.test", new Date(), env).split(";")[0];
+  const headers = new Headers({ cookie });
+
+  assert.deepEqual(legalAssentFromHeaders(headers, "admin@rend.test", env), {
+    acceptedAt: legalAssentFromHeaders(headers, "admin@rend.test", env)?.acceptedAt,
+    email: "admin@rend.test",
+    version: LEGAL_ASSENT_VERSION,
+  });
+  assert.equal(legalAssentFromHeaders(headers, "other@rend.test", env), null);
+  assert.equal(legalAssentFromHeaders(new Headers({ cookie: `${cookie}tampered` }), "admin@rend.test", env), null);
 });
