@@ -8,6 +8,7 @@ import type {
   AssetErrorResponse,
   AssetUploadResponse,
 } from "../lib/asset-types.ts";
+import type { DashboardState } from "../lib/dashboard-state.ts";
 
 type UploadState =
   | { status: "idle" }
@@ -65,10 +66,12 @@ function uploadFile(file: File, onProgress: (progress: number | null) => void) {
 }
 
 export default function AssetsClient({
+  dashboardState,
   initialAssets,
   initialError,
   readOnlyReason,
 }: {
+  dashboardState: DashboardState;
   initialAssets: AssetSummary[];
   initialError?: string;
   readOnlyReason?: string;
@@ -82,6 +85,8 @@ export default function AssetsClient({
     () => [...assets].sort((left, right) => right.created_at.localeCompare(left.created_at)),
     [assets]
   );
+  const uploadDisabledReason =
+    readOnlyReason ?? (dashboardState.blocksUpload ? dashboardState.message : undefined);
 
   async function refreshAssets() {
     setRefreshing(true);
@@ -109,8 +114,8 @@ export default function AssetsClient({
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
-    if (readOnlyReason) {
-      setUpload({ status: "error", message: readOnlyReason });
+    if (uploadDisabledReason) {
+      setUpload({ status: "error", message: uploadDisabledReason });
       return;
     }
 
@@ -153,10 +158,33 @@ export default function AssetsClient({
             <p className="app-kicker">Rend app</p>
             <h1>Assets</h1>
           </div>
-          <label className="app-upload-button" aria-disabled={Boolean(readOnlyReason)}>
-            <input accept="video/*" disabled={Boolean(readOnlyReason)} onChange={onFileChange} type="file" />
-            {readOnlyReason ? "Uploads disabled" : "Upload video"}
+          <label className="app-upload-button" aria-disabled={Boolean(uploadDisabledReason)}>
+            <input accept="video/*" disabled={Boolean(uploadDisabledReason)} onChange={onFileChange} type="file" />
+            {uploadDisabledReason ? "Uploads disabled" : "Upload video"}
           </label>
+        </section>
+
+        <section className="app-callout app-callout-done">
+          <div>
+            <strong>Workspace setup</strong>
+            <span>Your workspace was created automatically after email verification.</span>
+          </div>
+        </section>
+
+        <section
+          className={`app-callout ${
+            dashboardState.status === "ready_to_upload" ? "app-callout-done" : "app-callout-error"
+          }`}
+        >
+          <div>
+            <strong>{dashboardState.title}</strong>
+            <span>{dashboardState.message}</span>
+          </div>
+          {dashboardState.actionHref && dashboardState.actionLabel ? (
+            <Link className="app-link-button" href={dashboardState.actionHref}>
+              {dashboardState.actionLabel}
+            </Link>
+          ) : null}
         </section>
 
         {readOnlyReason ? (

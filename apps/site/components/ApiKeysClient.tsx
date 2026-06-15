@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useState } from "react";
 import type { ApiKeyRecord, ApiKeyScope } from "../lib/api-key-types.ts";
 import { API_KEY_SCOPES } from "../lib/api-key-types.ts";
+import type { DashboardState } from "../lib/dashboard-state.ts";
 
 type CreateResponse =
   | { status: "ok"; api_key: ApiKeyRecord; secret: string }
@@ -22,10 +23,12 @@ function formatTimestamp(value: string | undefined) {
 }
 
 export default function ApiKeysClient({
+  dashboardState,
   initialKeys,
   initialError,
   readOnlyReason,
 }: {
+  dashboardState: DashboardState;
   initialKeys: ApiKeyRecord[];
   initialError?: string;
   readOnlyReason?: string;
@@ -37,6 +40,8 @@ export default function ApiKeysClient({
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(initialError ?? "");
   const [submitting, setSubmitting] = useState(false);
+  const createDisabledReason =
+    readOnlyReason ?? (dashboardState.blocksUpload ? dashboardState.message : undefined);
 
   async function refreshKeys() {
     const response = await fetch("/api/api-keys", { cache: "no-store" });
@@ -49,8 +54,8 @@ export default function ApiKeysClient({
 
   async function createKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (readOnlyReason) {
-      setError(readOnlyReason);
+    if (createDisabledReason) {
+      setError(createDisabledReason);
       return;
     }
     setSubmitting(true);
@@ -162,6 +167,22 @@ export default function ApiKeysClient({
           </section>
         ) : null}
 
+        <section
+          className={`app-callout ${
+            dashboardState.status === "ready_to_upload" ? "app-callout-done" : "app-callout-error"
+          }`}
+        >
+          <div>
+            <strong>{dashboardState.title}</strong>
+            <span>{dashboardState.message}</span>
+          </div>
+          {dashboardState.actionHref && dashboardState.actionLabel ? (
+            <Link className="app-link-button" href={dashboardState.actionHref}>
+              {dashboardState.actionLabel}
+            </Link>
+          ) : null}
+        </section>
+
         {readOnlyReason ? (
           <section className="app-callout app-callout-error">
             <span>{readOnlyReason}</span>
@@ -173,7 +194,7 @@ export default function ApiKeysClient({
           <form className="app-key-form" onSubmit={createKey}>
             <label htmlFor="api-key-name">Name</label>
             <input
-              disabled={submitting || Boolean(readOnlyReason)}
+              disabled={submitting || Boolean(createDisabledReason)}
               id="api-key-name"
               maxLength={80}
               onChange={(event) => setName(event.currentTarget.value)}
@@ -185,7 +206,7 @@ export default function ApiKeysClient({
                 <label key={scope}>
                   <input
                     checked={scopes.includes(scope)}
-                    disabled={submitting || Boolean(readOnlyReason)}
+                    disabled={submitting || Boolean(createDisabledReason)}
                     onChange={() => toggleScope(scope)}
                     type="checkbox"
                   />
@@ -193,7 +214,7 @@ export default function ApiKeysClient({
                 </label>
               ))}
             </div>
-            <button disabled={submitting || Boolean(readOnlyReason) || !name.trim() || scopes.length === 0} type="submit">
+            <button disabled={submitting || Boolean(createDisabledReason) || !name.trim() || scopes.length === 0} type="submit">
               {submitting ? "Creating..." : "Create key"}
             </button>
           </form>
