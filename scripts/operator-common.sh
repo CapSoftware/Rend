@@ -416,6 +416,52 @@ operator_check_rend_env() {
   fi
 }
 
+operator_check_billing_mode() {
+  local file="$1"
+  local allow_dev_defaults="$2"
+  local value rend_env
+  value="$(operator_env_value "$file" REND_BILLING_MODE 2>/dev/null || true)"
+  rend_env="$(operator_env_value "$file" REND_ENV 2>/dev/null || true)"
+  case "$value" in
+    local | autumn)
+      operator_ok "REND_BILLING_MODE is $value"
+      ;;
+    *)
+      operator_fail "REND_BILLING_MODE must be one of: local, autumn"
+      return 0
+      ;;
+  esac
+  if [[ "$rend_env" == "production" && "$value" != "autumn" && "$allow_dev_defaults" != "true" ]]; then
+    operator_fail "REND_BILLING_MODE=autumn is required when REND_ENV is production"
+  fi
+}
+
+operator_check_billing_failure_policy() {
+  local file="$1"
+  local key="REND_BILLING_ENTITLEMENT_FAILURE_POLICY"
+  local value
+  value="$(operator_env_value "$file" "$key" 2>/dev/null || true)"
+  case "$value" in
+    fail_closed | fail_open)
+      operator_ok "$key is $value"
+      ;;
+    *)
+      operator_fail "$key must be fail_closed or fail_open"
+      ;;
+  esac
+}
+
+operator_check_billing_secret() {
+  local file="$1"
+  local mode
+  mode="$(operator_env_value "$file" REND_BILLING_MODE 2>/dev/null || true)"
+  if [[ "$mode" == "autumn" ]]; then
+    operator_require_env_nonempty "$file" AUTUMN_SECRET_KEY
+  else
+    operator_require_env_present "$file" AUTUMN_SECRET_KEY
+  fi
+}
+
 operator_check_positive_int() {
   local file="$1"
   local key="$2"
@@ -586,8 +632,16 @@ operator_validate_api_env() {
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS REND_FFMPEG_PATH
     REND_FFPROBE_PATH REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
     REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_BILLING_MODE
+    REND_BILLING_FEATURE_DELIVERY_720P REND_BILLING_FEATURE_DELIVERY_1080P
+    REND_BILLING_FEATURE_DELIVERY_2K REND_BILLING_FEATURE_DELIVERY_4K
+    REND_BILLING_FEATURE_STORAGE_720P REND_BILLING_FEATURE_STORAGE_1080P
+    REND_BILLING_FEATURE_STORAGE_2K REND_BILLING_FEATURE_STORAGE_4K
+    REND_BILLING_ENTITLEMENT_FAILURE_POLICY
+    REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
+    REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
-  optional=(REND_EDGE_WARM_URL REND_EDGE_PURGE_URL)
+  optional=(REND_EDGE_WARM_URL REND_EDGE_PURGE_URL AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION)
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_PLAYBACK_TOKEN_TTL_SECS
@@ -598,6 +652,8 @@ operator_validate_api_env() {
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
     REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
     REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
+    REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
 
   operator_require_file "$file"
@@ -607,6 +663,9 @@ operator_validate_api_env() {
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
   operator_check_rend_env "$file" "$allow_dev_defaults"
+  operator_check_billing_mode "$file" "$allow_dev_defaults"
+  operator_check_billing_secret "$file"
+  operator_check_billing_failure_policy "$file"
   operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
   operator_check_redis_url "$file" REND_REDIS_URL
@@ -614,6 +673,7 @@ operator_validate_api_env() {
   operator_check_http_url "$file" OBJECT_STORE_HEALTH_URL
   operator_check_http_url "$file" S3_ENDPOINT
   operator_check_http_url "$file" REND_PLAYBACK_BASE_URL
+  operator_check_http_url "$file" AUTUMN_API_URL
   operator_check_http_url "$file" REND_EDGE_WARM_URL "/internal/warm"
   operator_check_http_url "$file" REND_EDGE_PURGE_URL "/internal/purge"
   operator_check_bind_addr "$file" REND_API_BIND_ADDR 4000
@@ -650,8 +710,16 @@ operator_validate_worker_env() {
     REND_FFPROBE_PATH REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
     REND_MEDIA_WORKER_ID REND_MEDIA_WORKER_POLL_INTERVAL_SECS
     REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_BILLING_MODE
+    REND_BILLING_FEATURE_DELIVERY_720P REND_BILLING_FEATURE_DELIVERY_1080P
+    REND_BILLING_FEATURE_DELIVERY_2K REND_BILLING_FEATURE_DELIVERY_4K
+    REND_BILLING_FEATURE_STORAGE_720P REND_BILLING_FEATURE_STORAGE_1080P
+    REND_BILLING_FEATURE_STORAGE_2K REND_BILLING_FEATURE_STORAGE_4K
+    REND_BILLING_ENTITLEMENT_FAILURE_POLICY
+    REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
+    REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
-  optional=(REND_EDGE_WARM_URL REND_EDGE_PURGE_URL)
+  optional=(REND_EDGE_WARM_URL REND_EDGE_PURGE_URL AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION)
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS REND_PLAYBACK_TOKEN_TTL_SECS
@@ -662,6 +730,8 @@ operator_validate_worker_env() {
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
     REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
     REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
+    REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
 
   operator_require_file "$file"
@@ -671,6 +741,9 @@ operator_validate_worker_env() {
   done
   operator_check_all_env_policies "$file" "$allow_dev_defaults" "$allow_placeholders" "${policy_keys[@]}"
   operator_check_rend_env "$file" "$allow_dev_defaults"
+  operator_check_billing_mode "$file" "$allow_dev_defaults"
+  operator_check_billing_secret "$file"
+  operator_check_billing_failure_policy "$file"
   operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
   operator_check_redis_url "$file" REND_REDIS_URL
@@ -678,6 +751,7 @@ operator_validate_worker_env() {
   operator_check_http_url "$file" OBJECT_STORE_HEALTH_URL
   operator_check_http_url "$file" S3_ENDPOINT
   operator_check_http_url "$file" REND_PLAYBACK_BASE_URL
+  operator_check_http_url "$file" AUTUMN_API_URL
   operator_check_http_url "$file" REND_EDGE_WARM_URL "/internal/warm"
   operator_check_http_url "$file" REND_EDGE_PURGE_URL "/internal/purge"
   operator_check_bool "$file" REND_API_AUTO_MIGRATE
