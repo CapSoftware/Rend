@@ -86,8 +86,13 @@ export default function LoginForm({
     <div className="app-login-page">
       <section className="app-login-panel">
         <img src="/rend-logo.svg" alt="Rend" className="app-login-logo" />
-        <h1>Sign in</h1>
+        <h1>{codeSent ? "Verify your email" : "Sign in or create a workspace"}</h1>
         <form className="app-login-form" onSubmit={onSubmit}>
+          <p className="app-login-help">
+            {codeSent
+              ? "Enter the six-digit code sent to your email."
+              : "Use your email to start. Rend creates your workspace after verification."}
+          </p>
           <label htmlFor="email">Email</label>
           <input
             autoComplete="email"
@@ -138,7 +143,7 @@ export default function LoginForm({
               Use another email
             </button>
           ) : null}
-          {error ? <p>{error}</p> : null}
+          {error ? <p className="app-login-error">{error}</p> : null}
         </form>
       </section>
     </div>
