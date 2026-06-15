@@ -272,7 +272,7 @@ export async function renderOgImage(page?: { title: string; subtitle?: string })
           textAlign: "center",
         }}
       >
-        One API call to upload, one URL that plays instantly anywhere in the world.
+        One API call to upload, one playback URL designed to start fast.
       </div>
       <div
         style={{
