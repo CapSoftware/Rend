@@ -436,6 +436,43 @@
     font-weight: 650;
   }
 
+  .app-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .app-plan-card {
+    display: grid;
+    min-height: 180px;
+    align-content: space-between;
+    gap: 14px;
+    border: 1px solid #d9dee6;
+    border-radius: 8px;
+    padding: 14px;
+    background: #fbfcfe;
+  }
+
+  .app-plan-card h3 {
+    margin-bottom: 8px;
+  }
+
+  .app-plan-price {
+    display: grid;
+    gap: 2px;
+  }
+
+  .app-plan-price strong {
+    color: #17191c;
+    font-size: 18px;
+  }
+
+  .app-plan-price span {
+    color: #586273;
+    font-size: 12px;
+    font-weight: 650;
+  }
+
   .app-code-block {
     margin-top: 10px;
     overflow-wrap: anywhere;
@@ -569,7 +606,8 @@
     .app-stats,
     .app-readiness-stats,
     .app-counts,
-    .app-scope-grid {
+    .app-scope-grid,
+    .app-plan-grid {
       grid-template-columns: 1fr;
     }
   }
