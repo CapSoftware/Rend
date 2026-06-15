@@ -1,6 +1,7 @@
 import { ogSize, renderOgImage } from "@/lib/og";
+import { siteTitle } from "@/lib/seo";
 
-export const alt = "Rend, video infrastructure built for speed";
+export const alt = siteTitle;
 export const size = ogSize;
 export const contentType = "image/png";
 
