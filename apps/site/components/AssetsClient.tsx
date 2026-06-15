@@ -8,6 +8,7 @@ import type {
   AssetErrorResponse,
   AssetUploadResponse,
 } from "../lib/asset-types.ts";
+import { signOutOfDashboard } from "../lib/auth-client.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
 
 type UploadState =
@@ -105,11 +106,6 @@ export default function AssetsClient({
     }
   }
 
-  async function signOut() {
-    await fetch("/api/auth/sign-out", { method: "POST", cache: "no-store" }).catch(() => undefined);
-    window.location.assign("/login");
-  }
-
   async function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
@@ -146,7 +142,7 @@ export default function AssetsClient({
           <button onClick={refreshAssets} disabled={refreshing} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
-          <button onClick={signOut} type="button">
+          <button onClick={signOutOfDashboard} type="button">
             Sign out
           </button>
         </nav>

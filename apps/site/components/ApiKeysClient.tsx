@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useState } from "react";
 import type { ApiKeyRecord, ApiKeyScope } from "../lib/api-key-types.ts";
 import { API_KEY_SCOPES } from "../lib/api-key-types.ts";
+import { signOutOfDashboard } from "../lib/auth-client.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
 
 type CreateResponse =
@@ -107,11 +108,6 @@ export default function ApiKeysClient({
     });
   }
 
-  async function signOut() {
-    await fetch("/api/auth/sign-out", { method: "POST", cache: "no-store" }).catch(() => undefined);
-    window.location.assign("/login");
-  }
-
   function toggleScope(scope: ApiKeyScope) {
     setScopes((current) => {
       if (current.includes(scope)) {
@@ -138,7 +134,7 @@ export default function ApiKeysClient({
           <Link href="/dashboard/assets">Assets</Link>
           <Link href="/dashboard/api-keys">API keys</Link>
           <Link href="/dashboard/billing">Billing</Link>
-          <button onClick={signOut} type="button">
+          <button onClick={signOutOfDashboard} type="button">
             Sign out
           </button>
         </nav>

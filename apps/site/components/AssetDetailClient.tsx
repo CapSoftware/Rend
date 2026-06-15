@@ -9,6 +9,7 @@ import type {
   AssetPlayerTelemetryEvent,
   AssetPlayerTelemetryResponse,
 } from "../lib/asset-types.ts";
+import { signOutOfDashboard } from "../lib/auth-client.ts";
 
 type DetailResponse = { status: "ok"; asset: AssetDetail };
 type AnalyticsResponse = { status: "ok"; analytics: AssetPlaybackAnalytics };
@@ -211,11 +212,6 @@ export default function AssetDetailClient({
     }
   }
 
-  async function signOut() {
-    await fetch("/api/auth/sign-out", { method: "POST", cache: "no-store" }).catch(() => undefined);
-    window.location.assign("/login");
-  }
-
   const artifactRows = useMemo(
     () => [...asset.artifacts].sort((left, right) => left.kind.localeCompare(right.kind)),
     [asset.artifacts]
@@ -239,7 +235,7 @@ export default function AssetDetailClient({
               Open embed
             </a>
           )}
-          <button onClick={signOut} type="button">
+          <button onClick={signOutOfDashboard} type="button">
             Sign out
           </button>
         </nav>
