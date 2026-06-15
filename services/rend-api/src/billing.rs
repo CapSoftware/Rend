@@ -1459,9 +1459,10 @@ mod tests {
         );
 
         assert!(query.contains("GROUP BY event_id"));
-        assert!(query.contains("sum(delivered_duration_ms) / 1000.0 AS value"));
+        assert!(query.contains("sum(delivered_duration_ms_value) / 1000.0 AS value"));
+        assert!(query.contains("any(delivered_duration_ms) AS delivered_duration_ms_value"));
         assert!(query.contains("resolution_tier IN ('720p', '1080p', '2k', '4k')"));
-        assert!(query.contains("GROUP BY resolution_tier"));
+        assert!(query.contains("GROUP BY tier"));
     }
 
     #[test]
