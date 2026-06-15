@@ -1,6 +1,7 @@
 import { and, asc, eq } from "drizzle-orm";
 import { ensureLocalAuthSeed } from "./auth-seed.ts";
 import { getAuth } from "./auth.ts";
+import { ensureBillingCustomerSoft } from "./billing.ts";
 import { member, organization } from "./db/schema.ts";
 import { getSiteDb } from "./server-db.ts";
 
@@ -219,31 +220,37 @@ export async function dashboardAccessFromHeaders(headers: Headers): Promise<Dash
     const provisioned = await provisionDefaultOrganization(userId, userEmail);
     if (!provisioned) return { ok: false, reason: "unauthorized" };
 
+    const context: DashboardAccessContext = {
+      userId,
+      userEmail,
+      organizationId: provisioned.organizationId,
+      organizationName: provisioned.organizationName,
+      organizationSlug: provisioned.organizationSlug,
+      role: provisioned.role,
+    };
+    await ensureBillingCustomerSoft(context);
+
     return {
       ok: true,
-      context: {
-        userId,
-        userEmail,
-        organizationId: provisioned.organizationId,
-        organizationName: provisioned.organizationName,
-        organizationSlug: provisioned.organizationSlug,
-        role: provisioned.role,
-      },
+      context,
     };
   }
 
+  const context: DashboardAccessContext = {
+    userId,
+    userEmail,
+    organizationId: row.organizationId,
+    organizationName: row.organizationName,
+    organizationSlug: row.organizationSlug,
+    role: normalizeRole(row.role),
+    organizationSuspendedAt: isoDate(row.organizationSuspendedAt),
+    organizationSuspensionReason: row.organizationSuspensionReason ?? undefined,
+  };
+  await ensureBillingCustomerSoft(context);
+
   return {
     ok: true,
-    context: {
-      userId,
-      userEmail,
-      organizationId: row.organizationId,
-      organizationName: row.organizationName,
-      organizationSlug: row.organizationSlug,
-      role: normalizeRole(row.role),
-      organizationSuspendedAt: isoDate(row.organizationSuspendedAt),
-      organizationSuspensionReason: row.organizationSuspensionReason ?? undefined,
-    },
+    context,
   };
 }
 
