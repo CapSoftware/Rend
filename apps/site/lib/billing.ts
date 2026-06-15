@@ -10,6 +10,11 @@ const AUTUMN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 type JsonRecord = Record<string, unknown>;
 type BillingMode = "local" | "autumn";
 type BillingSyncStatus = "ok" | "soft_failed" | "not_configured";
+export type BillingReadinessStatus =
+  | "ready"
+  | "billing_required"
+  | "plan_limit_exceeded"
+  | "billing_unavailable";
 
 export type BillingBalance = {
   featureId: string;
@@ -51,6 +56,14 @@ export type BillingOverview = {
   checkoutEnabled: boolean;
   syncedAt?: string;
   error?: string;
+};
+
+export type BillingReadiness = {
+  status: BillingReadinessStatus;
+  code: "ready" | "billing_required" | "limit_exceeded" | "billing_unavailable";
+  message: string;
+  actionHref?: string;
+  actionLabel?: string;
 };
 
 export class BillingError extends Error {
@@ -560,6 +573,81 @@ export async function billingOverview(context: DashboardAccessContext): Promise<
     }).catch(() => undefined);
     return fallbackBillingOverview(context, error);
   }
+}
+
+function activeBillingRelationship(overview: BillingOverview) {
+  if (overview.mode === "local") return true;
+  if (overview.subscriptions.some((subscription) => subscription.status.toLowerCase() === "active")) {
+    return true;
+  }
+  return overview.plans.some((plan) => plan.relationshipStatus?.toLowerCase() === "active");
+}
+
+function exhaustedBalance(overview: BillingOverview) {
+  return overview.balances.find((balance) => {
+    if (balance.unlimited || balance.overageAllowed) return false;
+    return balance.remaining !== undefined && balance.remaining <= 0;
+  });
+}
+
+export function billingReadinessFromOverview(overview: BillingOverview): BillingReadiness {
+  if (overview.mode === "local") {
+    return {
+      status: "ready",
+      code: "ready",
+      message: "Local billing is ready for uploads and API keys.",
+    };
+  }
+
+  if (overview.status !== "ok") {
+    return {
+      status: "billing_unavailable",
+      code: "billing_unavailable",
+      message: overview.error || "Billing state could not be verified. Try again after billing sync recovers.",
+      actionHref: "/dashboard/billing",
+      actionLabel: "Review billing",
+    };
+  }
+
+  if (!activeBillingRelationship(overview)) {
+    return {
+      status: "billing_required",
+      code: "billing_required",
+      message: "Choose a plan before creating API keys or uploading billable media.",
+      actionHref: "/dashboard/billing",
+      actionLabel: "Choose a plan",
+    };
+  }
+
+  const balance = exhaustedBalance(overview);
+  if (balance) {
+    return {
+      status: "plan_limit_exceeded",
+      code: "limit_exceeded",
+      message: `Plan limit exceeded for ${balance.featureId}. Update billing before uploading more media.`,
+      actionHref: "/dashboard/billing",
+      actionLabel: "Update billing",
+    };
+  }
+
+  return {
+    status: "ready",
+    code: "ready",
+    message: "Billing is ready. You can create API keys and upload video.",
+  };
+}
+
+export async function requireBillingReady(context: DashboardAccessContext) {
+  const overview = await billingOverview(context);
+  const readiness = billingReadinessFromOverview(overview);
+  if (readiness.status !== "ready") {
+    throw new BillingError(
+      readiness.status === "billing_required" ? 402 : readiness.status === "plan_limit_exceeded" ? 403 : 503,
+      readiness.code,
+      readiness.message
+    );
+  }
+  return { overview, readiness };
 }
 
 function safePlanId(value: unknown) {
