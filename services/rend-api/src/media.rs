@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
@@ -7,10 +8,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
+use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::{fs, io, process::Command, time};
 
-use crate::events::{self, ArtifactEventInput};
+use crate::{
+    billing,
+    events::{self, ArtifactEventInput},
+};
 
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 
@@ -41,10 +46,40 @@ struct UploadedArtifact {
     object_key: String,
     content_type: &'static str,
     byte_size: i64,
+    duration_ms: Option<i64>,
+    resolution_tier: Option<String>,
 }
 
 struct CommandOutput {
     stdout: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceProbe {
+    duration_ms: i64,
+    width: i32,
+    height: i32,
+    resolution_tier: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeOutput {
+    #[serde(default)]
+    streams: Vec<FfprobeStream>,
+    format: Option<FfprobeFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeStream {
+    codec_type: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    duration: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat {
+    duration: Option<String>,
 }
 
 pub async fn process_uploaded_source(request: ProcessMediaRequest) -> Result<ProcessMediaOutcome> {
@@ -88,11 +123,12 @@ async fn process_in_dir(
 ) -> Result<ProcessMediaOutcome> {
     let source_path = processing_dir.join("source");
     download_source_object(request, &source_path).await?;
-    probe_video_stream(&request.config, &source_path).await?;
+    let source_probe = probe_video_stream(&request.config, &source_path).await?;
 
-    let opener_artifact = generate_and_upload_opener(request, processing_dir, &source_path)
-        .await
-        .context("failed to generate opener artifact")?;
+    let opener_artifact =
+        generate_and_upload_opener(request, processing_dir, &source_path, &source_probe)
+            .await
+            .context("failed to generate opener artifact")?;
 
     let thumbnail_artifact =
         match generate_and_upload_thumbnail(request, processing_dir, &source_path).await {
@@ -107,17 +143,18 @@ async fn process_in_dir(
             }
         };
 
-    let hls_artifacts = match generate_and_upload_hls(request, processing_dir, &source_path).await {
-        Ok(artifacts) => artifacts,
-        Err(error) => {
-            tracing::warn!(
-                asset_id = %request.asset_id,
-                error = %limit_error(&error),
-                "HLS generation failed; keeping opener-only playback state",
-            );
-            Vec::new()
-        }
-    };
+    let hls_artifacts =
+        match generate_and_upload_hls(request, processing_dir, &source_path, &source_probe).await {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                tracing::warn!(
+                    asset_id = %request.asset_id,
+                    error = %limit_error(&error),
+                    "HLS generation failed; keeping opener-only playback state",
+                );
+                Vec::new()
+            }
+        };
 
     let mut artifacts = Vec::with_capacity(2 + hls_artifacts.len());
     artifacts.push(opener_artifact.clone());
@@ -143,6 +180,7 @@ async fn process_in_dir(
         &artifacts,
         playable_state,
         &opener_artifact.object_key,
+        &source_probe,
     )
     .await?;
 
@@ -209,7 +247,10 @@ pub async fn set_asset_media_failed(db: &PgPool, asset_id: &str) -> Result<()> {
     set_failed_playable_state(db, asset_id).await
 }
 
-async fn probe_video_stream(config: &MediaProcessingConfig, source_path: &Path) -> Result<()> {
+async fn probe_video_stream(
+    config: &MediaProcessingConfig,
+    source_path: &Path,
+) -> Result<SourceProbe> {
     let output = run_media_command(
         &config.ffprobe_path,
         vec![
@@ -218,9 +259,9 @@ async fn probe_video_stream(config: &MediaProcessingConfig, source_path: &Path) 
             os("-select_streams"),
             os("v:0"),
             os("-show_entries"),
-            os("stream=codec_type"),
+            os("stream=codec_type,width,height,duration:format=duration"),
             os("-of"),
-            os("csv=p=0"),
+            os("json"),
             source_path.as_os_str().to_owned(),
         ],
         config.process_timeout,
@@ -228,17 +269,48 @@ async fn probe_video_stream(config: &MediaProcessingConfig, source_path: &Path) 
     .await
     .context("ffprobe failed")?;
 
+    let parsed: FfprobeOutput =
+        serde_json::from_str(&output.stdout).context("ffprobe returned invalid JSON")?;
+    let stream = parsed
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .context("ffprobe found no video stream")?;
+    let width = stream.width.context("ffprobe did not return video width")?;
+    let height = stream
+        .height
+        .context("ffprobe did not return video height")?;
     anyhow::ensure!(
-        output.stdout.lines().any(|line| line.trim() == "video"),
-        "ffprobe found no video stream"
+        width > 0 && height > 0,
+        "ffprobe returned invalid video dimensions"
     );
-    Ok(())
+    let duration_ms = stream
+        .duration
+        .as_deref()
+        .and_then(parse_duration_ms)
+        .or_else(|| {
+            parsed
+                .format
+                .as_ref()
+                .and_then(|format| format.duration.as_deref())
+                .and_then(parse_duration_ms)
+        })
+        .context("ffprobe did not return video duration")?;
+    anyhow::ensure!(duration_ms > 0, "ffprobe returned invalid video duration");
+
+    Ok(SourceProbe {
+        duration_ms,
+        width,
+        height,
+        resolution_tier: classify_resolution_tier(width, height),
+    })
 }
 
 async fn generate_and_upload_opener(
     request: &ProcessMediaRequest,
     processing_dir: &Path,
     source_path: &Path,
+    source_probe: &SourceProbe,
 ) -> Result<UploadedArtifact> {
     let opener_path = processing_dir.join("opener.mp4");
     run_media_command(
@@ -281,6 +353,8 @@ async fn generate_and_upload_opener(
         opener_object_key(&request.asset_id),
         "video/mp4",
         "opener",
+        Some(source_probe.duration_ms.min(5_000)),
+        Some(source_probe.resolution_tier),
     )
     .await
 }
@@ -315,6 +389,8 @@ async fn generate_and_upload_thumbnail(
         thumbnail_object_key(&request.asset_id),
         "image/jpeg",
         "thumbnail",
+        None,
+        None,
     )
     .await
 }
@@ -323,6 +399,7 @@ async fn generate_and_upload_hls(
     request: &ProcessMediaRequest,
     processing_dir: &Path,
     source_path: &Path,
+    source_probe: &SourceProbe,
 ) -> Result<Vec<UploadedArtifact>> {
     let hls_dir = processing_dir.join("hls");
     fs::create_dir_all(&hls_dir).await.with_context(|| {
@@ -375,12 +452,17 @@ async fn generate_and_upload_hls(
     .await?;
 
     let mut artifacts = Vec::new();
+    let segment_durations = hls_segment_durations(&manifest_path)
+        .await
+        .context("failed to read HLS segment durations")?;
     let manifest_artifact = upload_generated_file(
         request,
         &manifest_path,
         hls_manifest_object_key(&request.asset_id),
         "application/vnd.apple.mpegurl",
         "manifest",
+        Some(0),
+        Some(source_probe.resolution_tier),
     )
     .await?;
     artifacts.push(manifest_artifact);
@@ -412,12 +494,15 @@ async fn generate_and_upload_hls(
             .context("HLS segment path has no file name")?
             .to_string_lossy()
             .into_owned();
+        let duration_ms = segment_durations.get(&file_name).copied().or(Some(2_000));
         let artifact = upload_generated_file(
             request,
             &segment_path,
             hls_segment_object_key(&request.asset_id, &file_name),
             "video/mp2t",
             "segment",
+            duration_ms,
+            Some(source_probe.resolution_tier),
         )
         .await?;
         artifacts.push(artifact);
@@ -432,6 +517,8 @@ async fn upload_generated_file(
     object_key: String,
     content_type: &'static str,
     kind: &'static str,
+    duration_ms: Option<i64>,
+    resolution_tier: Option<&'static str>,
 ) -> Result<UploadedArtifact> {
     let bytes = fs::read(path)
         .await
@@ -461,6 +548,8 @@ async fn upload_generated_file(
         object_key,
         content_type,
         byte_size,
+        duration_ms,
+        resolution_tier: resolution_tier.map(str::to_owned),
     })
 }
 
@@ -470,6 +559,7 @@ async fn persist_artifacts_and_state(
     artifacts: &[UploadedArtifact],
     playable_state: &str,
     opener_object_key: &str,
+    source_probe: &SourceProbe,
 ) -> Result<bool> {
     let mut tx = db
         .begin()
@@ -536,7 +626,12 @@ async fn persist_artifacts_and_state(
         UPDATE rend.assets
         SET source_state = 'uploaded',
             playable_state = $2,
-            current_opener_artifact_id = $3::uuid
+            current_opener_artifact_id = $3::uuid,
+            duration_ms = $4,
+            source_width = $5,
+            source_height = $6,
+            source_resolution_tier = $7,
+            max_resolution_tier = $7
         WHERE id = $1::uuid
           AND deleted_at IS NULL
           AND suspended_at IS NULL
@@ -551,9 +646,33 @@ async fn persist_artifacts_and_state(
     .bind(asset_id)
     .bind(playable_state)
     .bind(opener_artifact_id.as_deref())
+    .bind(source_probe.duration_ms)
+    .bind(source_probe.width)
+    .bind(source_probe.height)
+    .bind(source_probe.resolution_tier)
     .execute(&mut *tx)
     .await
     .context("failed to update asset playable state")?;
+
+    sqlx::query(
+        "
+        UPDATE rend.artifacts
+        SET duration_ms = $2,
+            resolution_tier = $3
+        WHERE asset_id = $1::uuid
+          AND kind = 'source'
+        ",
+    )
+    .bind(asset_id)
+    .bind(source_probe.duration_ms)
+    .bind(source_probe.resolution_tier)
+    .execute(&mut *tx)
+    .await
+    .context("failed to update source artifact billing metadata")?;
+
+    billing::open_asset_storage_span(&mut tx, asset_id)
+        .await
+        .context("failed to open asset storage billing span")?;
 
     if previous_playable_state != playable_state {
         events::insert_asset_event(
@@ -579,8 +698,16 @@ async fn insert_artifact(
 ) -> Result<String> {
     let artifact_id = sqlx::query_scalar(
         "
-        INSERT INTO rend.artifacts (asset_id, kind, object_key, content_type, byte_size)
-        VALUES ($1::uuid, $2, $3, $4, $5)
+        INSERT INTO rend.artifacts (
+          asset_id,
+          kind,
+          object_key,
+          content_type,
+          byte_size,
+          duration_ms,
+          resolution_tier
+        )
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
         RETURNING id::text
         ",
     )
@@ -589,6 +716,8 @@ async fn insert_artifact(
     .bind(&artifact.object_key)
     .bind(artifact.content_type)
     .bind(artifact.byte_size)
+    .bind(artifact.duration_ms)
+    .bind(artifact.resolution_tier.as_deref())
     .fetch_one(&mut **tx)
     .await?;
 
@@ -743,6 +872,62 @@ fn limit_error(error: &anyhow::Error) -> String {
     }
 }
 
+fn parse_duration_ms(value: &str) -> Option<i64> {
+    let seconds = value.trim().parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    let millis = (seconds * 1000.0).round();
+    if millis <= 0.0 || millis > i64::MAX as f64 {
+        None
+    } else {
+        Some(millis as i64)
+    }
+}
+
+fn classify_resolution_tier(width: i32, height: i32) -> &'static str {
+    let max_dimension = width.max(height);
+    if max_dimension <= 1280 {
+        "720p"
+    } else if max_dimension <= 1920 {
+        "1080p"
+    } else if max_dimension <= 2560 {
+        "2k"
+    } else {
+        "4k"
+    }
+}
+
+async fn hls_segment_durations(manifest_path: &Path) -> Result<HashMap<String, i64>> {
+    let manifest = fs::read_to_string(manifest_path)
+        .await
+        .with_context(|| format!("failed to read HLS manifest {}", manifest_path.display()))?;
+    Ok(parse_hls_segment_durations(&manifest))
+}
+
+fn parse_hls_segment_durations(manifest: &str) -> HashMap<String, i64> {
+    let mut durations = HashMap::new();
+    let mut pending_duration_ms = None;
+    for line in manifest.lines().map(str::trim) {
+        if let Some(raw_duration) = line
+            .strip_prefix("#EXTINF:")
+            .and_then(|value| value.split(',').next())
+        {
+            pending_duration_ms = parse_duration_ms(raw_duration);
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(duration_ms) = pending_duration_ms.take()
+            && let Some(file_name) = Path::new(line).file_name().and_then(|value| value.to_str())
+        {
+            durations.insert(file_name.to_owned(), duration_ms);
+        }
+    }
+    durations
+}
+
 pub fn opener_object_key(asset_id: &str) -> String {
     format!("videos/{asset_id}/opener.mp4")
 }
@@ -832,30 +1017,40 @@ mod tests {
                 object_key: hls_segment_object_key("asset-123", "segment_00001.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
+                duration_ms: Some(2_000),
+                resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
                 kind: "opener",
                 object_key: opener_object_key("asset-123"),
                 content_type: "video/mp4",
                 byte_size: 1,
+                duration_ms: Some(5_000),
+                resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
                 kind: "manifest",
                 object_key: hls_manifest_object_key("asset-123"),
                 content_type: "application/vnd.apple.mpegurl",
                 byte_size: 1,
+                duration_ms: Some(0),
+                resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
                 kind: "segment",
                 object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
+                duration_ms: Some(2_000),
+                resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
                 kind: "thumbnail",
                 object_key: thumbnail_object_key("asset-123"),
                 content_type: "image/jpeg",
                 byte_size: 1,
+                duration_ms: None,
+                resolution_tier: None,
             },
         ];
 
@@ -878,12 +1073,16 @@ mod tests {
                 object_key: opener_object_key("asset-123"),
                 content_type: "video/mp4",
                 byte_size: 1,
+                duration_ms: Some(5_000),
+                resolution_tier: Some("720p".to_owned()),
             },
             UploadedArtifact {
                 kind: "segment",
                 object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
+                duration_ms: Some(2_000),
+                resolution_tier: Some("720p".to_owned()),
             },
         ];
 
@@ -899,5 +1098,31 @@ mod tests {
         let output = limit_bytes(&bytes);
         assert!(output.ends_with("...[truncated]"));
         assert!(output.len() < OUTPUT_LOG_LIMIT_BYTES + 32);
+    }
+
+    #[test]
+    fn resolution_tier_uses_max_dimension() {
+        assert_eq!(classify_resolution_tier(1280, 720), "720p");
+        assert_eq!(classify_resolution_tier(1920, 1080), "1080p");
+        assert_eq!(classify_resolution_tier(2048, 1080), "2k");
+        assert_eq!(classify_resolution_tier(3840, 2160), "4k");
+        assert_eq!(classify_resolution_tier(1080, 1920), "1080p");
+    }
+
+    #[test]
+    fn hls_segment_duration_parser_maps_extinf_to_segment_names() {
+        let durations = parse_hls_segment_durations(
+            r#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.000000,
+segment_00000.ts
+#EXTINF:1.234,
+hls/segment_00001.ts
+#EXT-X-ENDLIST
+"#,
+        );
+
+        assert_eq!(durations["segment_00000.ts"], 2_000);
+        assert_eq!(durations["segment_00001.ts"], 1_234);
     }
 }
