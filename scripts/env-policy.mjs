@@ -360,6 +360,9 @@ function validateNextPublic(env, errors) {
     if (!key.startsWith("NEXT_PUBLIC_")) {
       continue;
     }
+    if (key.startsWith("NEXT_PUBLIC_VERCEL_")) {
+      continue;
+    }
     if (isSecretKey(key) || isProductionSecretLike(key, String(value || ""))) {
       errors.push(`${key} is public but has a secret-like name or value`);
     }
