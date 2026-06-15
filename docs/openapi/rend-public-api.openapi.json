@@ -41,7 +41,7 @@
         "operationId": "uploadAsset",
         "tags": ["Assets"],
         "summary": "Upload a video asset",
-        "description": "Uploads a raw video body and creates an asset. API keys need the `upload` scope. The response intentionally documents only public fields; older control-plane deployments may include additional internal fields that clients must ignore.",
+        "description": "Uploads a raw video body and creates an asset. API keys need the `upload` scope. Uploads are checked server-side against the organization's Autumn billing state before the source body is accepted; when Autumn denies the request the API returns `403` with `error: \"limit_exceeded\"`. Public V1 billable usage is delivery seconds and storage second-months by 720p/1080p/2K/4K resolution tier. Upload/source bytes are local request-size safeguards, not customer-facing meters. The response intentionally documents only public fields; older control-plane deployments may include additional internal fields that clients must ignore.",
         "security": [{ "RendApiKey": [] }],
         "x-rend-server": "api",
         "requestBody": {
@@ -512,13 +512,14 @@
         }
       },
       "Forbidden": {
-        "description": "API key lacks scope or organization/asset is suspended.",
+        "description": "API key lacks scope, organization/asset is suspended, or a billing/usage limit blocks the request.",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
             "examples": {
               "scope": { "value": { "error": "insufficient API key scope" } },
-              "suspended": { "value": { "error": "organization is suspended" } }
+              "suspended": { "value": { "error": "organization is suspended" } },
+              "limitExceeded": { "value": { "error": "limit_exceeded" } }
             }
           }
         }
