@@ -29,6 +29,12 @@ function isProductionProfile() {
   return ["production", "prod"].includes(profile.toLowerCase());
 }
 
+function selfServeSignupEnabled() {
+  const configured = envString("REND_SELF_SERVE_SIGNUP_ENABLED");
+  if (!isProductionProfile()) return configured ? envBoolean("REND_SELF_SERVE_SIGNUP_ENABLED") : true;
+  return envBoolean("REND_SELF_SERVE_SIGNUP_ENABLED");
+}
+
 function authBaseUrl() {
   const configured = envString("BETTER_AUTH_URL") || envString("REND_AUTH_BASE_URL");
   if (configured) return configured;
@@ -221,7 +227,7 @@ export function getAuth(): AuthInstance {
           otpLength: 6,
           expiresIn: 300,
           allowedAttempts: 3,
-          disableSignUp: false,
+          disableSignUp: !selfServeSignupEnabled(),
           generateOTP: generateNumericOtp,
           storeOTP: "hashed",
           rateLimit: {
