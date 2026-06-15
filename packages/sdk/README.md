@@ -11,7 +11,13 @@ bun run openapi:generate
 bun run openapi:check
 ```
 
-Minimal local upload and embed flow:
+Minimal self-serve upload and embed flow:
+
+1. Sign in at `https://rend.so/login` with an email code. Rend creates your
+   workspace automatically.
+2. Choose a plan in the dashboard. API-key creation and billable uploads stay
+   disabled until billing is ready.
+3. Create an API key with `upload`, `read`, `delete`, and `analytics` scopes.
 
 ```bash
 REND_API_KEY=rend_test_or_live_key \
