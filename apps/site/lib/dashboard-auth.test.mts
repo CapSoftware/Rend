@@ -34,6 +34,7 @@ test("dashboard auth requires secure Better Auth and email config in production"
       REND_ENV: "production",
       BETTER_AUTH_SECRET: "local-better-auth-secret-only-for-rend-development",
       BETTER_AUTH_URL: "http://localhost:3000",
+      REND_SELF_SERVE_SIGNUP_ENABLED: "true",
       RESEND_API_KEY: "resend",
       REND_AUTH_EMAIL_FROM: "Rend <auth@example.com>",
     }),
@@ -44,6 +45,7 @@ test("dashboard auth requires secure Better Auth and email config in production"
       REND_ENV: "production",
       BETTER_AUTH_SECRET: "prod-secret-with-at-least-some-length",
       BETTER_AUTH_URL: "https://app.example.com",
+      REND_SELF_SERVE_SIGNUP_ENABLED: "true",
       RESEND_API_KEY: "resend",
       REND_AUTH_EMAIL_FROM: "Rend <auth@example.com>",
     }),
@@ -51,15 +53,26 @@ test("dashboard auth requires secure Better Auth and email config in production"
   );
 });
 
-test("production auth can explicitly disable outbound auth email", () => {
+test("production auth requires self-serve signup and outbound auth email", () => {
   assert.equal(
     dashboardAuthConfigured({
       REND_ENV: "production",
       BETTER_AUTH_SECRET: "prod-secret-with-at-least-some-length",
       BETTER_AUTH_URL: "https://app.example.com",
+      RESEND_API_KEY: "resend",
+      REND_AUTH_EMAIL_FROM: "Rend <auth@example.com>",
+    }),
+    false
+  );
+  assert.equal(
+    dashboardAuthConfigured({
+      REND_ENV: "production",
+      BETTER_AUTH_SECRET: "prod-secret-with-at-least-some-length",
+      BETTER_AUTH_URL: "https://app.example.com",
+      REND_SELF_SERVE_SIGNUP_ENABLED: "true",
       REND_AUTH_EMAIL_DISABLED: "true",
     }),
-    true
+    false
   );
 });
 
