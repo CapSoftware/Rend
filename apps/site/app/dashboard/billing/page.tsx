@@ -8,6 +8,7 @@ import {
 } from "../../../lib/billing.ts";
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
+import { LEGAL_ASSENT_VERSION } from "../../../lib/legal-assent-constants.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +76,9 @@ function billingActionErrorMessage(code: string | undefined) {
   }
   if (code === "billing_provider_rejected_request") {
     return "Billing rejected the plan activation request. Check the plan configuration in Autumn.";
+  }
+  if (code === "legal_assent_required") {
+    return "Review and accept the Rend Terms and Privacy Notice before choosing a plan.";
   }
   if (code === "invalid_plan") {
     return "The selected plan is not available.";
@@ -207,32 +211,59 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
             <div className="app-empty">No plans are available.</div>
           ) : (
             <div className="app-plan-grid">
-              {billing.plans.map((plan) => (
-                <article className="app-plan-card" key={plan.id}>
-                  <div>
-                    <h3>{plan.name}</h3>
-                    {plan.description ? <p className="app-muted">{plan.description}</p> : null}
-                  </div>
-                  <div className="app-plan-price">
-                    <strong>{plan.priceLabel ?? plan.id}</strong>
-                    {plan.intervalLabel ? <span>{plan.intervalLabel}</span> : null}
-                  </div>
-                  <form action="/api/billing/checkout" method="post">
-                    <input name="plan_id" type="hidden" value={plan.id} />
-                    <input name="return_url" type="hidden" value={returnUrl} />
-                    <button
-                      disabled={
-                        !billing.checkoutEnabled ||
-                        plan.attachAction === "none" ||
-                        plan.relationshipStatus === "active"
-                      }
-                      type="submit"
-                    >
-                      {plan.relationshipStatus === "active" ? "Current plan" : plan.attachAction ?? "Choose plan"}
-                    </button>
-                  </form>
-                </article>
-              ))}
+              {billing.plans.map((plan) => {
+                const actionDisabled =
+                  !billing.checkoutEnabled ||
+                  plan.attachAction === "none" ||
+                  plan.relationshipStatus === "active";
+                const assentId = `billing-assent-${plan.id}`;
+
+                return (
+                  <article className="app-plan-card" key={plan.id}>
+                    <div>
+                      <h3>{plan.name}</h3>
+                      {plan.description ? <p className="app-muted">{plan.description}</p> : null}
+                    </div>
+                    <div className="app-plan-price">
+                      <strong>{plan.priceLabel ?? plan.id}</strong>
+                      {plan.intervalLabel ? <span>{plan.intervalLabel}</span> : null}
+                    </div>
+                    <form action="/api/billing/checkout" method="post">
+                      <input name="plan_id" type="hidden" value={plan.id} />
+                      <input name="return_url" type="hidden" value={returnUrl} />
+                      <input name="legal_assent_version" type="hidden" value={LEGAL_ASSENT_VERSION} />
+                      <div className="app-legal-check">
+                        <input
+                          aria-describedby={`${assentId}-copy`}
+                          disabled={actionDisabled}
+                          id={assentId}
+                          name="legal_assent"
+                          required
+                          type="checkbox"
+                          value="accepted"
+                        />
+                        <div>
+                          <label htmlFor={assentId}>I agree to Rend's legal terms for this plan.</label>
+                          <p id={`${assentId}-copy`}>
+                            This means the{" "}
+                            <Link href="/terms" target="_blank" rel="noopener noreferrer">
+                              Terms
+                            </Link>{" "}
+                            and{" "}
+                            <Link href="/privacy" target="_blank" rel="noopener noreferrer">
+                              Privacy Notice
+                            </Link>
+                            , including renewal, usage, and overage charges shown for this plan.
+                          </p>
+                        </div>
+                      </div>
+                      <button disabled={actionDisabled} type="submit">
+                        {plan.relationshipStatus === "active" ? "Current plan" : plan.attachAction ?? "Choose plan"}
+                      </button>
+                    </form>
+                  </article>
+                );
+              })}
             </div>
           )}
         </section>
