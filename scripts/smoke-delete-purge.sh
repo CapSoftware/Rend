@@ -95,7 +95,7 @@ export REND_EXPECTED_EDGES="${REND_SMOKE_EXPECTED_EDGES:-$REND_EDGE_ID=$REND_EDG
 export REND_EDGE_CACHE_DIR="${REND_EDGE_CACHE_DIR:-$root_dir/.rend/edge-cache}"
 export REND_EDGE_ORIGIN_HEALTH_URL="${REND_EDGE_ORIGIN_HEALTH_URL:-http://localhost:9100/minio/health/ready}"
 export REND_EDGE_INTERNAL_TOKEN="${REND_EDGE_INTERNAL_TOKEN:-dev-internal-token}"
-export REND_EDGE_WARM_MAX_ARTIFACTS="${REND_EDGE_WARM_MAX_ARTIFACTS:-4}"
+export REND_EDGE_WARM_MAX_ARTIFACTS="${REND_EDGE_WARM_MAX_ARTIFACTS:-16}"
 
 docker compose stop rend-api rend-media-worker rend-edge >/dev/null 2>&1 || true
 docker compose up -d postgres redis clickhouse minio minio-init clickhouse-init

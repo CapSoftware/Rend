@@ -60,7 +60,7 @@ const caveats = [
   "One video does not represent every workload, codec ladder, region, or viewer device.",
   "The harness does not purge or manipulate Mux CDN caches.",
   "The harness does not warm only Rend during direct comparisons.",
-  "Selected resolutions and rendition ladders may differ; current Rend media generation emits one HLS rendition for an asset rather than a 480p/720p/1080p ABR ladder.",
+  "Selected resolutions and rendition ladders may differ; current Rend media generation emits an ABR ladder using the supported 720p/1080p/2k/4k billing tiers.",
   "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals.",
 ];
 
