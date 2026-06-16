@@ -9,6 +9,7 @@ import {
   type UpstreamPlaybackResponse,
 } from "../../../../lib/player-bootstrap.ts";
 import {
+  playbackCookieFromSetCookieHeaders,
   playbackDirectCookieHeader,
   playbackProxyCookieHeader,
 } from "../../../../lib/player-artifact-proxy.ts";
@@ -331,11 +332,13 @@ export async function GET(
   }
 
   const headers = new Headers();
+  const upstreamPlaybackCookie = playbackCookieFromSetCookieHeaders(upstream.headers);
+  const playbackToken = upstreamPlaybackCookie ?? data?.playback_token;
   const playbackCookie = playbackBaseUrl
     ? playbackDirectCookieHeader(
         request.url,
         normalizedAssetId,
-        data?.playback_token,
+        playbackToken,
         safeResponse.ttl_seconds,
         playbackBaseUrl,
         directPlaybackCookieDomain(request, playbackBaseUrl)
@@ -343,7 +346,7 @@ export async function GET(
     : playbackProxyCookieHeader(
         request.url,
         normalizedAssetId,
-        data?.playback_token,
+        playbackToken,
         safeResponse.ttl_seconds
       );
   if (playbackCookie) headers.append("set-cookie", playbackCookie);
