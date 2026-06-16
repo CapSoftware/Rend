@@ -7,6 +7,8 @@ import type { DashboardAccessContext } from "./dashboard-auth.ts";
 const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const AUTUMN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+// Hosted billing redirects leave a POST route; 303 makes the browser load Stripe with GET.
+export const BILLING_EXTERNAL_REDIRECT_STATUS = 303;
 
 type JsonRecord = Record<string, unknown>;
 type BillingMode = "local" | "autumn";

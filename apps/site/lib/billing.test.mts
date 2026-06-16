@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BILLING_EXTERNAL_REDIRECT_STATUS,
   BillingError,
   billingReadinessFromOverview,
   checkoutAttachBody,
@@ -132,6 +133,10 @@ test("production Autumn attach can redirect when Checkout is required", async ()
     assert.equal("enable_plan_immediately" in body, false);
     assert.deepEqual(body.checkout_session_params, { cancel_url: returnUrl });
   });
+});
+
+test("hosted billing redirects use See Other so Stripe receives GET after form POST", () => {
+  assert.equal(BILLING_EXTERNAL_REDIRECT_STATUS, 303);
 });
 
 test("checkout redirect guard rejects local test checkout URLs by default", async () => {

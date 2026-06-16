@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  BILLING_EXTERNAL_REDIRECT_STATUS,
   BillingError,
   createCheckoutRedirect,
 } from "../../../../lib/billing.ts";
@@ -44,7 +45,7 @@ export async function POST(request: Request) {
       returnUrl: formString(formData, "return_url"),
       requestUrl: request.url,
     });
-    return NextResponse.redirect(redirectUrl);
+    return NextResponse.redirect(redirectUrl, BILLING_EXTERNAL_REDIRECT_STATUS);
   } catch (error) {
     return billingErrorRedirect(request.url, error);
   }
