@@ -30,7 +30,8 @@ use rend_config::{
     validate_required_url,
 };
 use rend_playback_auth::{
-    SingleKeyring, current_unix_timestamp, is_valid_hls_segment_name, validate_playback_token,
+    SingleKeyring, current_unix_timestamp, is_valid_hls_rendition_name, is_valid_hls_segment_name,
+    validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -44,7 +45,7 @@ use tracing_subscriber::EnvFilter;
 
 mod telemetry;
 
-const DEFAULT_WARM_MAX_ARTIFACTS: usize = 4;
+const DEFAULT_WARM_MAX_ARTIFACTS: usize = 16;
 const HARD_WARM_MAX_ARTIFACTS: usize = 16;
 const DEFAULT_MAX_IN_FLIGHT_FILLS: usize = 64;
 const HARD_MAX_IN_FLIGHT_FILLS: usize = 1024;
@@ -314,6 +315,12 @@ struct PurgeRequest {
     artifact_paths: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+struct CacheInspectQuery {
+    asset_id: String,
+    artifact_path: String,
+}
+
 #[derive(Serialize)]
 struct WarmResponse {
     asset_id: String,
@@ -377,6 +384,29 @@ struct PurgeErrorResponse {
     artifact_path: String,
     cache_key: String,
     error: String,
+}
+
+#[derive(Serialize)]
+struct CacheInspectResponse {
+    artifact_path: String,
+    exists_in_local_cache: bool,
+    byte_size: Option<u64>,
+    edge_id: String,
+    region: String,
+    cache_dir_mount_target: Option<String>,
+    cache_dir_mount_source: Option<String>,
+    cache_dir_fstype: Option<String>,
+    block_device_name: Option<String>,
+    rotational: Option<bool>,
+    inferred_storage_tier: InferredStorageTier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InferredStorageTier {
+    Nvme,
+    Ssd,
+    Unknown,
 }
 
 #[derive(Serialize)]
@@ -672,6 +702,12 @@ enum PurgeRequestError {
     BadRequest(String),
 }
 
+#[derive(Debug)]
+enum CacheInspectRequestError {
+    BadRequest(String),
+    Internal(String),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     install_rustls_crypto_provider();
@@ -765,6 +801,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let internal_routes = Router::new()
         .route("/warm", post(warm))
         .route("/purge", post(purge))
+        .route("/cache/inspect", get(inspect_cache))
         .route("/reload-config", post(internal_placeholder))
         .route_layer(DefaultBodyLimit::max(INTERNAL_REQUEST_BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(
@@ -1137,7 +1174,12 @@ async fn playback_inner(
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
     if let Some(bytes) = read_cache_artifact(&state, &artifact, &cache_path).await? {
-        return Ok(artifact_bytes_response(&state.config, &artifact, "HIT", bytes));
+        return Ok(artifact_bytes_response(
+            &state.config,
+            &artifact,
+            "HIT",
+            bytes,
+        ));
     }
 
     match state
@@ -1150,7 +1192,12 @@ async fn playback_inner(
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
             let bytes = read_filled_cache_file(&state, &artifact, &cache_path).await?;
-            Ok(artifact_bytes_response(&state.config, &artifact, "COALESCED", bytes))
+            Ok(artifact_bytes_response(
+                &state.config,
+                &artifact,
+                "COALESCED",
+                bytes,
+            ))
         }
     }
 }
@@ -1505,6 +1552,60 @@ async fn purge_inner(
     Ok(response)
 }
 
+async fn inspect_cache(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CacheInspectQuery>,
+) -> Response {
+    match inspect_cache_inner(&state, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn inspect_cache_inner(
+    state: &AppState,
+    query: CacheInspectQuery,
+) -> std::result::Result<CacheInspectResponse, CacheInspectRequestError> {
+    let artifact = map_playback_artifact(&query.asset_id, &query.artifact_path).map_err(|_| {
+        CacheInspectRequestError::BadRequest("unsupported playback artifact path".to_owned())
+    })?;
+    let cache_path = state.config.cache_dir.join(&artifact.cache_key);
+    let (exists_in_local_cache, byte_size) =
+        inspect_cache_file(&cache_path).await.map_err(|error| {
+            tracing::warn!(
+                asset_id = %query.asset_id,
+                artifact_path = %query.artifact_path,
+                error = %error,
+                "failed to inspect edge cache artifact",
+            );
+            CacheInspectRequestError::Internal("failed to inspect edge cache artifact".to_owned())
+        })?;
+    let storage = inspect_cache_storage(&state.config.cache_dir);
+
+    Ok(CacheInspectResponse {
+        artifact_path: query.artifact_path,
+        exists_in_local_cache,
+        byte_size,
+        edge_id: state.config.edge_id.clone(),
+        region: state.config.region.clone(),
+        cache_dir_mount_target: storage.mount_target,
+        cache_dir_mount_source: storage.mount_source,
+        cache_dir_fstype: storage.fstype,
+        block_device_name: storage.block_device_name,
+        rotational: storage.rotational,
+        inferred_storage_tier: storage.inferred_storage_tier,
+    })
+}
+
+async fn inspect_cache_file(path: &FsPath) -> std::io::Result<(bool, Option<u64>)> {
+    match fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => Ok((true, Some(metadata.len()))),
+        Ok(_) => Ok((false, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((false, None)),
+        Err(error) => Err(error),
+    }
+}
+
 async fn purge_entries(
     state: &AppState,
     request: &PurgeRequest,
@@ -1688,6 +1789,229 @@ fn path_to_slash_string(path: &FsPath) -> Option<String> {
         .map(|part| part.to_str())
         .collect::<Option<Vec<_>>>()?;
     Some(parts.join("/"))
+}
+
+#[derive(Debug, Clone)]
+struct CacheStorageInspection {
+    mount_target: Option<String>,
+    mount_source: Option<String>,
+    fstype: Option<String>,
+    block_device_name: Option<String>,
+    rotational: Option<bool>,
+    inferred_storage_tier: InferredStorageTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountInfoEntry {
+    target: String,
+    source: String,
+    fstype: String,
+}
+
+fn inspect_cache_storage(cache_dir: &FsPath) -> CacheStorageInspection {
+    let mount = cache_dir_mount(cache_dir);
+    let block_device_name = mount
+        .as_ref()
+        .and_then(|entry| block_device_name_from_mount_source(&entry.source));
+    let rotational = block_device_name
+        .as_deref()
+        .and_then(rotational_flag_for_block_device);
+    let inferred_storage_tier = infer_storage_tier(block_device_name.as_deref(), rotational);
+
+    CacheStorageInspection {
+        mount_target: mount
+            .as_ref()
+            .map(|entry| safe_operational_value(&entry.target)),
+        mount_source: mount
+            .as_ref()
+            .map(|entry| redacted_mount_source(&entry.source)),
+        fstype: mount
+            .as_ref()
+            .map(|entry| safe_operational_value(&entry.fstype)),
+        block_device_name,
+        rotational,
+        inferred_storage_tier,
+    }
+}
+
+fn cache_dir_mount(cache_dir: &FsPath) -> Option<MountInfoEntry> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let cache_dir = resolve_cache_dir_for_mount(cache_dir);
+    parse_mountinfo(&mountinfo)
+        .into_iter()
+        .filter(|entry| cache_dir.starts_with(FsPath::new(&entry.target)))
+        .max_by_key(|entry| FsPath::new(&entry.target).components().count())
+}
+
+fn resolve_cache_dir_for_mount(cache_dir: &FsPath) -> PathBuf {
+    let absolute = if cache_dir.is_absolute() {
+        cache_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(cache_dir)
+    };
+
+    let mut cursor = absolute.as_path();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(cursor) {
+            return canonical;
+        }
+        let Some(parent) = cursor.parent() else {
+            return absolute;
+        };
+        cursor = parent;
+    }
+}
+
+fn parse_mountinfo(contents: &str) -> Vec<MountInfoEntry> {
+    contents.lines().filter_map(parse_mountinfo_line).collect()
+}
+
+fn parse_mountinfo_line(line: &str) -> Option<MountInfoEntry> {
+    let (left, right) = line.split_once(" - ")?;
+    let left_fields = left.split_whitespace().collect::<Vec<_>>();
+    if left_fields.len() < 5 {
+        return None;
+    }
+    let mut right_fields = right.split_whitespace();
+    let fstype = right_fields.next()?;
+    let source = right_fields.next().unwrap_or("");
+
+    Some(MountInfoEntry {
+        target: mountinfo_unescape(left_fields[4]),
+        source: mountinfo_unescape(source),
+        fstype: mountinfo_unescape(fstype),
+    })
+}
+
+fn mountinfo_unescape(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1..=index + 3]
+                .iter()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            let octal = &value[index + 1..=index + 3];
+            if let Ok(byte) = u8::from_str_radix(octal, 8) {
+                output.push(char::from(byte));
+                index += 4;
+                continue;
+            }
+        }
+
+        output.push(char::from(bytes[index]));
+        index += 1;
+    }
+
+    output
+}
+
+fn redacted_mount_source(source: &str) -> String {
+    if source.starts_with("/dev/") {
+        return safe_operational_value(source);
+    }
+    if source.starts_with('/') {
+        return "path-redacted".to_owned();
+    }
+    safe_operational_value(source)
+}
+
+fn safe_operational_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn block_device_name_from_mount_source(source: &str) -> Option<String> {
+    if !source.starts_with("/dev/") {
+        return None;
+    }
+
+    let device_path = std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source));
+    let device_name = device_path.file_name()?.to_str()?;
+    let base_name = base_block_device_name(device_name);
+    let candidate = if FsPath::new("/sys/block").join(&base_name).exists() {
+        base_name
+    } else {
+        device_name.to_owned()
+    };
+
+    is_safe_block_device_name(&candidate).then_some(candidate)
+}
+
+fn base_block_device_name(device_name: &str) -> String {
+    if device_name.starts_with("nvme") || device_name.starts_with("mmcblk") {
+        if let Some(index) = device_name.rfind('p') {
+            let suffix = &device_name[index + 1..];
+            if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+                return device_name[..index].to_owned();
+            }
+        }
+    }
+
+    if device_name.starts_with("sd")
+        || device_name.starts_with("vd")
+        || device_name.starts_with("xvd")
+        || device_name.starts_with("hd")
+    {
+        let trimmed = device_name.trim_end_matches(|ch: char| ch.is_ascii_digit());
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+
+    device_name.to_owned()
+}
+
+fn is_safe_block_device_name(device_name: &str) -> bool {
+    !device_name.is_empty()
+        && device_name.len() <= 80
+        && device_name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
+        })
+}
+
+fn rotational_flag_for_block_device(device_name: &str) -> Option<bool> {
+    for path in [
+        PathBuf::from(format!("/sys/block/{device_name}/queue/rotational")),
+        PathBuf::from(format!("/sys/class/block/{device_name}/queue/rotational")),
+    ] {
+        if let Ok(value) = std::fs::read_to_string(path) {
+            match value.trim() {
+                "0" => return Some(false),
+                "1" => return Some(true),
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn infer_storage_tier(
+    block_device_name: Option<&str>,
+    rotational: Option<bool>,
+) -> InferredStorageTier {
+    if block_device_name.is_some_and(|device| device.starts_with("nvme")) {
+        return InferredStorageTier::Nvme;
+    }
+
+    if rotational == Some(false) {
+        return InferredStorageTier::Ssd;
+    }
+
+    InferredStorageTier::Unknown
 }
 
 fn validate_warm_request(
@@ -2503,19 +2827,34 @@ fn cache_artifact_type(cache_key: &str) -> (CacheArtifactType, Option<u32>) {
                 segment_index_from_name(segment_name),
             )
         }
+        ["videos", asset_id, "hls", rendition_name, "index.m3u8"]
+            if is_safe_asset_id(asset_id) && is_valid_hls_rendition_name(rendition_name) =>
+        {
+            (CacheArtifactType::Manifest, None)
+        }
+        ["videos", asset_id, "hls", rendition_name, segment_name]
+            if is_safe_asset_id(asset_id)
+                && is_valid_hls_rendition_name(rendition_name)
+                && is_valid_hls_segment_name(segment_name) =>
+        {
+            (
+                CacheArtifactType::Segment,
+                segment_index_from_name(segment_name),
+            )
+        }
         _ => (CacheArtifactType::Unknown, None),
     }
 }
 
 fn cache_artifact_priority(artifact_type: CacheArtifactType, segment_index: Option<u32>) -> u16 {
     match artifact_type {
-        CacheArtifactType::Opener => 1000,
-        CacheArtifactType::Manifest => 900,
+        CacheArtifactType::Manifest => 1000,
         CacheArtifactType::Segment
             if segment_index.is_some_and(|index| index < FIRST_SEGMENT_KEEP_COUNT) =>
         {
-            800
+            900
         }
+        CacheArtifactType::Opener => 500,
         CacheArtifactType::Segment => 400,
         CacheArtifactType::Unknown => 0,
     }
@@ -2575,6 +2914,23 @@ fn map_playback_artifact(
             &format!("hls/{segment_name}"),
             "video/mp2t",
         )),
+        ["hls", rendition_name, "index.m3u8"] if is_valid_hls_rendition_name(rendition_name) => {
+            Ok(playback_artifact(
+                asset_id,
+                &format!("hls/{rendition_name}/index.m3u8"),
+                "application/vnd.apple.mpegurl",
+            ))
+        }
+        ["hls", rendition_name, segment_name]
+            if is_valid_hls_rendition_name(rendition_name)
+                && is_valid_hls_segment_name(segment_name) =>
+        {
+            Ok(playback_artifact(
+                asset_id,
+                &format!("hls/{rendition_name}/{segment_name}"),
+                "video/mp2t",
+            ))
+        }
         _ => Err(PlaybackError::NotFound(
             "unsupported playback path".to_owned(),
         )),
@@ -2795,6 +3151,23 @@ impl IntoResponse for PurgeRequestError {
         match self {
             PurgeRequestError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: message }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+impl IntoResponse for CacheInspectRequestError {
+    fn into_response(self) -> Response {
+        match self {
+            CacheInspectRequestError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: message }),
+            )
+                .into_response(),
+            CacheInspectRequestError::Internal(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: message }),
             )
                 .into_response(),
