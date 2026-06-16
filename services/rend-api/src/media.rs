@@ -401,6 +401,8 @@ async fn generate_and_upload_hls(
     source_path: &Path,
     source_probe: &SourceProbe,
 ) -> Result<Vec<UploadedArtifact>> {
+    // Current V1 HLS output is single-rendition. See docs/rend-abr-ladder-plan.md
+    // before changing this to a multi-variant ABR ladder.
     let hls_dir = processing_dir.join("hls");
     fs::create_dir_all(&hls_dir).await.with_context(|| {
         format!(
