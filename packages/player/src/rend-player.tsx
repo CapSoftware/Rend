@@ -82,6 +82,7 @@ export type RendPlayerProps = {
   autoPlay?: boolean;
   muted?: boolean;
   controls?: boolean;
+  preload?: "auto" | "metadata" | "none";
   className?: string;
   maxPrefetchHints?: number;
   telemetryEnabled?: boolean;
@@ -344,6 +345,7 @@ export function RendPlayer({
   autoPlay = false,
   muted = true,
   controls = true,
+  preload = "auto",
   className,
   maxPrefetchHints = DEFAULT_MAX_PREFETCH_HINTS,
   telemetryEnabled,
@@ -365,7 +367,7 @@ export function RendPlayer({
   const [bootstrap, setBootstrap] = useState<PlaybackBootstrapResponse | null>(null);
   const [selection, setSelection] = useState<SourceSelection | null>(null);
   const [timings, setTimings] = useState<RendPlayerTimings>({});
-  const [playbackSessionId, setPlaybackSessionId] = useState("");
+  const [playbackSessionId] = useState(generatePlaybackSessionId);
   const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
 
   const resolvedBootstrapUrl = useMemo(
@@ -621,12 +623,15 @@ export function RendPlayer({
         return;
       }
 
+      const usesNativeHls = data.manifest_url ? isNativeHlsSupported(video) : false;
       let Hls: HlsConstructor | null = null;
-      try {
-        const hlsModule = await import("hls.js");
-        Hls = hlsModule.default as HlsConstructor;
-      } catch {
-        Hls = null;
+      if (data.manifest_url && !usesNativeHls) {
+        try {
+          const hlsModule = await import("hls.js");
+          Hls = hlsModule.default as HlsConstructor;
+        } catch {
+          Hls = null;
+        }
       }
 
       const nextSelection = selectedSource(data, video, Boolean(Hls?.isSupported()));
@@ -677,11 +682,6 @@ export function RendPlayer({
   ]);
 
   useEffect(() => {
-    setPlaybackSessionId((current) => current || generatePlaybackSessionId());
-  }, []);
-
-  useEffect(() => {
-    if (!playbackSessionId) return;
     void loadPlayback();
     return () => {
       abortRef.current?.abort();
@@ -737,7 +737,7 @@ export function RendPlayer({
           muted={muted}
           autoPlay={autoPlay}
           playsInline
-          preload="metadata"
+          preload={preload}
           crossOrigin="anonymous"
           onLoadedMetadata={() => {
             const metadataMs = recordTiming("metadataMs");
