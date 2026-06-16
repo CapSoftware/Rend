@@ -7,10 +7,29 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function envBoolean(name: string) {
+  const value = (process.env[name] || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
+function telemetryIngestEnabled() {
+  return (
+    envBoolean("REND_PLAYER_TELEMETRY_INGEST") ||
+    envBoolean("NEXT_PUBLIC_REND_PLAYER_TELEMETRY")
+  );
+}
+
 function jsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("cache-control", "no-store");
   return Response.json(body, { ...init, headers });
+}
+
+function disabledIngestResponse() {
+  return jsonResponse({
+    status: "ok",
+    accepted: 0,
+  });
 }
 
 function contentLengthTooLarge(request: Request) {
@@ -34,6 +53,8 @@ async function readBoundedBody(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!telemetryIngestEnabled()) return disabledIngestResponse();
+
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) {
     return jsonResponse(
