@@ -334,6 +334,9 @@ function validateProductionAuthEnv(env, errors) {
   if (!String(env.REND_AUTH_EMAIL_FROM || "").trim()) {
     errors.push("production self-serve signup requires REND_AUTH_EMAIL_FROM");
   }
+  if (!String(env.REND_AUTH_OTP_PROBE_EMAIL || "").trim()) {
+    errors.push("production self-serve signup requires REND_AUTH_OTP_PROBE_EMAIL for launch OTP health probes");
+  }
 
   if (!String(env.REND_OPERATOR_EMAIL_ALLOWLIST || "").trim()) {
     errors.push("production profile requires REND_OPERATOR_EMAIL_ALLOWLIST");
