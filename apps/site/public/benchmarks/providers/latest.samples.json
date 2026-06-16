@@ -1,38 +1,38 @@
 {
   "schemaVersion": "rend.provider-benchmark-samples.v1",
-  "runId": "20260616T133539Z",
-  "generatedAt": "2026-06-16T13:41:18.265Z",
+  "runId": "20260616T142014Z",
+  "generatedAt": "2026-06-16T14:25:59.114Z",
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-16T13:41:18.266Z",
+    "checkedAt": "2026-06-16T14:25:59.115Z",
     "patternsVersion": 1,
     "findings": []
   },
   "samples": [
     {
-      "id": "a64bc92f-b364-4102-92d9-55c16ca0e12c",
+      "id": "bbd14726-f1b5-405e-97d3-e5b02073fb57",
       "providerId": "mux",
       "providerName": "Mux",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 0,
       "providerOrder": [
         "mux",
         "rend"
       ],
-      "startedAt": "2026-06-16T13:35:40.178Z",
-      "finishedAt": "2026-06-16T13:36:11.051Z",
+      "startedAt": "2026-06-16T14:20:14.964Z",
+      "finishedAt": "2026-06-16T14:20:45.765Z",
       "navigation": {
         "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 741.7,
-        "timeToMetadataMs": 685.4,
-        "timeToCanplayMs": 827.8,
-        "timeToFirstFrameMs": 741.7,
-        "totalDurationMs": 30872.2,
+        "timeToPlayerReadyMs": 719.2,
+        "timeToMetadataMs": 665.2,
+        "timeToCanplayMs": 724.5,
+        "timeToFirstFrameMs": 719.2,
+        "totalDurationMs": 30800.3,
         "stallCount": 0,
         "stallDurationMs": 0
       },
@@ -64,9 +64,13 @@
           "player-software-name": "mux-player-iframe",
           "player-software-version": "3.11.6",
           "poster": "",
-          "player-init-time": "1781616940179.6"
+          "player-init-time": "1781619614966.2"
         },
         "rend": {}
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": []
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -117,18 +121,18 @@
           "byOrigin": {
             "https://cdn.jsdelivr.net": 2,
             "https://image.mux.com": 2,
-            "https://player.mux.com": 4,
             "https://fonts.googleapis.com": 1,
+            "https://player.mux.com": 4,
             "https://stream.mux.com": 1,
-            "https://inferred.litix.io": 4,
             "https://manifest-gcp-us-east4-vop1.edgemv.mux.com": 2,
+            "https://inferred.litix.io": 4,
             "https://chunk-gcp-us-east4-vop1.edgemv.mux.com": 34
           },
           "byExtension": {
             "js": 3,
             "webp": 1,
-            "css": 1,
             "none": 5,
+            "css": 1,
             "svg": 2,
             "m3u8": 3,
             "m4s": 34,
@@ -138,31 +142,31 @@
       }
     },
     {
-      "id": "b11ef888-9e6d-4f5a-8ca8-1286d21c218d",
+      "id": "03c82186-308e-4010-af77-7e6c750b2b1c",
       "providerId": "rend",
       "providerName": "Rend",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 0,
       "providerOrder": [
         "mux",
         "rend"
       ],
-      "startedAt": "2026-06-16T13:36:14.078Z",
-      "finishedAt": "2026-06-16T13:36:45.245Z",
+      "startedAt": "2026-06-16T14:20:48.795Z",
+      "finishedAt": "2026-06-16T14:21:19.963Z",
       "navigation": {
         "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 1157.3,
-        "timeToMetadataMs": 1140.3,
-        "timeToCanplayMs": 1159.3,
-        "timeToFirstFrameMs": 1157.3,
-        "totalDurationMs": 31166.7,
-        "stallCount": 1,
-        "stallDurationMs": 26332.4
+        "timeToPlayerReadyMs": 1150.2,
+        "timeToMetadataMs": 1129.8,
+        "timeToCanplayMs": 1147.5,
+        "timeToFirstFrameMs": 1150.2,
+        "totalDurationMs": 31167.7,
+        "stallCount": 0,
+        "stallDurationMs": 0
       },
       "success": true,
       "failure": null,
@@ -189,13 +193,19 @@
           "artifact": "hls/master.m3u8",
           "selectedWidth": 1920,
           "selectedHeight": 1080,
-          "selectedBitrate": 0,
-          "selectedLevel": 0,
-          "bootstrapMs": 205,
-          "metadataMs": 478,
-          "canplayMs": 496,
-          "firstFrameMs": 0
+          "selectedBitrate": null,
+          "selectedLevel": null,
+          "bootstrapMs": 113,
+          "metadataMs": 463,
+          "canplayMs": 480,
+          "firstFrameMs": null
         }
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": [
+          "The play() request was interrupted by a new load request. https://goo.gl/LdLk22"
+        ]
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -209,55 +219,54 @@
       "network": {
         "errors": [],
         "resourceSummary": {
-          "count": 25,
+          "count": 24,
           "byInitiatorType": {
-            "link": 11,
+            "link": 10,
             "script": 7,
             "fetch": 1,
             "video": 6
           },
           "byOrigin": {
-            "https://www.rend.so": 25
+            "https://www.rend.so": 24
           },
           "byExtension": {
             "woff2": 4,
-            "svg": 1,
             "css": 1,
+            "svg": 1,
             "js": 8,
             "none": 1,
             "m3u8": 2,
-            "ts": 7,
-            "mp4": 1
+            "ts": 7
           }
         }
       }
     },
     {
-      "id": "3bdabd64-5f9e-405b-8ea7-a6dafe5a7e6e",
+      "id": "7d0df14d-fd45-44da-bcdc-40583a5fab09",
       "providerId": "rend",
       "providerName": "Rend",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 1,
       "providerOrder": [
         "rend",
         "mux"
       ],
-      "startedAt": "2026-06-16T13:36:48.285Z",
-      "finishedAt": "2026-06-16T13:37:18.897Z",
+      "startedAt": "2026-06-16T14:21:22.996Z",
+      "finishedAt": "2026-06-16T14:21:53.624Z",
       "navigation": {
         "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 598.4,
-        "timeToMetadataMs": 582.2,
-        "timeToCanplayMs": 604.8,
-        "timeToFirstFrameMs": 598.4,
-        "totalDurationMs": 30611.1,
-        "stallCount": 1,
-        "stallDurationMs": 26280.3
+        "timeToPlayerReadyMs": 613.8,
+        "timeToMetadataMs": 601.8,
+        "timeToCanplayMs": 630.3,
+        "timeToFirstFrameMs": 613.8,
+        "totalDurationMs": 30627.6,
+        "stallCount": 0,
+        "stallDurationMs": 0
       },
       "success": true,
       "failure": null,
@@ -284,13 +293,19 @@
           "artifact": "hls/master.m3u8",
           "selectedWidth": 1920,
           "selectedHeight": 1080,
-          "selectedBitrate": 0,
-          "selectedLevel": 0,
+          "selectedBitrate": null,
+          "selectedLevel": null,
           "bootstrapMs": 96,
-          "metadataMs": 307,
-          "canplayMs": 329,
-          "firstFrameMs": 0
+          "metadataMs": 274,
+          "canplayMs": 302,
+          "firstFrameMs": null
         }
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": [
+          "The play() request was interrupted by a new load request. https://goo.gl/LdLk22"
+        ]
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -304,15 +319,15 @@
       "network": {
         "errors": [],
         "resourceSummary": {
-          "count": 25,
+          "count": 24,
           "byInitiatorType": {
-            "link": 11,
+            "link": 10,
             "script": 7,
             "fetch": 1,
             "video": 6
           },
           "byOrigin": {
-            "https://www.rend.so": 25
+            "https://www.rend.so": 24
           },
           "byExtension": {
             "woff2": 4,
@@ -321,36 +336,35 @@
             "js": 8,
             "none": 1,
             "m3u8": 2,
-            "ts": 7,
-            "mp4": 1
+            "ts": 7
           }
         }
       }
     },
     {
-      "id": "0027d784-f955-4698-a998-417f5d2351b7",
+      "id": "6bc0f578-1b2f-470d-ab6c-6571a6e6eab7",
       "providerId": "mux",
       "providerName": "Mux",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 1,
       "providerOrder": [
         "rend",
         "mux"
       ],
-      "startedAt": "2026-06-16T13:37:21.940Z",
-      "finishedAt": "2026-06-16T13:37:52.626Z",
+      "startedAt": "2026-06-16T14:21:56.653Z",
+      "finishedAt": "2026-06-16T14:22:27.491Z",
       "navigation": {
         "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 593.3,
-        "timeToMetadataMs": 562.3,
-        "timeToCanplayMs": 596.7,
-        "timeToFirstFrameMs": 593.3,
-        "totalDurationMs": 30685.8,
+        "timeToPlayerReadyMs": 773.1,
+        "timeToMetadataMs": 720.6,
+        "timeToCanplayMs": 776.1,
+        "timeToFirstFrameMs": 773.1,
+        "totalDurationMs": 30837,
         "stallCount": 0,
         "stallDurationMs": 0
       },
@@ -382,137 +396,13 @@
           "player-software-name": "mux-player-iframe",
           "player-software-version": "3.11.6",
           "poster": "",
-          "player-init-time": "1781617041941.1"
+          "player-init-time": "1781619716654.6"
         },
         "rend": {}
       },
-      "browser": {
-        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
-        "viewport": {
-          "width": 1280,
-          "height": 720
-        },
-        "deviceScaleFactor": 1,
-        "cache": "clean context plus Playwright routing per sample"
-      },
-      "network": {
-        "errors": [
-          {
-            "kind": "requestfailed",
-            "url": "https://inferred.litix.io/",
-            "resourceType": "fetch",
-            "message": "net::ERR_ABORTED"
-          },
-          {
-            "kind": "requestfailed",
-            "url": "https://inferred.litix.io/",
-            "resourceType": "fetch",
-            "message": "net::ERR_ABORTED"
-          },
-          {
-            "kind": "requestfailed",
-            "url": "https://inferred.litix.io/",
-            "resourceType": "fetch",
-            "message": "net::ERR_ABORTED"
-          },
-          {
-            "kind": "requestfailed",
-            "url": "https://inferred.litix.io/",
-            "resourceType": "fetch",
-            "message": "net::ERR_ABORTED"
-          }
-        ],
-        "resourceSummary": {
-          "count": 50,
-          "byInitiatorType": {
-            "link": 4,
-            "script": 2,
-            "css": 2,
-            "xmlhttprequest": 37,
-            "fetch": 4,
-            "track": 1
-          },
-          "byOrigin": {
-            "https://cdn.jsdelivr.net": 2,
-            "https://image.mux.com": 2,
-            "https://fonts.googleapis.com": 1,
-            "https://player.mux.com": 4,
-            "https://stream.mux.com": 1,
-            "https://inferred.litix.io": 4,
-            "https://manifest-gcp-us-east4-vop1.edgemv.mux.com": 2,
-            "https://chunk-gcp-us-east4-vop1.edgemv.mux.com": 34
-          },
-          "byExtension": {
-            "js": 3,
-            "webp": 1,
-            "none": 5,
-            "css": 1,
-            "svg": 2,
-            "m3u8": 3,
-            "m4s": 34,
-            "vtt": 1
-          }
-        }
-      }
-    },
-    {
-      "id": "bd56c5a3-a711-43dd-94c7-34f5794eecab",
-      "providerId": "mux",
-      "providerName": "Mux",
-      "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
-      "roundIndex": 2,
-      "providerOrder": [
-        "mux",
-        "rend"
-      ],
-      "startedAt": "2026-06-16T13:37:55.666Z",
-      "finishedAt": "2026-06-16T13:38:26.278Z",
-      "navigation": {
-        "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
-        "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
-        "responseStatus": 200
-      },
-      "metrics": {
-        "timeToPlayerReadyMs": 565,
-        "timeToMetadataMs": 534.5,
-        "timeToCanplayMs": 566.4,
-        "timeToFirstFrameMs": 565,
-        "totalDurationMs": 30611.5,
-        "stallCount": 0,
-        "stallDurationMs": 0
-      },
-      "success": true,
-      "failure": null,
-      "video": {
-        "durationSeconds": 75.179,
-        "naturalWidth": 1280,
-        "naturalHeight": 720,
-        "renderedWidth": 1008,
-        "renderedHeight": 521,
-        "readyState": 4,
-        "networkState": 2,
-        "currentSrc": "blob:redacted",
-        "playbackMode": "hls-via-mse"
-      },
-      "player": {
-        "title": "Mux Player",
-        "observableElements": [
-          "mux-player",
-          "media-rendition-menu-button",
-          "media-rendition-menu",
-          "mux-video",
-          "video"
-        ],
-        "attributes": {
-          "playback-id": "A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
-          "custom-domain": "mux.com",
-          "player-software-name": "mux-player-iframe",
-          "player-software-version": "3.11.6",
-          "poster": "",
-          "player-init-time": "1781617075667.5"
-        },
-        "rend": {}
+      "playback": {
+        "stalls": [],
+        "playErrors": []
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -584,31 +474,31 @@
       }
     },
     {
-      "id": "42f0f088-c303-4dae-948e-93b631639478",
+      "id": "dff216a6-a3da-415c-ac06-1ccab8399adb",
       "providerId": "rend",
       "providerName": "Rend",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 2,
       "providerOrder": [
-        "mux",
-        "rend"
+        "rend",
+        "mux"
       ],
-      "startedAt": "2026-06-16T13:38:29.318Z",
-      "finishedAt": "2026-06-16T13:39:00.320Z",
+      "startedAt": "2026-06-16T14:22:30.531Z",
+      "finishedAt": "2026-06-16T14:23:01.159Z",
       "navigation": {
         "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 986.3,
-        "timeToMetadataMs": 958.9,
-        "timeToCanplayMs": 969.8,
-        "timeToFirstFrameMs": 986.3,
-        "totalDurationMs": 31001.4,
-        "stallCount": 1,
-        "stallDurationMs": 26312.6
+        "timeToPlayerReadyMs": 615.1,
+        "timeToMetadataMs": 593.1,
+        "timeToCanplayMs": 617.3,
+        "timeToFirstFrameMs": 615.1,
+        "totalDurationMs": 30627.2,
+        "stallCount": 0,
+        "stallDurationMs": 0
       },
       "success": true,
       "failure": null,
@@ -635,13 +525,19 @@
           "artifact": "hls/master.m3u8",
           "selectedWidth": 1920,
           "selectedHeight": 1080,
-          "selectedBitrate": 0,
-          "selectedLevel": 0,
-          "bootstrapMs": 128,
-          "metadataMs": 355,
-          "canplayMs": 365,
-          "firstFrameMs": 0
+          "selectedBitrate": null,
+          "selectedLevel": null,
+          "bootstrapMs": 103,
+          "metadataMs": 284,
+          "canplayMs": 307,
+          "firstFrameMs": null
         }
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": [
+          "The play() request was interrupted by a new load request. https://goo.gl/LdLk22"
+        ]
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -655,15 +551,15 @@
       "network": {
         "errors": [],
         "resourceSummary": {
-          "count": 25,
+          "count": 24,
           "byInitiatorType": {
-            "link": 11,
+            "link": 10,
             "script": 7,
             "fetch": 1,
             "video": 6
           },
           "byOrigin": {
-            "https://www.rend.so": 25
+            "https://www.rend.so": 24
           },
           "byExtension": {
             "woff2": 4,
@@ -672,131 +568,35 @@
             "js": 8,
             "none": 1,
             "m3u8": 2,
-            "ts": 7,
-            "mp4": 1
+            "ts": 7
           }
         }
       }
     },
     {
-      "id": "f5e5bd17-7743-4903-94b2-ec4d86058c7d",
-      "providerId": "rend",
-      "providerName": "Rend",
-      "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
-      "roundIndex": 3,
-      "providerOrder": [
-        "rend",
-        "mux"
-      ],
-      "startedAt": "2026-06-16T13:39:03.344Z",
-      "finishedAt": "2026-06-16T13:39:33.999Z",
-      "navigation": {
-        "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
-        "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
-        "responseStatus": 200
-      },
-      "metrics": {
-        "timeToPlayerReadyMs": 619.4,
-        "timeToMetadataMs": 597.5,
-        "timeToCanplayMs": 615.4,
-        "timeToFirstFrameMs": 619.4,
-        "totalDurationMs": 30654.9,
-        "stallCount": 1,
-        "stallDurationMs": 26364
-      },
-      "success": true,
-      "failure": null,
-      "video": {
-        "durationSeconds": 75.167,
-        "naturalWidth": 1920,
-        "naturalHeight": 1080,
-        "renderedWidth": 1078,
-        "renderedHeight": 605.5,
-        "readyState": 4,
-        "networkState": 2,
-        "currentSrc": "https://www.rend.so/api/player/63573b06-5a69-43c2-94e8-9338ebec368d/artifact/hls/master.m3u8",
-        "playbackMode": "hls"
-      },
-      "player": {
-        "title": "Rend player · Rend",
-        "observableElements": [
-          "video"
-        ],
-        "attributes": {},
-        "rend": {
-          "state": "canplay",
-          "selectedMode": "native_hls",
-          "artifact": "hls/master.m3u8",
-          "selectedWidth": 1920,
-          "selectedHeight": 1080,
-          "selectedBitrate": 0,
-          "selectedLevel": 0,
-          "bootstrapMs": 108,
-          "metadataMs": 379,
-          "canplayMs": 396,
-          "firstFrameMs": 0
-        }
-      },
-      "browser": {
-        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
-        "viewport": {
-          "width": 1280,
-          "height": 720
-        },
-        "deviceScaleFactor": 1,
-        "cache": "clean context plus Playwright routing per sample"
-      },
-      "network": {
-        "errors": [],
-        "resourceSummary": {
-          "count": 25,
-          "byInitiatorType": {
-            "link": 11,
-            "script": 7,
-            "fetch": 1,
-            "video": 6
-          },
-          "byOrigin": {
-            "https://www.rend.so": 25
-          },
-          "byExtension": {
-            "woff2": 4,
-            "svg": 1,
-            "css": 1,
-            "js": 8,
-            "none": 1,
-            "m3u8": 2,
-            "ts": 7,
-            "mp4": 1
-          }
-        }
-      }
-    },
-    {
-      "id": "2ea7d951-8f73-49f9-bb23-6f32dafdc6dd",
+      "id": "fa3e62d0-bfa4-4d1b-af12-3c0b569f1f43",
       "providerId": "mux",
       "providerName": "Mux",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
-      "roundIndex": 3,
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
+      "roundIndex": 2,
       "providerOrder": [
         "rend",
         "mux"
       ],
-      "startedAt": "2026-06-16T13:39:37.034Z",
-      "finishedAt": "2026-06-16T13:40:07.937Z",
+      "startedAt": "2026-06-16T14:23:04.188Z",
+      "finishedAt": "2026-06-16T14:23:35.069Z",
       "navigation": {
         "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 844.2,
-        "timeToMetadataMs": 831.6,
-        "timeToCanplayMs": 850.2,
-        "timeToFirstFrameMs": 844.2,
-        "totalDurationMs": 30902.9,
+        "timeToPlayerReadyMs": 767.4,
+        "timeToMetadataMs": 743,
+        "timeToCanplayMs": 835.9,
+        "timeToFirstFrameMs": 767.4,
+        "totalDurationMs": 30880.1,
         "stallCount": 0,
         "stallDurationMs": 0
       },
@@ -828,9 +628,13 @@
           "player-software-name": "mux-player-iframe",
           "player-software-version": "3.11.6",
           "poster": "",
-          "player-init-time": "1781617177035.5"
+          "player-init-time": "1781619784190.4"
         },
         "rend": {}
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": []
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -902,29 +706,261 @@
       }
     },
     {
-      "id": "7a729164-f78d-4d77-8191-4ddb6c4a9277",
+      "id": "268b48b6-cf5b-423a-9424-89d537fc53c7",
       "providerId": "mux",
       "providerName": "Mux",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
+      "roundIndex": 3,
+      "providerOrder": [
+        "mux",
+        "rend"
+      ],
+      "startedAt": "2026-06-16T14:23:38.110Z",
+      "finishedAt": "2026-06-16T14:24:08.737Z",
+      "navigation": {
+        "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
+        "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
+        "responseStatus": 200
+      },
+      "metrics": {
+        "timeToPlayerReadyMs": 494.5,
+        "timeToMetadataMs": 477.9,
+        "timeToCanplayMs": 542,
+        "timeToFirstFrameMs": 494.5,
+        "totalDurationMs": 30626.5,
+        "stallCount": 0,
+        "stallDurationMs": 0
+      },
+      "success": true,
+      "failure": null,
+      "video": {
+        "durationSeconds": 75.179,
+        "naturalWidth": 1280,
+        "naturalHeight": 720,
+        "renderedWidth": 1008,
+        "renderedHeight": 521,
+        "readyState": 4,
+        "networkState": 2,
+        "currentSrc": "blob:redacted",
+        "playbackMode": "hls-via-mse"
+      },
+      "player": {
+        "title": "Mux Player",
+        "observableElements": [
+          "mux-player",
+          "media-rendition-menu-button",
+          "media-rendition-menu",
+          "mux-video",
+          "video"
+        ],
+        "attributes": {
+          "playback-id": "A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
+          "custom-domain": "mux.com",
+          "player-software-name": "mux-player-iframe",
+          "player-software-version": "3.11.6",
+          "poster": "",
+          "player-init-time": "1781619818111.7"
+        },
+        "rend": {}
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": []
+      },
+      "browser": {
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "deviceScaleFactor": 1,
+        "cache": "clean context plus Playwright routing per sample"
+      },
+      "network": {
+        "errors": [
+          {
+            "kind": "requestfailed",
+            "url": "https://inferred.litix.io/",
+            "resourceType": "fetch",
+            "message": "net::ERR_ABORTED"
+          },
+          {
+            "kind": "requestfailed",
+            "url": "https://inferred.litix.io/",
+            "resourceType": "fetch",
+            "message": "net::ERR_ABORTED"
+          },
+          {
+            "kind": "requestfailed",
+            "url": "https://inferred.litix.io/",
+            "resourceType": "fetch",
+            "message": "net::ERR_ABORTED"
+          },
+          {
+            "kind": "requestfailed",
+            "url": "https://inferred.litix.io/",
+            "resourceType": "fetch",
+            "message": "net::ERR_ABORTED"
+          }
+        ],
+        "resourceSummary": {
+          "count": 50,
+          "byInitiatorType": {
+            "link": 4,
+            "script": 2,
+            "css": 2,
+            "xmlhttprequest": 37,
+            "fetch": 4,
+            "track": 1
+          },
+          "byOrigin": {
+            "https://cdn.jsdelivr.net": 2,
+            "https://image.mux.com": 2,
+            "https://fonts.googleapis.com": 1,
+            "https://player.mux.com": 4,
+            "https://stream.mux.com": 1,
+            "https://inferred.litix.io": 4,
+            "https://manifest-gcp-us-east4-vop1.edgemv.mux.com": 2,
+            "https://chunk-gcp-us-east4-vop1.edgemv.mux.com": 34
+          },
+          "byExtension": {
+            "js": 3,
+            "webp": 1,
+            "none": 5,
+            "css": 1,
+            "svg": 2,
+            "m3u8": 3,
+            "m4s": 34,
+            "vtt": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "15c13e06-cb63-4493-8d5d-a80da0c9068c",
+      "providerId": "rend",
+      "providerName": "Rend",
+      "region": "daytona-us",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
+      "roundIndex": 3,
+      "providerOrder": [
+        "mux",
+        "rend"
+      ],
+      "startedAt": "2026-06-16T14:24:11.766Z",
+      "finishedAt": "2026-06-16T14:24:42.462Z",
+      "navigation": {
+        "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
+        "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
+        "responseStatus": 200
+      },
+      "metrics": {
+        "timeToPlayerReadyMs": 676.4,
+        "timeToMetadataMs": 646.4,
+        "timeToCanplayMs": 663.8,
+        "timeToFirstFrameMs": 676.4,
+        "totalDurationMs": 30695.8,
+        "stallCount": 0,
+        "stallDurationMs": 0
+      },
+      "success": true,
+      "failure": null,
+      "video": {
+        "durationSeconds": 75.167,
+        "naturalWidth": 1920,
+        "naturalHeight": 1080,
+        "renderedWidth": 1078,
+        "renderedHeight": 605.5,
+        "readyState": 4,
+        "networkState": 2,
+        "currentSrc": "https://www.rend.so/api/player/63573b06-5a69-43c2-94e8-9338ebec368d/artifact/hls/master.m3u8",
+        "playbackMode": "hls"
+      },
+      "player": {
+        "title": "Rend player · Rend",
+        "observableElements": [
+          "video"
+        ],
+        "attributes": {},
+        "rend": {
+          "state": "canplay",
+          "selectedMode": "native_hls",
+          "artifact": "hls/master.m3u8",
+          "selectedWidth": 1920,
+          "selectedHeight": 1080,
+          "selectedBitrate": null,
+          "selectedLevel": null,
+          "bootstrapMs": 105,
+          "metadataMs": 367,
+          "canplayMs": 383,
+          "firstFrameMs": null
+        }
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": [
+          "The play() request was interrupted by a new load request. https://goo.gl/LdLk22"
+        ]
+      },
+      "browser": {
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "deviceScaleFactor": 1,
+        "cache": "clean context plus Playwright routing per sample"
+      },
+      "network": {
+        "errors": [],
+        "resourceSummary": {
+          "count": 24,
+          "byInitiatorType": {
+            "link": 10,
+            "script": 7,
+            "fetch": 1,
+            "video": 6
+          },
+          "byOrigin": {
+            "https://www.rend.so": 24
+          },
+          "byExtension": {
+            "woff2": 4,
+            "svg": 1,
+            "css": 1,
+            "js": 8,
+            "none": 1,
+            "m3u8": 2,
+            "ts": 7
+          }
+        }
+      }
+    },
+    {
+      "id": "0454a81c-d1c5-4024-8e7b-855f214892e5",
+      "providerId": "mux",
+      "providerName": "Mux",
+      "region": "daytona-us",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 4,
       "providerOrder": [
         "mux",
         "rend"
       ],
-      "startedAt": "2026-06-16T13:40:10.971Z",
-      "finishedAt": "2026-06-16T13:40:41.551Z",
+      "startedAt": "2026-06-16T14:24:45.500Z",
+      "finishedAt": "2026-06-16T14:25:22.402Z",
       "navigation": {
         "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "finalUrl": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 504.6,
-        "timeToMetadataMs": 484.9,
-        "timeToCanplayMs": 533.7,
-        "timeToFirstFrameMs": 504.6,
-        "totalDurationMs": 30579.2,
+        "timeToPlayerReadyMs": 6822.7,
+        "timeToMetadataMs": 6775.6,
+        "timeToCanplayMs": 6832.8,
+        "timeToFirstFrameMs": 6822.7,
+        "totalDurationMs": 36901,
         "stallCount": 0,
         "stallDurationMs": 0
       },
@@ -956,9 +992,13 @@
           "player-software-name": "mux-player-iframe",
           "player-software-version": "3.11.6",
           "poster": "",
-          "player-init-time": "1781617210972.9"
+          "player-init-time": "1781619885501.7"
         },
         "rend": {}
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": []
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -1030,31 +1070,31 @@
       }
     },
     {
-      "id": "b213278b-f310-4db6-8805-8506809245e6",
+      "id": "23950ff5-9411-47f3-b879-e1abefdf2d39",
       "providerId": "rend",
       "providerName": "Rend",
       "region": "daytona-us",
-      "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+      "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
       "roundIndex": 4,
       "providerOrder": [
         "mux",
         "rend"
       ],
-      "startedAt": "2026-06-16T13:40:44.595Z",
-      "finishedAt": "2026-06-16T13:41:15.226Z",
+      "startedAt": "2026-06-16T14:25:25.443Z",
+      "finishedAt": "2026-06-16T14:25:56.071Z",
       "navigation": {
         "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "finalUrl": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
         "responseStatus": 200
       },
       "metrics": {
-        "timeToPlayerReadyMs": 596.9,
-        "timeToMetadataMs": 575.8,
-        "timeToCanplayMs": 596.3,
-        "timeToFirstFrameMs": 596.9,
-        "totalDurationMs": 30630.5,
-        "stallCount": 1,
-        "stallDurationMs": 26326.3
+        "timeToPlayerReadyMs": 590.6,
+        "timeToMetadataMs": 574.3,
+        "timeToCanplayMs": 598.6,
+        "timeToFirstFrameMs": 590.6,
+        "totalDurationMs": 30627.8,
+        "stallCount": 0,
+        "stallDurationMs": 0
       },
       "success": true,
       "failure": null,
@@ -1081,13 +1121,19 @@
           "artifact": "hls/master.m3u8",
           "selectedWidth": 1920,
           "selectedHeight": 1080,
-          "selectedBitrate": 0,
-          "selectedLevel": 0,
-          "bootstrapMs": 85,
-          "metadataMs": 330,
-          "canplayMs": 350,
-          "firstFrameMs": 0
+          "selectedBitrate": null,
+          "selectedLevel": null,
+          "bootstrapMs": 91,
+          "metadataMs": 301,
+          "canplayMs": 324,
+          "firstFrameMs": null
         }
+      },
+      "playback": {
+        "stalls": [],
+        "playErrors": [
+          "The play() request was interrupted by a new load request. https://goo.gl/LdLk22"
+        ]
       },
       "browser": {
         "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
@@ -1101,25 +1147,24 @@
       "network": {
         "errors": [],
         "resourceSummary": {
-          "count": 25,
+          "count": 24,
           "byInitiatorType": {
-            "link": 11,
+            "link": 10,
             "script": 7,
             "fetch": 1,
             "video": 6
           },
           "byOrigin": {
-            "https://www.rend.so": 25
+            "https://www.rend.so": 24
           },
           "byExtension": {
             "woff2": 4,
-            "svg": 1,
             "css": 1,
+            "svg": 1,
             "js": 8,
             "none": 1,
             "m3u8": 2,
-            "ts": 7,
-            "mp4": 1
+            "ts": 7
           }
         }
       }

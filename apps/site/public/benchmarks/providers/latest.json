@@ -1,15 +1,15 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-16T13:41:18.265Z",
+  "generatedAt": "2026-06-16T14:25:59.114Z",
   "run": {
-    "id": "20260616T133539Z",
+    "id": "20260616T142014Z",
     "status": "completed",
-    "startedAt": "2026-06-16T13:35:39.706Z",
-    "finishedAt": "2026-06-16T13:41:18.263Z",
+    "startedAt": "2026-06-16T14:20:14.515Z",
+    "finishedAt": "2026-06-16T14:25:59.113Z",
     "region": "daytona-us",
     "regionLabel": "Daytona us (us requested)",
     "runnerKind": "daytona",
-    "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
+    "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
@@ -24,12 +24,12 @@
         "mux"
       ],
       [
-        "mux",
-        "rend"
-      ],
-      [
         "rend",
         "mux"
+      ],
+      [
+        "mux",
+        "rend"
       ],
       [
         "mux",
@@ -152,59 +152,59 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 596.9,
-            "median": 619.4,
-            "p75": 986.3,
-            "p95": 1123.1,
-            "max": 1157.3
+            "min": 590.6,
+            "median": 615.1,
+            "p75": 676.4,
+            "p95": 1055.4,
+            "max": 1150.2
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 575.8,
-            "median": 597.5,
-            "p75": 958.9,
-            "p95": 1104,
-            "max": 1140.3
+            "min": 574.3,
+            "median": 601.8,
+            "p75": 646.4,
+            "p95": 1033.1,
+            "max": 1129.8
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 596.3,
-            "median": 615.4,
-            "p75": 969.8,
-            "p95": 1121.4,
-            "max": 1159.3
+            "min": 598.6,
+            "median": 630.3,
+            "p75": 663.8,
+            "p95": 1050.8,
+            "max": 1147.5
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 596.9,
-            "median": 619.4,
-            "p75": 986.3,
-            "p95": 1123.1,
-            "max": 1157.3
+            "min": 590.6,
+            "median": 615.1,
+            "p75": 676.4,
+            "p95": 1055.4,
+            "max": 1150.2
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30611.1,
-            "median": 30654.9,
-            "p75": 31001.4,
-            "p95": 31133.6,
-            "max": 31166.7
+            "min": 30627.2,
+            "median": 30627.8,
+            "p75": 30695.8,
+            "p95": 31073.3,
+            "max": 31167.7
           },
           "stallCount": {
             "count": 5,
-            "min": 1,
-            "median": 1,
-            "p75": 1,
-            "p95": 1,
-            "max": 1
+            "min": 0,
+            "median": 0,
+            "p75": 0,
+            "p95": 0,
+            "max": 0
           },
           "stallDurationMs": {
             "count": 5,
-            "min": 26280.3,
-            "median": 26326.3,
-            "p75": 26332.4,
-            "p95": 26357.7,
-            "max": 26364
+            "min": 0,
+            "median": 0,
+            "p75": 0,
+            "p95": 0,
+            "max": 0
           }
         },
         "observed": {
@@ -231,43 +231,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 504.6,
-            "median": 593.3,
-            "p75": 741.7,
-            "p95": 823.7,
-            "max": 844.2
+            "min": 494.5,
+            "median": 767.4,
+            "p75": 773.1,
+            "p95": 5612.8,
+            "max": 6822.7
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 484.9,
-            "median": 562.3,
-            "p75": 685.4,
-            "p95": 802.4,
-            "max": 831.6
+            "min": 477.9,
+            "median": 720.6,
+            "p75": 743,
+            "p95": 5569.1,
+            "max": 6775.6
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 533.7,
-            "median": 596.7,
-            "p75": 827.8,
-            "p95": 845.7,
-            "max": 850.2
+            "min": 542,
+            "median": 776.1,
+            "p75": 835.9,
+            "p95": 5633.4,
+            "max": 6832.8
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 504.6,
-            "median": 593.3,
-            "p75": 741.7,
-            "p95": 823.7,
-            "max": 844.2
+            "min": 494.5,
+            "median": 767.4,
+            "p75": 773.1,
+            "p95": 5612.8,
+            "max": 6822.7
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30579.2,
-            "median": 30685.8,
-            "p75": 30872.2,
-            "p95": 30896.8,
-            "max": 30902.9
+            "min": 30626.5,
+            "median": 30837,
+            "p75": 30880.1,
+            "p95": 35696.8,
+            "max": 36901
           },
           "stallCount": {
             "count": 5,
@@ -310,7 +310,7 @@
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-16T13:41:18.266Z",
+    "checkedAt": "2026-06-16T14:25:59.115Z",
     "patternsVersion": 1,
     "findings": []
   }
