@@ -185,6 +185,7 @@ require_file scripts/deploy-control-plane-host.sh
 require_file scripts/deploy-edge-host.sh
 require_file scripts/quarantine-telemetry-spool-lines.sh
 require_file scripts/verify-first-host-deploy.sh
+require_file scripts/sync-edge-deploy-env-over-ssh.sh
 
 require_compose_service compose.yml rend-api
 require_compose_service compose.yml rend-media-worker
@@ -267,6 +268,9 @@ require_contains scripts/verify-first-host-deploy.sh "--clickhouse-database"
 require_contains scripts/verify-first-host-deploy.sh "operator_psql_database_url"
 require_contains scripts/verify-first-host-deploy.sh "/v/not-a-uuid/hls/master.m3u8"
 require_contains scripts/verify-first-host-deploy.sh "rend_edge_telemetry_spool_bytes"
+require_contains scripts/sync-edge-deploy-env-over-ssh.sh "REND_EDGE_CORS_ALLOWED_ORIGINS"
+require_contains .github/workflows/release-deploy.yml "REND_EDGE_CORS_ALLOWED_ORIGINS"
+require_contains .github/workflows/release-deploy.yml "scripts/sync-edge-deploy-env-over-ssh.sh"
 
 require_contains docs/edge-host-runbook-v1.md "public playback"
 require_contains docs/edge-host-runbook-v1.md "private/internal"
