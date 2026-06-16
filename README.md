@@ -1,6 +1,20 @@
-# Rend
+<div align="center">
 
-Video infrastructure, built for speed.
+<img alt="Rend" src="./rend-logo.svg" width="220">
+
+### Video infrastructure, built for speed
+
+One API call to upload. One playback URL designed to start fast.
+
+[**Rend.so**](https://rend.so)
+
+![Status](https://img.shields.io/badge/status-v1_in_progress-E8590C)
+![Server](https://img.shields.io/badge/server-AGPL--3.0-2F6FED)
+![Player & SDKs](https://img.shields.io/badge/player_%26_SDKs-MIT-2F6FED)
+
+</div>
+
+## What Is Rend?
 
 Rend is the video platform for developers: one API call to upload, one playback
 URL that starts fast. Encoding, storage, delivery, signed playback, analytics,
