@@ -152,15 +152,18 @@ test("site playback bootstrap response is tokenless and matches the OpenAPI sche
     playback_content_type: "application/vnd.apple.mpegurl",
     playback_token_expires_at: 1_781_432_100,
     ttl_seconds: 900,
-    opener_url: `https://edge.rend.so/v/${ASSET_ID}/opener.mp4`,
-    opener_content_type: "video/mp4",
     manifest_url: `https://edge.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
     manifest_content_type: "application/vnd.apple.mpegurl",
     playback_token: "must-not-appear",
     prefetch_hints: [
       {
-        artifact_path: "hls/segment_00000.ts",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/segment_00000.ts`,
+        artifact_path: "hls/720p/index.m3u8",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+        content_type: "application/vnd.apple.mpegurl",
+      },
+      {
+        artifact_path: "hls/720p/segment_00000.ts",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/720p/segment_00000.ts`,
         content_type: "video/mp2t",
       },
     ],
