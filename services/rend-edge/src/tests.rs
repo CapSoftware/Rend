@@ -425,10 +425,13 @@ fn tamper_last_char(value: &str) -> String {
 
 struct PlaybackTestResponse {
     status: StatusCode,
+    cache_control: Option<String>,
     cache_status: Option<String>,
     content_type: Option<String>,
     access_control_allow_origin: Option<String>,
     access_control_expose_headers: Option<String>,
+    edge_id: Option<String>,
+    region: Option<String>,
     body: Vec<u8>,
 }
 
@@ -464,6 +467,10 @@ async fn get_playback_with_cookie(
 
     PlaybackTestResponse {
         status,
+        cache_control: headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
         cache_status: headers
             .get("x-rend-cache")
             .and_then(|value| value.to_str().ok())
@@ -478,6 +485,14 @@ async fn get_playback_with_cookie(
             .map(str::to_owned),
         access_control_expose_headers: headers
             .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        edge_id: headers
+            .get("x-rend-edge-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        region: headers
+            .get("x-rend-region")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         body,
@@ -921,13 +936,19 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
 
     assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.cache_control.as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
     assert_eq!(response.cache_status.as_deref(), Some("HIT"));
     assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
     assert_eq!(response.access_control_allow_origin.as_deref(), Some("*"));
     assert_eq!(
         response.access_control_expose_headers.as_deref(),
-        Some("content-length, content-type, x-rend-cache")
+        Some("cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region")
     );
+    assert_eq!(response.edge_id.as_deref(), Some("test-edge"));
+    assert_eq!(response.region.as_deref(), Some("test"));
     assert_eq!(response.body, b"cached-opener");
     assert!(requests.lock().unwrap().is_empty());
 }
@@ -1034,6 +1055,10 @@ async fn playback_miss_fetches_origin_writes_cache_then_hits() {
     let second = get_playback(app, uri).await;
 
     assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        first.cache_control.as_deref(),
+        Some("private, max-age=60, stale-while-revalidate=300")
+    );
     assert_eq!(first.cache_status.as_deref(), Some("MISS"));
     assert_eq!(
         first.content_type.as_deref(),

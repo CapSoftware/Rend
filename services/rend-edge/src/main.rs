@@ -1137,7 +1137,7 @@ async fn playback_inner(
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
     if let Some(bytes) = read_cache_artifact(&state, &artifact, &cache_path).await? {
-        return Ok(artifact_bytes_response(&artifact, "HIT", bytes));
+        return Ok(artifact_bytes_response(&state.config, &artifact, "HIT", bytes));
     }
 
     match state
@@ -1150,7 +1150,7 @@ async fn playback_inner(
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
             let bytes = read_filled_cache_file(&state, &artifact, &cache_path).await?;
-            Ok(artifact_bytes_response(&artifact, "COALESCED", bytes))
+            Ok(artifact_bytes_response(&state.config, &artifact, "COALESCED", bytes))
         }
     }
 }
@@ -1248,12 +1248,14 @@ async fn wait_for_coalesced_fill(
 }
 
 fn artifact_bytes_response(
+    config: &EdgeConfig,
     artifact: &PlaybackArtifact,
     cache_status: &'static str,
     bytes: Vec<u8>,
 ) -> Response {
     let content_length = u64::try_from(bytes.len()).ok();
     artifact_response(
+        config,
         artifact.content_type,
         cache_status,
         Body::from(bytes),
@@ -1278,7 +1280,7 @@ async fn stream_origin_artifact_response(
     let content_length = stream.content_length;
     let (sender, receiver) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     tokio::spawn(run_streamed_cache_fill(
-        state,
+        state.clone(),
         artifact.clone(),
         stream,
         sender,
@@ -1289,6 +1291,7 @@ async fn stream_origin_artifact_response(
     });
 
     Ok(artifact_response(
+        &state.config,
         artifact.content_type,
         "MISS",
         Body::from_stream(body_stream),
@@ -1866,6 +1869,7 @@ fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 fn artifact_response(
+    config: &EdgeConfig,
     content_type: &'static str,
     cache_status: &'static str,
     body: Body,
@@ -1874,11 +1878,14 @@ fn artifact_response(
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, playback_artifact_cache_control(content_type))
         .header("x-rend-cache", cache_status)
+        .header("x-rend-edge-id", &config.edge_id)
+        .header("x-rend-region", &config.region)
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "content-length, content-type, x-rend-cache",
+            "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region",
         );
 
     if let Some(content_length) = content_length {
@@ -1888,6 +1895,14 @@ fn artifact_response(
     builder
         .body(body)
         .expect("artifact response headers are static and valid")
+}
+
+fn playback_artifact_cache_control(content_type: &str) -> &'static str {
+    match content_type {
+        "application/vnd.apple.mpegurl" => "private, max-age=60, stale-while-revalidate=300",
+        "video/mp4" | "video/mp2t" => "private, max-age=31536000, immutable",
+        _ => "no-store",
+    }
 }
 
 async fn fetch_origin_artifact(
