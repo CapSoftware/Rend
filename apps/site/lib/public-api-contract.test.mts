@@ -39,6 +39,22 @@ function telemetryRequest(body: unknown, init: RequestInit = {}) {
   });
 }
 
+async function withTelemetryIngestEnabled(callback: () => Promise<void>) {
+  const env = process.env as Record<string, string | undefined>;
+  const previous = env.REND_PLAYER_TELEMETRY_INGEST;
+  env.REND_PLAYER_TELEMETRY_INGEST = "1";
+
+  try {
+    await callback();
+  } finally {
+    if (previous === undefined) {
+      delete env.REND_PLAYER_TELEMETRY_INGEST;
+    } else {
+      env.REND_PLAYER_TELEMETRY_INGEST = previous;
+    }
+  }
+}
+
 test("control-plane success response bodies match the public OpenAPI schemas", () => {
   assertMatchesResponseSchema(spec, "/v1/videos", "post", 201, {
     asset_id: ASSET_ID,
@@ -188,73 +204,75 @@ test("site not-playable response shape matches the OpenAPI schema", () => {
 });
 
 test("player telemetry route responses match the OpenAPI schemas", async () => {
-  const accepted = await postPlayerTelemetry(
-    telemetryRequest({
-      events: [
-        {
-          playback_session_id: "contract-session-1",
+  await withTelemetryIngestEnabled(async () => {
+    const accepted = await postPlayerTelemetry(
+      telemetryRequest({
+        events: [
+          {
+            playback_session_id: "contract-session-1",
+            asset_id: ASSET_ID,
+            phase: "source_selected",
+            event_time_ms: EVENT_TIME_MS,
+            selected_playback_mode: "hls_js",
+            selected_artifact_path: "hls/master.m3u8",
+          },
+        ],
+      })
+    );
+    assert.equal(accepted.status, 200);
+    assertMatchesResponseSchema(
+      spec,
+      "/api/player/telemetry",
+      "post",
+      200,
+      await responseJson(accepted)
+    );
+
+    const malformed = await postPlayerTelemetry(telemetryRequest("{"));
+    assert.equal(malformed.status, 400);
+    assertMatchesResponseSchema(
+      spec,
+      "/api/player/telemetry",
+      "post",
+      400,
+      await responseJson(malformed)
+    );
+
+    const tooManyEvents = await postPlayerTelemetry(
+      telemetryRequest({
+        events: Array.from({ length: 17 }, () => ({
+          playback_session_id: "contract-session-2",
           asset_id: ASSET_ID,
-          phase: "source_selected",
+          phase: "player_load",
           event_time_ms: EVENT_TIME_MS,
-          selected_playback_mode: "hls_js",
-          selected_artifact_path: "hls/master.m3u8",
-        },
-      ],
-    })
-  );
-  assert.equal(accepted.status, 200);
-  assertMatchesResponseSchema(
-    spec,
-    "/api/player/telemetry",
-    "post",
-    200,
-    await responseJson(accepted)
-  );
+        })),
+      })
+    );
+    assert.equal(tooManyEvents.status, 413);
+    assertMatchesResponseSchema(
+      spec,
+      "/api/player/telemetry",
+      "post",
+      413,
+      await responseJson(tooManyEvents)
+    );
 
-  const malformed = await postPlayerTelemetry(telemetryRequest("{"));
-  assert.equal(malformed.status, 400);
-  assertMatchesResponseSchema(
-    spec,
-    "/api/player/telemetry",
-    "post",
-    400,
-    await responseJson(malformed)
-  );
-
-  const tooManyEvents = await postPlayerTelemetry(
-    telemetryRequest({
-      events: Array.from({ length: 17 }, () => ({
-        playback_session_id: "contract-session-2",
-        asset_id: ASSET_ID,
-        phase: "player_load",
-        event_time_ms: EVENT_TIME_MS,
-      })),
-    })
-  );
-  assert.equal(tooManyEvents.status, 413);
-  assertMatchesResponseSchema(
-    spec,
-    "/api/player/telemetry",
-    "post",
-    413,
-    await responseJson(tooManyEvents)
-  );
-
-  const wrongContentType = await postPlayerTelemetry(
-    new Request("https://rend.example/api/player/telemetry", {
-      method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: "{}",
-    })
-  );
-  assert.equal(wrongContentType.status, 415);
-  assertMatchesResponseSchema(
-    spec,
-    "/api/player/telemetry",
-    "post",
-    415,
-    await responseJson(wrongContentType)
-  );
+    const wrongContentType = await postPlayerTelemetry(
+      new Request("https://rend.example/api/player/telemetry", {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: "{}",
+      })
+    );
+    assert.equal(wrongContentType.status, 415);
+    assertMatchesResponseSchema(
+      spec,
+      "/api/player/telemetry",
+      "post",
+      415,
+      await responseJson(wrongContentType)
+    );
+  });
 });
 
 test("public spec and generated client do not expose internal surfaces or signed playback tokens", async () => {
