@@ -182,6 +182,26 @@ function playbackSource(bootstrap) {
   return bootstrap.manifest_url ?? bootstrap.playback_url ?? bootstrap.opener_url;
 }
 
+function isPlaybackArtifactUrl(value, assetId, siteBaseUrl) {
+  let url;
+  try {
+    url = new URL(value, siteBaseUrl);
+  } catch {
+    return false;
+  }
+  const site = new URL(siteBaseUrl);
+  if (url.origin === site.origin && url.pathname.startsWith(`/api/player/${assetId}/artifact/`)) {
+    return true;
+  }
+  const host = url.hostname.toLowerCase();
+  const isTrustedHost =
+    host === "rend.so" ||
+    host.endsWith(".rend.so") ||
+    host === "localhost" ||
+    host === "127.0.0.1";
+  return isTrustedHost && url.pathname.startsWith(`/v/${assetId}/`);
+}
+
 async function expectDeletedPlaybackUnavailable(client, assetId) {
   try {
     await client.getPlaybackBootstrap(assetId);
@@ -232,9 +252,8 @@ async function main() {
     assertNoPlaybackLeaks(bootstrap);
     const source = playbackSource(bootstrap);
     if (!source) fail("playback bootstrap did not return a source path");
-    const expectedPrefix = `/api/player/${assetId}/artifact/`;
-    if (!source.startsWith(expectedPrefix)) {
-      fail(`playback source is not a same-origin artifact path: ${source}`);
+    if (!isPlaybackArtifactUrl(source, assetId, siteBaseUrl)) {
+      fail(`playback source is not a safe artifact URL: ${source}`);
     }
 
     log("checking artifact path");
