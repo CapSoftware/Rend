@@ -12,16 +12,35 @@ export type HlsSupport = {
   nativeHls: boolean;
 };
 
+export type RendPlayerPlaybackEngine = "auto" | "native" | "mse";
+export type RendPlayerStartupMode = "hls" | "opener";
+
 export type SourceSelection = {
   label: RendPlayerPlaybackMode;
   artifactPath: string;
   url: string;
 };
 
+export type SourceSelectionOptions = {
+  playbackEngine?: RendPlayerPlaybackEngine;
+  startupMode?: RendPlayerStartupMode;
+};
+
 export function hlsSource(
   data: PlaybackSourceData,
-  support: HlsSupport
+  support: HlsSupport,
+  options: SourceSelectionOptions = {}
 ): SourceSelection | null {
+  if (!data.manifest_url) return null;
+
+  if (options.playbackEngine === "mse" && support.hlsJs) {
+    return {
+      label: "hls_js",
+      artifactPath: "hls/master.m3u8",
+      url: data.manifest_url,
+    };
+  }
+
   if (data.manifest_url && support.nativeHls) {
     return {
       label: "native_hls",
@@ -61,9 +80,14 @@ export function fallbackPrimarySource(data: PlaybackSourceData): SourceSelection
 
 export function selectedSource(
   data: PlaybackSourceData,
-  support: HlsSupport
+  support: HlsSupport,
+  options: SourceSelectionOptions = {}
 ): SourceSelection | null {
-  const hls = hlsSource(data, support);
+  const hls = hlsSource(data, support, options);
+  if (options.startupMode === "opener") {
+    return openerSource(data) ?? hls ?? fallbackPrimarySource(data);
+  }
+
   if (data.playable_state === "hls_ready" && hls) return hls;
 
   return openerSource(data) ?? hls ?? fallbackPrimarySource(data);
