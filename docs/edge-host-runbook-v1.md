@@ -75,6 +75,24 @@ with `noatime` if the provider allows it. Keep the telemetry spool on persistent
 storage; cache files may be discarded, but spooled telemetry should survive
 service restarts and image rollbacks.
 
+`rend-edge` exposes an internal-only cache inspection endpoint for proving that
+specific hot playback bytes are present on the node-local cache filesystem:
+
+```sh
+curl -fsS \
+  -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
+  "https://$REND_EDGE_PRIVATE_HOSTNAME/internal/cache/inspect?asset_id=$ASSET_ID&artifact_path=hls%2Fsegment_00000.ts"
+```
+
+The response is intentionally redacted. It includes the requested
+`artifact_path`, whether that artifact exists in the local cache, its byte size,
+edge id, region, cache mount target/source/fstype, optional block device and
+rotational flag, and `inferred_storage_tier` (`nvme`, `ssd`, or `unknown`). It
+does not return signed URLs, playback tokens, auth headers, object keys, raw
+cache keys, full cache paths, cookies, or internal upstream endpoints. Use this
+alongside playback response headers such as `x-rend-cache: HIT` to distinguish
+"served from this edge cache" from "the cache filesystem is backed by NVMe/SSD."
+
 The Docker image runs as uid/gid `10001`. Before first start:
 
 ```sh
@@ -467,8 +485,12 @@ curl -fsS \
   -X POST "$EDGE_INTERNAL_BASE/internal/warm" \
   -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
   -H "content-type: application/json" \
-  --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"opener.mp4\"]}"
+  --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"hls/720p/index.m3u8\",\"hls/720p/segment_00000.ts\",\"hls/720p/segment_00001.ts\",\"hls/1080p/index.m3u8\",\"hls/1080p/segment_00000.ts\",\"hls/1080p/segment_00001.ts\"]}"
 ```
+
+With the default `REND_EDGE_WARM_MAX_ARTIFACTS=16`, the control plane can warm
+the HLS master, every generated variant playlist, and the first two media
+segments for each generated `720p`/`1080p`/`2k`/`4k` tier.
 
 Registry fanout check. After an upload reaches `hls_ready`, the asset lifecycle
 events should include `edge.warming_succeeded` with an `edges` array listing
@@ -645,7 +667,7 @@ The production cache safety gate bounds upload size, origin artifact size,
 cache free-space reserve, and optional cache size. Cold playback misses use
 stream-while-write: origin bytes go to the viewer while the edge writes an
 atomic cache file. Cache pressure evicts lower-priority old deep-tail artifacts
-before opener and first segments. `HIT`, `MISS`, and `COALESCED` response
+before manifests and first segments. `HIT`, `MISS`, and `COALESCED` response
 header semantics are unchanged.
 
 ## Local Validation
