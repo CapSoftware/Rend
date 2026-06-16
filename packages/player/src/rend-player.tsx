@@ -12,6 +12,8 @@ import {
   hlsSource,
   openerSource,
   selectedSource,
+  type RendPlayerPlaybackEngine,
+  type RendPlayerStartupMode,
   type SourceSelection,
 } from "./source-selection";
 import type {
@@ -82,6 +84,8 @@ export type RendPlayerTimings = {
   firstFrameMs?: number;
 };
 
+export type { RendPlayerPlaybackEngine, RendPlayerStartupMode } from "./source-selection";
+
 export type RendPlayerProps = {
   assetId: string;
   bootstrapUrl?: string;
@@ -90,6 +94,8 @@ export type RendPlayerProps = {
   controls?: boolean;
   poster?: string;
   preload?: "auto" | "metadata" | "none";
+  playbackEngine?: RendPlayerPlaybackEngine;
+  startupMode?: RendPlayerStartupMode;
   className?: string;
   maxPrefetchHints?: number;
   telemetryEnabled?: boolean;
@@ -209,6 +215,7 @@ class PlaybackLoadError extends Error {
 }
 
 const DEFAULT_MAX_PREFETCH_HINTS = 2;
+const HAVE_FUTURE_DATA = 3;
 const HLS_HANDOFF_MIN_PLAYED_SECONDS = 0.75;
 const HLS_HANDOFF_NEAR_OPENER_END_SECONDS = 1.25;
 
@@ -395,6 +402,14 @@ function hlsFragmentLoadMs(stats: HlsFragmentStats | undefined) {
   return undefined;
 }
 
+function shouldStartStall(reason: string, video: HTMLVideoElement | null) {
+  if (!video) return true;
+  if (reason === "stalled" && video.readyState >= HAVE_FUTURE_DATA) {
+    return false;
+  }
+  return true;
+}
+
 export function RendPlayer({
   assetId,
   bootstrapUrl,
@@ -403,6 +418,8 @@ export function RendPlayer({
   controls = true,
   poster,
   preload = "auto",
+  playbackEngine = "auto",
+  startupMode = "hls",
   className,
   maxPrefetchHints = DEFAULT_MAX_PREFETCH_HINTS,
   telemetryEnabled,
@@ -431,7 +448,8 @@ export function RendPlayer({
   const [selection, setSelection] = useState<SourceSelection | null>(null);
   const [hlsStats, setHlsStats] = useState<HlsStats>({});
   const [timings, setTimings] = useState<RendPlayerTimings>({});
-  const [playbackSessionId] = useState(generatePlaybackSessionId);
+  const playbackSessionIdRef = useRef("");
+  const [playbackSessionId, setPlaybackSessionId] = useState("");
   const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
 
   const resolvedBootstrapUrl = useMemo(
@@ -439,12 +457,21 @@ export function RendPlayer({
     [assetId, bootstrapUrl]
   );
 
+  const ensurePlaybackSessionId = useCallback(() => {
+    if (playbackSessionIdRef.current) return playbackSessionIdRef.current;
+    const nextSessionId = generatePlaybackSessionId();
+    playbackSessionIdRef.current = nextSessionId;
+    setPlaybackSessionId(nextSessionId);
+    return nextSessionId;
+  }, []);
+
   const emitTelemetry = useCallback(
     (input: RendPlayerTelemetryInput) => {
-      if (!telemetryActive || !playbackSessionId) return;
+      if (!telemetryActive) return;
+      const sessionId = ensurePlaybackSessionId();
 
       const event: RendPlayerTelemetryEvent = {
-        playback_session_id: playbackSessionId,
+        playback_session_id: sessionId,
         asset_id: assetId,
         event_time_ms: Date.now(),
         player_version: REND_PLAYER_VERSION,
@@ -462,8 +489,8 @@ export function RendPlayer({
     },
     [
       assetId,
+      ensurePlaybackSessionId,
       onTelemetryEvent,
-      playbackSessionId,
       telemetryActive,
       telemetryAppVersion,
       telemetryUrl,
@@ -557,8 +584,12 @@ export function RendPlayer({
 
       video.src = nextSelection.url;
       video.load();
+      if (autoPlay) {
+        void video.play().catch(() => undefined);
+      }
     },
     [
+      autoPlay,
       destroyHls,
       emitTelemetry,
       revokeManifestObjectUrl,
@@ -902,7 +933,7 @@ export function RendPlayer({
 
       const usesNativeHls = data.manifest_url ? isNativeHlsSupported(video) : false;
       let Hls: HlsConstructor | null = null;
-      if (data.manifest_url && !usesNativeHls) {
+      if (data.manifest_url && (playbackEngine === "mse" || !usesNativeHls)) {
         try {
           const hlsModule = await import("hls.js");
           Hls = hlsModule.default as HlsConstructor;
@@ -915,8 +946,9 @@ export function RendPlayer({
         nativeHls: usesNativeHls,
         hlsJs: Boolean(Hls?.isSupported()),
       };
-      const hlsSelection = hlsSource(data, hlsSupport);
-      const nextSelection = selectedSource(data, hlsSupport);
+      const sourceOptions = { playbackEngine, startupMode };
+      const hlsSelection = hlsSource(data, hlsSupport, sourceOptions);
+      const nextSelection = selectedSource(data, hlsSupport, sourceOptions);
       if (!nextSelection) {
         emitTelemetry({
           phase: "playback_failure",
@@ -982,6 +1014,7 @@ export function RendPlayer({
     emitTelemetry,
     handoffFromOpenerWhenReady,
     loadProgressiveSource,
+    playbackEngine,
     prepareHlsSource,
     recordTiming,
     revokeManifestObjectUrl,
@@ -989,6 +1022,7 @@ export function RendPlayer({
     setActiveSelection,
     setObservedHlsStats,
     setPlayerState,
+    startupMode,
   ]);
 
   useEffect(() => {
@@ -1000,7 +1034,7 @@ export function RendPlayer({
       destroyHls();
       revokeManifestObjectUrl();
     };
-  }, [destroyHls, loadPlayback, playbackSessionId, revokeManifestObjectUrl]);
+  }, [destroyHls, loadPlayback, revokeManifestObjectUrl]);
 
   const updateObservedVideoStats = useCallback(() => {
     const currentSelection = selectionRef.current;
@@ -1012,6 +1046,7 @@ export function RendPlayer({
     (reason: string) => {
       if (activeStallRef.current || !loadStartedAtRef.current) return;
       if (timingsRef.current.firstFrameMs === undefined) return;
+      if (!shouldStartStall(reason, videoRef.current)) return;
 
       const startMs = Date.now() - loadStartedAtRef.current;
       activeStallRef.current = { reason, startMs };
@@ -1072,11 +1107,11 @@ export function RendPlayer({
       : null;
 
     if (bootstrap.playable_state === "hls_ready") {
+      if (startupMode === "opener" && openerHint) pushHint(openerHint);
       if (manifestHint) pushHint(manifestHint);
       for (const hint of bootstrap.prefetch_hints.slice(0, Math.max(0, maxPrefetchHints))) {
         pushHint(hint);
       }
-      if (openerHint) pushHint(openerHint);
     } else {
       if (openerHint) pushHint(openerHint);
       if (manifestHint) pushHint(manifestHint);
@@ -1099,7 +1134,7 @@ export function RendPlayer({
     return () => {
       for (const link of links) link.remove();
     };
-  }, [bootstrap, maxPrefetchHints]);
+  }, [bootstrap, maxPrefetchHints, startupMode]);
 
   const readyBootstrap = bootstrap?.status === "ready" ? bootstrap : null;
   const unavailable = isUnavailableState(state);
@@ -1127,7 +1162,6 @@ export function RendPlayer({
           className="rend-player__video"
           controls={controls}
           muted={muted}
-          autoPlay={autoPlay}
           poster={poster}
           playsInline
           preload={preload}
@@ -1176,6 +1210,11 @@ export function RendPlayer({
           onTimeUpdate={() => {
             endStall("timeupdate");
             updateObservedVideoStats();
+          }}
+          onProgress={() => {
+            if ((videoRef.current?.readyState ?? 0) >= HAVE_FUTURE_DATA) {
+              endStall("progress");
+            }
           }}
           onWaiting={() => startStall("waiting")}
           onStalled={() => startStall("stalled")}
