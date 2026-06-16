@@ -46,6 +46,26 @@ export function playbackCookieFromHeaders(requestHeaders: Headers) {
   return undefined;
 }
 
+export function playbackCookieFromSetCookieHeader(setCookieHeader: string | null | undefined) {
+  if (!setCookieHeader) return undefined;
+  const match = setCookieHeader.match(new RegExp(`(?:^|,\\s*)${PLAYBACK_COOKIE_NAME}=([^;,\\s]+)`));
+  return safeCookieValue(match?.[1]);
+}
+
+export function playbackCookieFromSetCookieHeaders(headers: Headers) {
+  const values =
+    (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? [
+      headers.get("set-cookie"),
+    ];
+
+  for (const value of values) {
+    const cookie = playbackCookieFromSetCookieHeader(value);
+    if (cookie) return cookie;
+  }
+
+  return undefined;
+}
+
 export function playbackProxyCookieHeader(
   requestUrl: string,
   assetId: string,
