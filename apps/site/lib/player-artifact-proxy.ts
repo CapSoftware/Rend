@@ -5,15 +5,21 @@ const FORWARDED_RESPONSE_HEADERS = [
   "content-type",
   "x-rend-cache",
   "x-rend-edge",
+  "x-rend-edge-id",
   "x-rend-region",
 ] as const;
 
 export const PLAYBACK_COOKIE_NAME = "__rend_playback";
 
 type ArtifactResponseHeaderOptions = {
+  artifactPath?: string;
+  cacheable?: boolean;
   contentType?: string;
   rewrittenBody?: string;
 };
+
+const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL = "private, max-age=31536000, immutable";
+const PRIVATE_MANIFEST_CACHE_CONTROL = "private, max-age=60, stale-while-revalidate=300";
 
 function safeCookieValue(value: unknown) {
   if (typeof value !== "string" || value.length > 4096) return undefined;
@@ -75,7 +81,7 @@ export function playbackArtifactFetchHeaders(
 
 export function playbackArtifactResponseHeaders(source: Headers, options: ArtifactResponseHeaderOptions = {}) {
   const headers = new Headers();
-  headers.set("cache-control", "no-store");
+  headers.set("cache-control", playbackArtifactCacheControl(options.artifactPath, options.cacheable));
 
   const isRewrittenBody = options.rewrittenBody !== undefined;
   for (const name of FORWARDED_RESPONSE_HEADERS) {
@@ -93,4 +99,12 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
   }
 
   return headers;
+}
+
+export function playbackArtifactCacheControl(artifactPath: string | undefined, cacheable = true) {
+  if (!cacheable) return "no-store";
+  if (artifactPath === "opener.mp4") return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
+  if (artifactPath === "hls/master.m3u8") return PRIVATE_MANIFEST_CACHE_CONTROL;
+  if (artifactPath?.startsWith("hls/")) return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
+  return "no-store";
 }
