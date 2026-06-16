@@ -8,6 +8,7 @@ import { Container } from "@/components/ui/Container";
 import { getMarketingPage, START_HREF } from "@/lib/marketing-pages";
 import { pageMetadata } from "@/lib/seo";
 import { breadcrumbLd, webPageLd } from "@/lib/structured-data";
+import europeLocal from "@/public/benchmarks/providers/europe-local.json";
 import latest from "@/public/benchmarks/providers/latest.json";
 
 const page = getMarketingPage("/benchmarks");
@@ -26,8 +27,15 @@ const breadcrumbs = [
 // Pulled straight from the published artifact so the page never drifts from the run.
 const rend = latest.summary.providers.rend;
 const mux = latest.summary.providers.mux;
+const europeRend = europeLocal.summary.providers.rend;
+const europeMux = europeLocal.summary.providers.mux;
 
 const runDate = new Date(latest.generatedAt).toLocaleDateString("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+const europeRunDate = new Date(europeLocal.generatedAt).toLocaleDateString("en-GB", {
   day: "numeric",
   month: "long",
   year: "numeric",
@@ -37,10 +45,16 @@ const durationSeconds = Math.round(latest.source.verification.observed.rend.dura
 const ms = (n: number) => `${Math.round(n).toLocaleString("en-US")} ms`;
 const resOf = (rendition: string) => `${rendition.split("x")[1]}p (${rendition.replace("x", " × ")})`;
 const pctSooner = Math.round((1 - rend.metrics.timeToFirstFrameMs.median / mux.metrics.timeToFirstFrameMs.median) * 100);
+const europePctSooner = Math.round(
+  (1 - europeRend.metrics.timeToFirstFrameMs.median / europeMux.metrics.timeToFirstFrameMs.median) * 100,
+);
+const browserLabel = `${latest.environment.browser.automation} ${latest.environment.browser.version}`;
+const europeBrowserLabel = `${europeLocal.environment.browser.automation} ${europeLocal.environment.browser.version}`;
 
 const results = [
   {
-    id: "rend",
+    id: "us-rend",
+    region: "US",
     name: "Rend",
     firstFrame: ms(rend.metrics.timeToFirstFrameMs.median),
     played: `${rend.successfulSamples} / ${rend.sampleCount}`,
@@ -48,35 +62,68 @@ const results = [
     resolution: resOf(rend.observed.selectedRendition),
   },
   {
-    id: "mux",
+    id: "us-mux",
+    region: "US",
     name: "Mux",
     firstFrame: ms(mux.metrics.timeToFirstFrameMs.median),
     played: `${mux.successfulSamples} / ${mux.sampleCount}`,
     stalls: mux.metrics.stallCount.max,
     resolution: resOf(mux.observed.selectedRendition),
   },
+  {
+    id: "europe-rend",
+    region: "Europe",
+    name: "Rend",
+    firstFrame: ms(europeRend.metrics.timeToFirstFrameMs.median),
+    played: `${europeRend.successfulSamples} / ${europeRend.sampleCount}`,
+    stalls: europeRend.metrics.stallCount.max,
+    resolution: resOf(europeRend.observed.selectedRendition),
+  },
+  {
+    id: "europe-mux",
+    region: "Europe",
+    name: "Mux",
+    firstFrame: ms(europeMux.metrics.timeToFirstFrameMs.median),
+    played: `${europeMux.successfulSamples} / ${europeMux.sampleCount}`,
+    stalls: europeMux.metrics.stallCount.max,
+    resolution: resOf(europeMux.observed.selectedRendition),
+  },
 ];
 
 const spread = [
-  { label: "Fastest sample", rend: rend.metrics.timeToFirstFrameMs.min, mux: mux.metrics.timeToFirstFrameMs.min },
-  { label: "Median", rend: rend.metrics.timeToFirstFrameMs.median, mux: mux.metrics.timeToFirstFrameMs.median },
-  { label: "95th percentile", rend: rend.metrics.timeToFirstFrameMs.p95, mux: mux.metrics.timeToFirstFrameMs.p95 },
-  { label: "Slowest sample", rend: rend.metrics.timeToFirstFrameMs.max, mux: mux.metrics.timeToFirstFrameMs.max },
+  { region: "US", label: "Fastest sample", rend: rend.metrics.timeToFirstFrameMs.min, mux: mux.metrics.timeToFirstFrameMs.min },
+  { region: "US", label: "Median", rend: rend.metrics.timeToFirstFrameMs.median, mux: mux.metrics.timeToFirstFrameMs.median },
+  {
+    region: "Europe",
+    label: "Fastest sample",
+    rend: europeRend.metrics.timeToFirstFrameMs.min,
+    mux: europeMux.metrics.timeToFirstFrameMs.min,
+  },
+  {
+    region: "Europe",
+    label: "Median",
+    rend: europeRend.metrics.timeToFirstFrameMs.median,
+    mux: europeMux.metrics.timeToFirstFrameMs.median,
+  },
 ];
 
 const method = [
   `The same source video, ${durationSeconds} seconds long, uploaded to both Rend and Mux.`,
-  `${latest.run.sampleCountTarget} samples per provider, with provider order randomized each round.`,
+  `${latest.run.sampleCountTarget} samples per provider in each region, with provider order randomized each round.`,
   "A fresh browser context for every sample: no cookies, no stored state, and the cache disabled.",
   `A ${Math.round(latest.run.watchWindowMs / 1000)} second watch window per sample, timing the first painted frame and counting any stalls.`,
-  `Playwright driven Chrome ${latest.environment.browser.version}, run on a Daytona sandbox with the region set to US (Daytona picks a specific US region), the same machine for both providers.`,
+  `${browserLabel}, run on a Daytona sandbox with the region set to US for the US results.`,
+  `${europeBrowserLabel}, run on a local Europe machine for the Europe results.`,
+  "Rend is measured on its fastest production setup for this asset: the native-HLS /watch path with playback assigned from the initial page.",
 ];
 
 const caveats = [
   "This is one video, one region, one browser profile, and one run. It is not a universal claim about either service.",
   "We did not purge or warm any CDN. Mux serves from its own network and Rend from ours, each in whatever cache state it happened to be in.",
   "Encoders, packaging and player implementations differ between the two providers.",
-  "Rend currently serves a single 1080p rendition for this asset rather than a full adaptive ladder, and Mux selected 720p. Source file identity is not independently verified beyond matching duration and metadata.",
+  "This is the fastest real Rend playback path, not a forced-resolution run. Rend selected 1080p and Mux selected 720p in the benchmark viewport.",
+  "The Europe run used a local machine rather than a Daytona Europe sandbox because Europe containers were not available to this Daytona organization.",
+  "Source file identity is not independently verified beyond matching duration and observable metadata.",
 ];
 
 const headCell = "border-b border-line pb-2.5 text-[13px] font-medium text-muted";
@@ -125,17 +172,19 @@ export default function BenchmarksPage() {
             </p>
           </div>
 
-          {/* Latest results */}
-          <h2 className="mt-16 font-head text-[22px] leading-snug">Latest results</h2>
+          {/* Regional results */}
+          <h2 className="mt-16 font-head text-[22px] leading-snug">Regional results</h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
-            Time to first frame, median of {latest.run.sampleCountTarget} samples each. Last run {runDate}{" "}
-            on a Daytona sandbox with the region set to US.
+            Time to first frame, median of {latest.run.sampleCountTarget} samples per provider. The US run
+            was on {runDate} in a Daytona sandbox. The Europe run was on {europeRunDate} from a local
+            machine in Europe. Both use Rend&apos;s fastest production playback path.
           </p>
 
-          <div className="mt-6 max-w-[760px] overflow-x-auto">
-            <table className="w-full min-w-[560px] border-collapse text-left text-[15px]">
+          <div className="mt-6 max-w-[860px] overflow-x-auto">
+            <table className="w-full min-w-[680px] border-collapse text-left text-[15px]">
               <thead>
                 <tr>
+                  <th scope="col" className={headCell}>Region</th>
                   <th scope="col" className={headCell}>Provider</th>
                   <th scope="col" className={headCell}>First frame (median)</th>
                   <th scope="col" className={headCell}>Played</th>
@@ -146,6 +195,7 @@ export default function BenchmarksPage() {
               <tbody>
                 {results.map((row) => (
                   <tr key={row.id} className="border-b border-line-soft last:border-0">
+                    <td className="py-4 pr-4 text-ink-soft">{row.region}</td>
                     <th scope="row" className="py-4 pr-4 font-medium text-ink">
                       {row.name}
                     </th>
@@ -160,11 +210,12 @@ export default function BenchmarksPage() {
           </div>
 
           <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
-            Same source video ({durationSeconds} seconds). Rend served full {resOf(rend.observed.selectedRendition)}{" "}
-            while Mux selected {resOf(mux.observed.selectedRendition)}, so Rend moved more pixels and still
-            reached the first frame about {pctSooner}% sooner. Mux had one slow outlier near 6.8 seconds,
-            shown below, which lifted its median. Rend&apos;s five samples stayed between{" "}
-            {ms(rend.metrics.timeToFirstFrameMs.min)} and {ms(rend.metrics.timeToFirstFrameMs.max)}.
+            Same source video ({durationSeconds} seconds). Rend selected native HLS at{" "}
+            {resOf(rend.observed.selectedRendition)} while Mux selected{" "}
+            {resOf(mux.observed.selectedRendition)} in both regional runs. In the US run, Rend reached the
+            first frame about {pctSooner}% sooner on median. In the Europe run, Rend reached it about{" "}
+            {europePctSooner}% sooner on median. Rend had zero stalls and zero browser network errors in
+            both regions.
           </p>
 
           {/* Sample spread */}
@@ -173,10 +224,11 @@ export default function BenchmarksPage() {
             Time to first frame across every sample, fastest to slowest.
           </p>
 
-          <div className="mt-6 max-w-[560px] overflow-x-auto">
-            <table className="w-full min-w-[420px] border-collapse text-left text-[15px]">
+          <div className="mt-6 max-w-[680px] overflow-x-auto">
+            <table className="w-full min-w-[560px] border-collapse text-left text-[15px]">
               <thead>
                 <tr>
+                  <th scope="col" className={headCell}>Region</th>
                   <th scope="col" className={headCell}>Time to first frame</th>
                   <th scope="col" className={headCell}>Rend</th>
                   <th scope="col" className={headCell}>Mux</th>
@@ -184,7 +236,8 @@ export default function BenchmarksPage() {
               </thead>
               <tbody>
                 {spread.map((s) => (
-                  <tr key={s.label} className="border-b border-line-soft last:border-0">
+                  <tr key={`${s.region}-${s.label}`} className="border-b border-line-soft last:border-0">
+                    <td className="py-3.5 pr-4 text-ink-soft">{s.region}</td>
                     <th scope="row" className="py-3.5 pr-4 font-medium text-ink-soft">{s.label}</th>
                     <td className="py-3.5 pr-4 tabular-nums text-ink">{ms(s.rend)}</td>
                     <td className="py-3.5 tabular-nums text-muted">{ms(s.mux)}</td>
@@ -231,10 +284,26 @@ export default function BenchmarksPage() {
           </p>
           <p className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[15px]">
             <a href={latest.artifacts.machineReadableUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
-              Summary JSON
+              US summary JSON
             </a>
             <a href={latest.artifacts.rawSamplesUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
-              Every raw sample
+              US raw samples
+            </a>
+            <a
+              href={europeLocal.artifacts.machineReadableUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              Europe summary JSON
+            </a>
+            <a
+              href={europeLocal.artifacts.rawSamplesUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              Europe raw samples
             </a>
           </p>
         </Container>
