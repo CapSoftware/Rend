@@ -17,6 +17,8 @@ type UpstreamPlaybackResponse = {
   playback_url?: unknown;
   opener_url?: unknown;
   manifest_url?: unknown;
+  poster_url?: unknown;
+  thumbnail_url?: unknown;
   prefetch_hints?: unknown;
   playback_token?: unknown;
   ttl_seconds?: unknown;
@@ -61,7 +63,7 @@ function normalizeAssetId(value: string) {
 
 function safeArtifactPath(value: string | undefined) {
   if (!value || value.includes("\\") || value.includes("..")) return undefined;
-  if (value === "opener.mp4" || value === "hls/master.m3u8") return value;
+  if (value === "opener.mp4" || value === "thumbnail.jpg" || value === "hls/master.m3u8") return value;
   const parts = value.split("/");
   if (parts.length === 2 && parts[0] === "hls" && /^segment_[0-9]+\.ts$/.test(parts[1] ?? "")) {
     return value;
@@ -168,7 +170,13 @@ function targetUrlForArtifact(
   artifactPath: string,
   playbackBaseUrl: string | null
 ) {
-  const candidates = [data.playback_url, data.opener_url, data.manifest_url].flatMap((value) => {
+  const candidates = [
+    data.playback_url,
+    data.opener_url,
+    data.manifest_url,
+    data.poster_url,
+    data.thumbnail_url,
+  ].flatMap((value) => {
     const url = safePlaybackUrl(value);
     return url ? [url] : [];
   });

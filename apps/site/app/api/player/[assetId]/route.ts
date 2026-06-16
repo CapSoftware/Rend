@@ -162,6 +162,19 @@ function directPlaybackCookieDomain(request: Request, playbackBaseUrl: string | 
   return isTrustedRendHost(requestHost) && isTrustedRendHost(playbackHost) ? "rend.so" : undefined;
 }
 
+function canUseDirectPlaybackCookie(
+  request: Request,
+  playbackBaseUrl: string | null,
+  cookieDomain: string | undefined
+) {
+  if (!playbackBaseUrl) return false;
+  if (cookieDomain) return true;
+
+  const requestHost = new URL(request.url).hostname.toLowerCase();
+  const playbackHost = new URL(playbackBaseUrl).hostname.toLowerCase();
+  return requestHost === playbackHost;
+}
+
 function normalizeAssetId(value: string) {
   const assetId = value.trim().toLowerCase();
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(assetId)
@@ -318,7 +331,12 @@ export async function GET(
   }
 
   const data = (await upstream.json().catch(() => null)) as UpstreamPlaybackResponse | null;
-  const safeResponse = data ? safePlaybackBootstrapResponse(normalizedAssetId, data, playbackBaseUrl) : null;
+  const directCookieDomain = directPlaybackCookieDomain(request, playbackBaseUrl);
+  const directPlaybackEnabled = canUseDirectPlaybackCookie(request, playbackBaseUrl, directCookieDomain);
+  const responsePlaybackBaseUrl = directPlaybackEnabled ? playbackBaseUrl : null;
+  const safeResponse = data
+    ? safePlaybackBootstrapResponse(normalizedAssetId, data, responsePlaybackBaseUrl)
+    : null;
 
   if (!safeResponse) {
     return jsonResponse(
@@ -334,14 +352,14 @@ export async function GET(
   const headers = new Headers();
   const upstreamPlaybackCookie = playbackCookieFromSetCookieHeaders(upstream.headers);
   const playbackToken = upstreamPlaybackCookie ?? data?.playback_token;
-  const playbackCookie = playbackBaseUrl
+  const playbackCookie = directPlaybackEnabled && playbackBaseUrl
     ? playbackDirectCookieHeader(
         request.url,
         normalizedAssetId,
         playbackToken,
         safeResponse.ttl_seconds,
         playbackBaseUrl,
-        directPlaybackCookieDomain(request, playbackBaseUrl)
+        directCookieDomain
       )
     : playbackProxyCookieHeader(
         request.url,

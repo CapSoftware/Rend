@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   generatePlaybackSessionId,
   readableTelemetryHeaders,
@@ -41,6 +41,8 @@ export type PlaybackBootstrapReady = {
   opener_content_type?: string;
   manifest_url?: string;
   manifest_content_type?: string;
+  poster_url?: string;
+  poster_content_type?: string;
   prefetch_hints: PlaybackPrefetchHint[];
 };
 
@@ -79,6 +81,9 @@ export type RendPlayerState =
 
 export type RendPlayerTimings = {
   bootstrapMs?: number;
+  documentStartMs?: number;
+  srcAssignedMs?: number;
+  videoCreatedMs?: number;
   metadataMs?: number;
   canplayMs?: number;
   firstFrameMs?: number;
@@ -93,6 +98,8 @@ export type RendPlayerProps = {
   muted?: boolean;
   controls?: boolean;
   poster?: string;
+  initialBootstrap?: PlaybackBootstrapResponse | null;
+  initialBootstrapMs?: number;
   preload?: "auto" | "metadata" | "none";
   playbackEngine?: RendPlayerPlaybackEngine;
   startupMode?: RendPlayerStartupMode;
@@ -330,6 +337,156 @@ function isUnavailableState(state: RendPlayerState) {
   );
 }
 
+function asReadyBootstrap(data: PlaybackBootstrapResponse | null | undefined) {
+  return data?.status === "ready" ? data : null;
+}
+
+function initialStateFromBootstrap(
+  data: PlaybackBootstrapResponse | null | undefined,
+  initialSelection: SourceSelection | null
+): RendPlayerState {
+  if (!data) return "idle";
+  if (data.status === "ready") return initialSelection ? "ready" : "not_playable";
+  if (data.status === "not_playable") return "not_playable";
+  if (data.status === "unavailable") return "unavailable";
+  return "bootstrap_failure";
+}
+
+function initialMessageFromBootstrap(
+  data: PlaybackBootstrapResponse | null | undefined,
+  state: RendPlayerState
+) {
+  if (!data) return "Loading playback";
+  if (data.status === "ready") return stateLabel(state);
+  return data.message;
+}
+
+function initialSourceSelection(
+  data: PlaybackBootstrapResponse | null | undefined,
+  startupMode: RendPlayerStartupMode
+): SourceSelection | null {
+  const ready = asReadyBootstrap(data);
+  if (!ready) return null;
+
+  if (startupMode === "opener" && ready.opener_url) {
+    return {
+      label: "opener",
+      artifactPath: "opener.mp4",
+      url: ready.opener_url,
+    };
+  }
+
+  if (ready.playable_state === "hls_ready" && ready.manifest_url) {
+    return {
+      label: "native_hls",
+      artifactPath: "hls/master.m3u8",
+      url: ready.manifest_url,
+    };
+  }
+
+  if (ready.opener_url) {
+    return {
+      label: "opener",
+      artifactPath: "opener.mp4",
+      url: ready.opener_url,
+    };
+  }
+
+  if (ready.manifest_url) {
+    return {
+      label: "native_hls",
+      artifactPath: "hls/master.m3u8",
+      url: ready.manifest_url,
+    };
+  }
+
+  if (ready.playback_url) {
+    return {
+      label: "primary",
+      artifactPath: ready.playable_state === "hls_ready" ? "hls/master.m3u8" : "opener.mp4",
+      url: ready.playback_url,
+    };
+  }
+
+  return null;
+}
+
+function initialTimingState(initialBootstrapMs: number | undefined): RendPlayerTimings {
+  const timings: RendPlayerTimings = {
+    documentStartMs: 0,
+  };
+  if (typeof initialBootstrapMs === "number" && Number.isFinite(initialBootstrapMs)) {
+    timings.bootstrapMs = Math.max(0, Math.round(initialBootstrapMs));
+  }
+  return timings;
+}
+
+function documentStartedAtEpochMs() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return Date.now() - performance.now();
+  }
+  return Date.now();
+}
+
+function roundedPerformanceNow() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return roundedMs(performance.now());
+  }
+  return undefined;
+}
+
+function numberFromDataAttribute(value: string | undefined) {
+  if (value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : undefined;
+}
+
+function instantPlaybackScript(playerId: string) {
+  return `
+(() => {
+  const player = document.getElementById(${JSON.stringify(playerId)});
+  if (!player || player.dataset.rendInstantBound === "1") return;
+  const video = player.querySelector("video");
+  if (!video) return;
+  player.dataset.rendInstantBound = "1";
+  const now = () => Math.max(0, Math.round(performance.now()));
+  const setOnce = (name, value) => {
+    if (!player.getAttribute(name)) player.setAttribute(name, String(value));
+  };
+  const setState = (state) => {
+    player.setAttribute("data-rend-player-state", state);
+  };
+  const setVideoStats = () => {
+    if (video.videoWidth) player.setAttribute("data-rend-selected-width", String(video.videoWidth));
+    if (video.videoHeight) player.setAttribute("data-rend-selected-height", String(video.videoHeight));
+  };
+  setOnce("data-rend-document-start-ms", "0");
+  setOnce("data-rend-video-created-ms", now());
+  if (video.currentSrc || video.getAttribute("src")) {
+    setOnce("data-rend-src-assigned-ms", now());
+  }
+  video.addEventListener("loadedmetadata", () => {
+    setOnce("data-rend-metadata-ms", now());
+    setState("metadata");
+    setVideoStats();
+  });
+  video.addEventListener("canplay", () => {
+    setOnce("data-rend-canplay-ms", now());
+    setState("canplay");
+    setVideoStats();
+  });
+  video.addEventListener("playing", () => {
+    setOnce("data-rend-first-frame-ms", now());
+    setState("playing");
+    setVideoStats();
+  });
+  video.addEventListener("resize", setVideoStats);
+  video.addEventListener("error", () => setState("playback_failure"));
+  if (video.autoplay) video.play().catch(() => {});
+})();
+`;
+}
+
 function playbackLoadErrorFields(error: unknown, fallbackCode: string, fallbackReason: string) {
   if (error instanceof PlaybackLoadError) {
     return {
@@ -420,6 +577,8 @@ export function RendPlayer({
   muted = true,
   controls = true,
   poster,
+  initialBootstrap,
+  initialBootstrapMs,
   preload = "auto",
   playbackEngine = "auto",
   startupMode = "hls",
@@ -432,25 +591,47 @@ export function RendPlayer({
   onStateChange,
   onTimingsChange,
 }: RendPlayerProps) {
+  const playerDomId = useId();
+  const initialReadyBootstrap = useMemo(
+    () => asReadyBootstrap(initialBootstrap),
+    [initialBootstrap]
+  );
+  const initialSelection = useMemo(
+    () => initialSourceSelection(initialBootstrap, startupMode),
+    [initialBootstrap, startupMode]
+  );
+  const initialState = useMemo(
+    () => initialStateFromBootstrap(initialBootstrap, initialSelection),
+    [initialBootstrap, initialSelection]
+  );
+  const initialTimings = useMemo(
+    () => initialTimingState(initialBootstrapMs),
+    [initialBootstrapMs]
+  );
+  const initialVideoSrc = initialSelection?.url;
+  const sectionRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<HlsInstance | null>(null);
   const manifestObjectUrlRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const loadStartedAtRef = useRef<number>(0);
+  const loadStartedAtRef = useRef<number>(documentStartedAtEpochMs());
   const loadGenerationRef = useRef(0);
-  const timingsRef = useRef<RendPlayerTimings>({});
+  const timingsRef = useRef<RendPlayerTimings>(initialTimings);
   const triedOpenerFallbackRef = useRef(false);
   const hlsPreparationRef = useRef<Promise<PreparedHlsSource | null> | null>(null);
   const hlsHandoffStartedRef = useRef(false);
-  const selectionRef = useRef<SourceSelection | null>(null);
+  const hlsUpgradePendingRef = useRef(false);
+  const selectionRef = useRef<SourceSelection | null>(initialSelection);
   const hlsStatsRef = useRef<HlsStats>({});
   const activeStallRef = useRef<{ reason: string; startMs: number } | null>(null);
-  const [state, setState] = useState<RendPlayerState>("idle");
-  const [message, setMessage] = useState("Loading playback");
-  const [bootstrap, setBootstrap] = useState<PlaybackBootstrapResponse | null>(null);
-  const [selection, setSelection] = useState<SourceSelection | null>(null);
+  const initialLoadHandledRef = useRef(false);
+  const [state, setState] = useState<RendPlayerState>(initialState);
+  const [message, setMessage] = useState(initialMessageFromBootstrap(initialBootstrap, initialState));
+  const [bootstrap, setBootstrap] = useState<PlaybackBootstrapResponse | null>(initialBootstrap ?? null);
+  const [selection, setSelection] = useState<SourceSelection | null>(initialSelection);
   const [hlsStats, setHlsStats] = useState<HlsStats>({});
-  const [timings, setTimings] = useState<RendPlayerTimings>({});
+  const [timings, setTimings] = useState<RendPlayerTimings>(initialTimings);
+  const [videoSrcAttr, setVideoSrcAttr] = useState<string | undefined>(initialVideoSrc);
   const playbackSessionIdRef = useRef("");
   const [playbackSessionId, setPlaybackSessionId] = useState("");
   const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
@@ -547,6 +728,91 @@ export function RendPlayer({
     [onTimingsChange]
   );
 
+  const syncInstantDomTimings = useCallback(() => {
+    const player = sectionRef.current;
+    if (!player) return timingsRef.current;
+
+    const next = {
+      ...timingsRef.current,
+      documentStartMs:
+        timingsRef.current.documentStartMs ??
+        numberFromDataAttribute(player.dataset.rendDocumentStartMs),
+      videoCreatedMs:
+        timingsRef.current.videoCreatedMs ??
+        numberFromDataAttribute(player.dataset.rendVideoCreatedMs),
+      srcAssignedMs:
+        timingsRef.current.srcAssignedMs ??
+        numberFromDataAttribute(player.dataset.rendSrcAssignedMs),
+      metadataMs:
+        timingsRef.current.metadataMs ??
+        numberFromDataAttribute(player.dataset.rendMetadataMs),
+      canplayMs:
+        timingsRef.current.canplayMs ??
+        numberFromDataAttribute(player.dataset.rendCanplayMs),
+      firstFrameMs:
+        timingsRef.current.firstFrameMs ??
+        numberFromDataAttribute(player.dataset.rendFirstFrameMs),
+    };
+
+    const changed = (Object.keys(next) as Array<keyof RendPlayerTimings>).some(
+      (key) => next[key] !== timingsRef.current[key]
+    );
+    if (!changed) return timingsRef.current;
+
+    timingsRef.current = next;
+    setTimings(next);
+    onTimingsChange?.(next);
+    return next;
+  }, [onTimingsChange]);
+
+  const emitSrcAssigned = useCallback(
+    (nextSelection: SourceSelection) => {
+      const srcAssignedMs =
+        recordTiming("srcAssignedMs") ??
+        timingsRef.current.srcAssignedMs ??
+        roundedPerformanceNow();
+
+      emitTelemetry({
+        phase: "src_assigned",
+        src_assigned_ms: srcAssignedMs,
+        ...selectionTelemetryFields(nextSelection),
+      });
+    },
+    [emitTelemetry, recordTiming]
+  );
+
+  const emitObservedTimingTelemetry = useCallback(
+    (observedTimings: RendPlayerTimings, nextSelection: SourceSelection | null) => {
+      if (observedTimings.metadataMs !== undefined) {
+        emitTelemetry({
+          phase: "metadata_loaded",
+          metadata_loaded_ms: observedTimings.metadataMs,
+          ...selectionTelemetryFields(nextSelection),
+          ...hlsStatsTelemetryFields(hlsStatsRef.current),
+        });
+      }
+
+      if (observedTimings.canplayMs !== undefined) {
+        emitTelemetry({
+          phase: "canplay",
+          canplay_ms: observedTimings.canplayMs,
+          ...selectionTelemetryFields(nextSelection),
+          ...hlsStatsTelemetryFields(hlsStatsRef.current),
+        });
+      }
+
+      if (observedTimings.firstFrameMs !== undefined) {
+        emitTelemetry({
+          phase: "first_frame",
+          first_frame_ms: observedTimings.firstFrameMs,
+          ...selectionTelemetryFields(nextSelection),
+          ...hlsStatsTelemetryFields(hlsStatsRef.current),
+        });
+      }
+    },
+    [emitTelemetry]
+  );
+
   const destroyHls = useCallback(() => {
     hlsRef.current?.destroy();
     hlsRef.current = null;
@@ -573,6 +839,8 @@ export function RendPlayer({
         hlsPreparationRef.current = null;
         hlsHandoffStartedRef.current = false;
       }
+      hlsUpgradePendingRef.current = false;
+      setVideoSrcAttr(undefined);
       video.removeAttribute("src");
       video.load();
 
@@ -586,6 +854,7 @@ export function RendPlayer({
       });
 
       video.src = nextSelection.url;
+      emitSrcAssigned(nextSelection);
       video.load();
       if (autoPlay) {
         void video.play().catch(() => undefined);
@@ -594,6 +863,7 @@ export function RendPlayer({
     [
       autoPlay,
       destroyHls,
+      emitSrcAssigned,
       emitTelemetry,
       revokeManifestObjectUrl,
       setActiveSelection,
@@ -768,6 +1038,7 @@ export function RendPlayer({
         region_label: prepared.regionLabel,
       });
 
+      setVideoSrcAttr(undefined);
       video.removeAttribute("src");
       video.load();
 
@@ -786,11 +1057,14 @@ export function RendPlayer({
       if (prepared.selection.label === "hls_js" && prepared.hls) {
         hlsRef.current = prepared.hls;
         prepared.hls.attachMedia(video);
+        emitSrcAssigned(prepared.selection);
         prepared.hls.startLoad(resumeAt);
       } else {
         video.src = prepared.sourceUrl;
+        emitSrcAssigned(prepared.selection);
         video.load();
       }
+      hlsUpgradePendingRef.current = false;
 
       if (shouldPlay) {
         void video.play().catch(() => undefined);
@@ -802,6 +1076,7 @@ export function RendPlayer({
     },
     [
       autoPlay,
+      emitSrcAssigned,
       emitTelemetry,
       revokeManifestObjectUrl,
       setActiveSelection,
@@ -855,7 +1130,7 @@ export function RendPlayer({
     [attachPreparedHls, emitTelemetry]
   );
 
-  const loadPlayback = useCallback(async () => {
+  const loadPlayback = useCallback(async (options: { timingOrigin?: "document" | "now" } = {}) => {
     const video = videoRef.current;
     if (!video) return;
 
@@ -863,18 +1138,38 @@ export function RendPlayer({
     abortRef.current?.abort();
     const loadGeneration = loadGenerationRef.current + 1;
     loadGenerationRef.current = loadGeneration;
-    loadStartedAtRef.current = Date.now();
+    loadStartedAtRef.current =
+      options.timingOrigin === "now" ? Date.now() : documentStartedAtEpochMs();
     activeStallRef.current = null;
     destroyHls();
     revokeManifestObjectUrl();
+    setVideoSrcAttr(undefined);
     hlsPreparationRef.current = null;
     hlsHandoffStartedRef.current = false;
+    hlsUpgradePendingRef.current = false;
     setActiveSelection(null);
     setObservedHlsStats({});
     setBootstrap(null);
-    timingsRef.current = {};
-    setTimings({});
+    const resetTimings: RendPlayerTimings =
+      options.timingOrigin === "now"
+        ? {}
+        : {
+            documentStartMs: 0,
+            videoCreatedMs: roundedPerformanceNow(),
+          };
+    timingsRef.current = resetTimings;
+    setTimings(resetTimings);
     setPlayerState("loading");
+    if (options.timingOrigin !== "now") {
+      emitTelemetry({
+        phase: "document_start",
+        document_start_ms: 0,
+      });
+    }
+    emitTelemetry({
+      phase: "video_created",
+      video_created_ms: resetTimings.videoCreatedMs ?? roundedPerformanceNow(),
+    });
     emitTelemetry({
       phase: "player_load",
       bootstrap_start_ms: 0,
@@ -1028,8 +1323,208 @@ export function RendPlayer({
     startupMode,
   ]);
 
+  useLayoutEffect(() => {
+    syncInstantDomTimings();
+  }, [syncInstantDomTimings]);
+
+  const hydrateInitialPlayback = useCallback(async () => {
+    if (!initialBootstrap || initialLoadHandledRef.current) return false;
+    initialLoadHandledRef.current = true;
+
+    const video = videoRef.current;
+    const loadGeneration = loadGenerationRef.current + 1;
+    loadGenerationRef.current = loadGeneration;
+    loadStartedAtRef.current = documentStartedAtEpochMs();
+    activeStallRef.current = null;
+    triedOpenerFallbackRef.current = false;
+    hlsHandoffStartedRef.current = false;
+    setBootstrap(initialBootstrap);
+
+    const observedTimings = syncInstantDomTimings();
+    emitTelemetry({
+      phase: "document_start",
+      document_start_ms: 0,
+    });
+    emitTelemetry({
+      phase: "video_created",
+      video_created_ms: observedTimings.videoCreatedMs ?? roundedPerformanceNow(),
+    });
+    emitTelemetry({
+      phase: "player_load",
+      bootstrap_start_ms: 0,
+    });
+
+    if (initialBootstrapMs !== undefined) {
+      emitTelemetry({
+        phase: "bootstrap_complete",
+        bootstrap_start_ms: 0,
+        bootstrap_end_ms: initialBootstrapMs,
+        bootstrap_duration_ms: initialBootstrapMs,
+        bootstrap_http_status: 200,
+      });
+    }
+
+    if (initialBootstrap.status !== "ready") {
+      const nextState = initialStateFromBootstrap(initialBootstrap, null);
+      setPlayerState(nextState, initialBootstrap.message);
+      if (initialBootstrap.status === "error") {
+        emitTelemetry({
+          phase: "bootstrap_failure",
+          bootstrap_start_ms: 0,
+          bootstrap_end_ms: initialBootstrapMs,
+          bootstrap_duration_ms: initialBootstrapMs,
+          playback_failure_code: nextState,
+          playback_failure_reason: initialBootstrap.message,
+        });
+      }
+      return true;
+    }
+
+    if (!video) return true;
+
+    const data = initialBootstrap;
+    const usesNativeHls = data.manifest_url ? isNativeHlsSupported(video) : false;
+    let Hls: HlsConstructor | null = null;
+    if (data.manifest_url && (playbackEngine === "mse" || !usesNativeHls)) {
+      try {
+        const hlsModule = await import("hls.js");
+        Hls = hlsModule.default as HlsConstructor;
+      } catch {
+        Hls = null;
+      }
+    }
+
+    const hlsSupport = {
+      nativeHls: usesNativeHls,
+      hlsJs: Boolean(Hls?.isSupported()),
+    };
+    hlsUpgradePendingRef.current = Boolean(
+      initialSelection?.label === "native_hls" &&
+        data.manifest_url &&
+        !usesNativeHls &&
+        hlsSupport.hlsJs
+    );
+    const sourceOptions = { playbackEngine, startupMode };
+    const hlsSelection = hlsSource(data, hlsSupport, sourceOptions);
+    const nextSelection = selectedSource(data, hlsSupport, sourceOptions);
+
+    if (!nextSelection) {
+      emitTelemetry({
+        phase: "playback_failure",
+        playback_failure_code: "no_playable_artifact",
+        playback_failure_reason: "No playable artifact is available",
+      });
+      setPlayerState("not_playable", "No playable artifact is available");
+      return true;
+    }
+
+    let initialAbortController: AbortController | null = null;
+    const prepareInitialHls = () => {
+      if (!hlsSelection || hlsSelection.artifactPath !== "hls/master.m3u8") return null;
+      if (!initialAbortController) {
+        initialAbortController = new AbortController();
+        abortRef.current = initialAbortController;
+      }
+      return prepareHlsSource(data, hlsSelection, Hls, initialAbortController.signal);
+    };
+
+    const canKeepInitialSource =
+      initialSelection?.url === nextSelection.url &&
+      initialSelection?.label === nextSelection.label &&
+      nextSelection.label !== "hls_js" &&
+      !(nextSelection.artifactPath === "hls/master.m3u8" && !usesNativeHls) &&
+      playbackEngine !== "mse";
+
+    if (canKeepInitialSource) {
+      setActiveSelection(nextSelection);
+      setPlayerState(
+        observedTimings.firstFrameMs !== undefined
+          ? "playing"
+          : observedTimings.canplayMs !== undefined
+            ? "canplay"
+            : observedTimings.metadataMs !== undefined
+              ? "metadata"
+              : "ready"
+      );
+      setObservedHlsStats(hlsStatsFromVideo(video));
+      emitTelemetry({
+        phase: "source_selected",
+        ...selectionTelemetryFields(nextSelection),
+        ...hlsStatsTelemetryFields(hlsStatsFromVideo(video)),
+      });
+      if (nextSelection.artifactPath === "hls/master.m3u8") {
+        emitTelemetry({
+          phase: "hls_ready",
+          ...selectionTelemetryFields(nextSelection),
+          ...hlsStatsTelemetryFields(hlsStatsFromVideo(video)),
+        });
+      }
+      emitSrcAssigned(nextSelection);
+      emitObservedTimingTelemetry(syncInstantDomTimings(), nextSelection);
+
+      if (autoPlay) {
+        void video.play().catch(() => undefined);
+      }
+      const preparedHls = nextSelection.label === "opener" ? prepareInitialHls() : null;
+      hlsPreparationRef.current = preparedHls;
+      if (preparedHls) {
+        void handoffFromOpenerWhenReady(data, preparedHls, loadGeneration);
+      }
+      if (isTokenExpired(data)) setPlayerState("token_expired");
+      return true;
+    }
+
+    setVideoSrcAttr(undefined);
+    video.removeAttribute("src");
+    video.load();
+
+    const preparedHls = prepareInitialHls();
+    hlsPreparationRef.current = preparedHls;
+
+    if (nextSelection.label === "opener") {
+      hlsUpgradePendingRef.current = false;
+      loadProgressiveSource(nextSelection, { destroyExistingHls: false });
+      if (preparedHls) {
+        void handoffFromOpenerWhenReady(data, preparedHls, loadGeneration);
+      }
+      return true;
+    }
+
+    if (preparedHls && nextSelection.artifactPath === "hls/master.m3u8") {
+      const prepared = await preparedHls;
+      if (prepared && loadGenerationRef.current === loadGeneration) {
+        attachPreparedHls(data, prepared, null);
+        return true;
+      }
+    }
+
+    loadProgressiveSource(nextSelection);
+    hlsUpgradePendingRef.current = false;
+    return true;
+  }, [
+    attachPreparedHls,
+    autoPlay,
+    emitObservedTimingTelemetry,
+    emitSrcAssigned,
+    emitTelemetry,
+    handoffFromOpenerWhenReady,
+    initialBootstrap,
+    initialBootstrapMs,
+    initialSelection,
+    loadProgressiveSource,
+    playbackEngine,
+    prepareHlsSource,
+    setActiveSelection,
+    setObservedHlsStats,
+    setPlayerState,
+    startupMode,
+    syncInstantDomTimings,
+  ]);
+
   useEffect(() => {
-    void loadPlayback();
+    void hydrateInitialPlayback().then((handled) => {
+      if (!handled) void loadPlayback({ timingOrigin: "document" });
+    });
     return () => {
       loadGenerationRef.current += 1;
       abortRef.current?.abort();
@@ -1037,7 +1532,7 @@ export function RendPlayer({
       destroyHls();
       revokeManifestObjectUrl();
     };
-  }, [destroyHls, loadPlayback, revokeManifestObjectUrl]);
+  }, [destroyHls, hydrateInitialPlayback, loadPlayback, revokeManifestObjectUrl]);
 
   const updateObservedVideoStats = useCallback(() => {
     const currentSelection = selectionRef.current;
@@ -1141,13 +1636,26 @@ export function RendPlayer({
 
   const readyBootstrap = bootstrap?.status === "ready" ? bootstrap : null;
   const unavailable = isUnavailableState(state);
+  const resolvedPoster = poster ?? readyBootstrap?.poster_url;
 
   return (
     <section
+      id={playerDomId}
+      ref={sectionRef}
       className={["rend-player", className].filter(Boolean).join(" ")}
       data-rend-player-state={state}
       data-rend-player-selected={selection?.label ?? ""}
       data-rend-player-artifact={selection?.artifactPath ?? ""}
+      data-rend-ready-status={readyBootstrap?.status ?? bootstrap?.status ?? state}
+      data-rend-source-state={readyBootstrap?.source_state}
+      data-rend-playable-state={readyBootstrap?.playable_state}
+      data-rend-manifest-content-type={readyBootstrap?.manifest_content_type}
+      data-rend-opener-content-type={readyBootstrap?.opener_content_type}
+      data-rend-poster={resolvedPoster ?? ""}
+      data-rend-prefetch-hint-count={readyBootstrap?.prefetch_hints.length}
+      data-rend-document-start-ms={timings.documentStartMs}
+      data-rend-video-created-ms={timings.videoCreatedMs}
+      data-rend-src-assigned-ms={timings.srcAssignedMs}
       data-rend-bootstrap-ms={timings.bootstrapMs}
       data-rend-metadata-ms={timings.metadataMs}
       data-rend-canplay-ms={timings.canplayMs}
@@ -1163,11 +1671,13 @@ export function RendPlayer({
         <video
           ref={videoRef}
           className="rend-player__video"
+          autoPlay={autoPlay}
           controls={controls}
           muted={muted}
-          poster={poster}
+          poster={resolvedPoster}
           playsInline
           preload={preload}
+          src={videoSrcAttr}
           crossOrigin="use-credentials"
           onLoadedMetadata={() => {
             updateObservedVideoStats();
@@ -1228,6 +1738,13 @@ export function RendPlayer({
             const opener = data ? openerSource(data) : null;
             const mediaError = videoRef.current?.error;
             const tokenExpired = isTokenExpired(data);
+            if (
+              data?.manifest_url &&
+              selectionRef.current?.label === "native_hls" &&
+              hlsUpgradePendingRef.current
+            ) {
+              return;
+            }
             const emitMediaFailure = () => {
               emitTelemetry({
                 phase: "playback_failure",
@@ -1271,6 +1788,12 @@ export function RendPlayer({
             emitMediaFailure();
           }}
         />
+        {initialReadyBootstrap && initialVideoSrc && (
+          <script
+            dangerouslySetInnerHTML={{ __html: instantPlaybackScript(playerDomId) }}
+            suppressHydrationWarning
+          />
+        )}
         {(state === "loading" || unavailable) && (
           <div className="rend-player__overlay" role="status" aria-live="polite">
             <div className="rend-player__status">{stateLabel(state)}</div>
@@ -1279,7 +1802,7 @@ export function RendPlayer({
               <button
                 className="rend-player__retry"
                 type="button"
-                onClick={() => void loadPlayback()}
+                onClick={() => void loadPlayback({ timingOrigin: "now" })}
               >
                 Retry
               </button>

@@ -65,6 +65,9 @@ test("versioned public playback artifacts use private immutable browser caching"
   const segmentHeaders = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "hls/segment_00000.ts",
   });
+  const thumbnailHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "thumbnail.jpg",
+  });
   const variantSegmentHeaders = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "hls/720p/segment_00000.ts",
   });
@@ -74,6 +77,7 @@ test("versioned public playback artifacts use private immutable browser caching"
   });
 
   assert.equal(openerHeaders.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(thumbnailHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(segmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(variantSegmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(failedHeaders.get("cache-control"), "no-store");

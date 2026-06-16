@@ -158,7 +158,9 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
 
 export function playbackArtifactCacheControl(artifactPath: string | undefined, cacheable = true) {
   if (!cacheable) return "no-store";
-  if (artifactPath === "opener.mp4") return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
+  if (artifactPath === "opener.mp4" || artifactPath === "thumbnail.jpg") {
+    return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
+  }
   if (isHlsManifestArtifactPath(artifactPath)) return PRIVATE_MANIFEST_CACHE_CONTROL;
   if (artifactPath?.startsWith("hls/")) return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
   return "no-store";

@@ -3,8 +3,11 @@
 export type RendPlayerPlaybackMode = "native_hls" | "hls_js" | "opener" | "primary";
 
 export type RendPlayerTelemetryPhase =
+  | "document_start"
   | "player_load"
   | "bootstrap_complete"
+  | "video_created"
+  | "src_assigned"
   | "source_selected"
   | "source_handoff"
   | "hls_ready"
@@ -52,6 +55,9 @@ export type RendPlayerTelemetryEvent = {
   region_label?: string;
   player_version?: string;
   app_version?: string;
+  document_start_ms?: number;
+  video_created_ms?: number;
+  src_assigned_ms?: number;
 };
 
 export type RendPlayerTelemetryInput = Omit<
@@ -62,6 +68,9 @@ export type RendPlayerTelemetryInput = Omit<
 export const REND_PLAYER_VERSION = "0.1.0";
 const TELEMETRY_SESSION_WINDOW_MS = 60_000;
 const TELEMETRY_MAX_EVENTS_PER_SESSION_WINDOW = 80;
+const TELEMETRY_BATCH_DELAY_MS = 1_000;
+const TELEMETRY_MAX_BATCH_EVENTS = 16;
+const TELEMETRY_DEDUPE_WINDOW_MS = 2_000;
 
 const TELEMETRY_HEADER_NAMES = [
   "age",
@@ -81,6 +90,12 @@ const telemetrySessionWindows = new Map<
   string,
   { count: number; windowStartedAtMs: number }
 >();
+const telemetryQueues = new Map<
+  string,
+  { events: RendPlayerTelemetryEvent[]; timer: number | null }
+>();
+const telemetryDedupeWindows = new Map<string, number>();
+let telemetryLifecycleFlushInstalled = false;
 
 export function generatePlaybackSessionId() {
   const cryptoApi = globalThis.crypto;
@@ -157,16 +172,70 @@ function telemetryWithinSessionLimit(event: RendPlayerTelemetryEvent) {
   return true;
 }
 
-export function sendPlayerTelemetryEvent(
-  telemetryUrl: string,
-  event: RendPlayerTelemetryEvent
-) {
-  if (!telemetryWithinSessionLimit(event)) return;
+function telemetryDedupeKey(event: RendPlayerTelemetryEvent) {
+  const oncePhases = new Set<RendPlayerTelemetryPhase>([
+    "document_start",
+    "player_load",
+    "bootstrap_complete",
+    "video_created",
+    "src_assigned",
+    "source_selected",
+    "hls_ready",
+    "metadata_loaded",
+    "canplay",
+    "first_frame",
+    "bootstrap_failure",
+    "playback_failure",
+  ]);
 
-  const payload = JSON.stringify({ events: [event] });
+  if (!oncePhases.has(event.phase) && event.phase !== "stall_start" && event.phase !== "stall_end") {
+    return null;
+  }
+
+  return [
+    event.playback_session_id,
+    event.phase,
+    event.selected_playback_mode,
+    event.selected_artifact_path,
+    event.stall_reason,
+    event.playback_failure_code,
+  ]
+    .filter(Boolean)
+    .join(":");
+}
+
+function telemetryWithinDedupeWindow(event: RendPlayerTelemetryEvent) {
+  const key = telemetryDedupeKey(event);
+  if (!key) return true;
+
+  const now = Date.now();
+  const previous = telemetryDedupeWindows.get(key);
+  const windowMs =
+    event.phase === "stall_start" || event.phase === "stall_end"
+      ? TELEMETRY_DEDUPE_WINDOW_MS
+      : TELEMETRY_SESSION_WINDOW_MS;
+  if (previous !== undefined && now - previous < windowMs) return false;
+
+  telemetryDedupeWindows.set(key, now);
+  if (telemetryDedupeWindows.size > 1024) {
+    for (const [entryKey, seenAt] of telemetryDedupeWindows) {
+      if (now - seenAt > TELEMETRY_SESSION_WINDOW_MS) telemetryDedupeWindows.delete(entryKey);
+    }
+  }
+
+  return true;
+}
+
+function postTelemetryBatch(telemetryUrl: string, events: RendPlayerTelemetryEvent[], preferBeacon = false) {
+  if (!events.length) return;
+  const payload = JSON.stringify({ events });
 
   try {
-    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    if (
+      preferBeacon &&
+      typeof navigator !== "undefined" &&
+      typeof navigator.sendBeacon === "function"
+    ) {
       const blob = new Blob([payload], { type: "application/json" });
       if (navigator.sendBeacon(telemetryUrl, blob)) return;
     }
@@ -187,5 +256,65 @@ export function sendPlayerTelemetryEvent(
     }).catch(() => undefined);
   } catch {
     // Telemetry must never interfere with playback.
+  }
+}
+
+function flushTelemetryQueue(telemetryUrl: string, preferBeacon = false) {
+  const queue = telemetryQueues.get(telemetryUrl);
+  if (!queue) return;
+  if (queue.timer) window.clearTimeout(queue.timer);
+  queue.timer = null;
+
+  const events = queue.events.splice(0, TELEMETRY_MAX_BATCH_EVENTS);
+  postTelemetryBatch(telemetryUrl, events, preferBeacon);
+
+  if (queue.events.length > 0) {
+    queue.timer = window.setTimeout(
+      () => flushTelemetryQueue(telemetryUrl),
+      TELEMETRY_BATCH_DELAY_MS
+    );
+  }
+}
+
+function installTelemetryLifecycleFlush() {
+  if (telemetryLifecycleFlushInstalled || typeof window === "undefined") return;
+  telemetryLifecycleFlushInstalled = true;
+
+  const flushAll = () => {
+    for (const telemetryUrl of telemetryQueues.keys()) {
+      flushTelemetryQueue(telemetryUrl, true);
+    }
+  };
+
+  window.addEventListener("pagehide", flushAll);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushAll();
+  });
+}
+
+export function sendPlayerTelemetryEvent(
+  telemetryUrl: string,
+  event: RendPlayerTelemetryEvent
+) {
+  if (!telemetryWithinSessionLimit(event)) return;
+  if (!telemetryWithinDedupeWindow(event)) return;
+
+  if (typeof window === "undefined") return;
+  installTelemetryLifecycleFlush();
+
+  const queue =
+    telemetryQueues.get(telemetryUrl) ??
+    {
+      events: [],
+      timer: null,
+    };
+  telemetryQueues.set(telemetryUrl, queue);
+  queue.events.push(event);
+
+  if (!queue.timer) {
+    queue.timer = window.setTimeout(
+      () => flushTelemetryQueue(telemetryUrl),
+      TELEMETRY_BATCH_DELAY_MS
+    );
   }
 }
