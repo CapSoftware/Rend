@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { authEmailSummary, authSubjectId, logAuthEvent } from "./auth-events.ts";
 import { billingCustomers, organization } from "./db/schema.ts";
 import { getSiteDb, getSitePgPool } from "./server-db.ts";
 import type { DashboardAccessContext } from "./dashboard-auth.ts";
@@ -350,6 +351,12 @@ export async function ensureBillingCustomer(context: DashboardAccessContext) {
     return { mode, customerId: customerId(context) };
   }
 
+  logAuthEvent("autumn_customer_sync_started", {
+    ...authEmailSummary(context.userEmail),
+    organization_id_hash: authSubjectId(context.organizationId),
+    billing_mode: mode,
+  });
+
   try {
     await autumnPost("/customers.get_or_create", {
       customer_id: customerId(context),
@@ -364,12 +371,27 @@ export async function ensureBillingCustomer(context: DashboardAccessContext) {
       customerSyncedAt: new Date(),
       customerSyncError: null,
     });
+    logAuthEvent("autumn_customer_sync_completed", {
+      ...authEmailSummary(context.userEmail),
+      organization_id_hash: authSubjectId(context.organizationId),
+      billing_mode: mode,
+    });
     return { mode, customerId: customerId(context) };
   } catch (error) {
     await writeBillingCustomerSync(context.organizationId, {
       mode,
       customerSyncError: error instanceof Error ? error.message : "Billing customer sync failed",
     }).catch(() => undefined);
+    logAuthEvent(
+      "autumn_customer_sync_failed",
+      {
+        ...authEmailSummary(context.userEmail),
+        organization_id_hash: authSubjectId(context.organizationId),
+        billing_mode: mode,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "error"
+    );
     throw error;
   }
 }
