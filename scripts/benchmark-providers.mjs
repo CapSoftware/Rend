@@ -15,6 +15,8 @@ const publicRoot = path.join(repoRoot, "apps", "site", "public", "benchmarks", "
 const defaultProviderUrls = {
   rend: "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
   mux: "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
+  cloudfront: "https://v.cap.so/mezzanine.mp4",
+  rend_edge_static: "http://127.0.0.1:8125/index.html",
 };
 
 function providerUrl(providerId) {
@@ -41,6 +43,19 @@ const providerCatalog = {
     name: "Mux",
     url: providerUrl("mux"),
     playerHost: providerHost(providerUrl("mux")),
+  },
+  cloudfront: {
+    id: "cloudfront",
+    name: "CloudFront MP4",
+    url: providerUrl("cloudfront"),
+    playerHost: providerHost(providerUrl("cloudfront")),
+  },
+  rend_edge_static: {
+    id: "rend_edge_static",
+    name: "Rend edge static HLS",
+    preflightUrl: process.env.BENCHMARK_REND_EDGE_STATIC_BOOTSTRAP_URL || null,
+    url: providerUrl("rend_edge_static"),
+    playerHost: providerHost(providerUrl("rend_edge_static")),
   },
 };
 
