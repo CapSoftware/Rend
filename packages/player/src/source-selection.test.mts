@@ -14,8 +14,26 @@ const DATA = {
   playable_state: "hls_ready",
 };
 
-test("selectedSource prefers opener before native or hls.js HLS", () => {
+test("selectedSource prefers HLS for hls_ready assets when HLS is supported", () => {
   assert.deepEqual(selectedSource(DATA, { nativeHls: true, hlsJs: true }), {
+    label: "native_hls",
+    artifactPath: "hls/master.m3u8",
+    url: DATA.manifest_url,
+  });
+  assert.deepEqual(selectedSource(DATA, { nativeHls: false, hlsJs: true }), {
+    label: "hls_js",
+    artifactPath: "hls/master.m3u8",
+    url: DATA.manifest_url,
+  });
+});
+
+test("selectedSource keeps opener as primary before HLS is ready", () => {
+  const openerReady = {
+    ...DATA,
+    playable_state: "opener_ready",
+  };
+
+  assert.deepEqual(selectedSource(openerReady, { nativeHls: true, hlsJs: true }), {
     label: "opener",
     artifactPath: "opener.mp4",
     url: DATA.opener_url,
@@ -43,6 +61,14 @@ test("selectedSource falls back to HLS and then primary when opener is unavailab
 
   assert.equal(selectedSource(withoutOpener, { nativeHls: false, hlsJs: true })?.label, "hls_js");
   assert.equal(selectedSource(withoutOpener, { nativeHls: false, hlsJs: false })?.label, "primary");
+});
+
+test("selectedSource keeps opener fallback when HLS is unavailable", () => {
+  assert.deepEqual(selectedSource(DATA, { nativeHls: false, hlsJs: false }), {
+    label: "opener",
+    artifactPath: "opener.mp4",
+    url: DATA.opener_url,
+  });
 });
 
 test("source helpers map artifact paths consistently", () => {
