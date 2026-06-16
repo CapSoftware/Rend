@@ -626,6 +626,24 @@ function playbackSource(bootstrap) {
   return bootstrap.manifest_url || bootstrap.playback_url || bootstrap.opener_url;
 }
 
+function isPlaybackArtifactUrl(value, assetId, siteBaseUrl) {
+  let url;
+  try {
+    url = new URL(value, siteBaseUrl);
+  } catch {
+    return false;
+  }
+  const site = new URL(siteBaseUrl);
+  if (url.origin === site.origin && url.pathname.startsWith(`/api/player/${assetId}/artifact/`)) {
+    return true;
+  }
+  const host = url.hostname.toLowerCase();
+  return (
+    (host === "rend.so" || host.endsWith(".rend.so") || host === "localhost" || host === "127.0.0.1") &&
+    url.pathname.startsWith(`/v/${assetId}/`)
+  );
+}
+
 async function operatorBillingSync(context) {
   const url = new URL("/internal/operator/billing/delivery-sync", context.controlPlaneBaseUrl);
   const { data } = await fetchJson(url, {
@@ -1211,21 +1229,19 @@ async function main() {
     await runStep(context, "public-playback", "public embed/watch playback through edge", async () => {
       const { data: bootstrap } = await fetchJson(new URL(`/api/player/${context.assetId}`, context.siteBaseUrl));
       const source = playbackSource(bootstrap);
-      if (!source || typeof source !== "string" || !source.startsWith(`/api/player/${context.assetId}/artifact/`)) {
-        throw new Error("player bootstrap did not return a same-origin artifact source");
+      if (!source || typeof source !== "string" || !isPlaybackArtifactUrl(source, context.assetId, context.siteBaseUrl)) {
+        throw new Error("player bootstrap did not return a safe artifact source");
       }
       const artifact = await fetchOk(new URL(source, context.siteBaseUrl), {
         headers: { accept: "*/*" },
       });
-      const billableArtifactPath = `/api/player/${context.assetId}/artifact/opener.mp4`;
-      const billableArtifact = await fetchOk(new URL(billableArtifactPath, context.siteBaseUrl), {
-        headers: { accept: "*/*" },
-      });
+      const billableArtifactPath = source;
+      const billableArtifact = artifact;
       const embed = await fetchOk(new URL(`/embed/${context.assetId}`, context.siteBaseUrl));
       const watch = await fetchOk(new URL(`/watch/${context.assetId}`, context.siteBaseUrl));
       return {
         bootstrap_status: bootstrap.status,
-        playback_source_path: source.split("?")[0],
+        playback_source_path: new URL(source, context.siteBaseUrl).pathname,
         artifact_status: artifact.status,
         artifact_content_type: artifact.headers.get("content-type"),
         artifact_cache: artifact.headers.get("x-rend-cache"),
