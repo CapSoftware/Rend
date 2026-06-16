@@ -1,11 +1,26 @@
 "use client";
 
-import Link from "next/link";
+import { KeyRound } from "lucide-react";
 import { FormEvent, useState } from "react";
 import type { ApiKeyRecord, ApiKeyScope } from "../lib/api-key-types.ts";
 import { API_KEY_SCOPES } from "../lib/api-key-types.ts";
-import { signOutOfDashboard } from "../lib/auth-client.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
+import { Button } from "@/components/ui/Button";
+import { cn } from "@/components/ui/cn";
+import {
+  Callout,
+  CopyButton,
+  DashboardContent,
+  Panel,
+  StatusBadge,
+  SubHeader,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+} from "@/components/dashboard";
 
 type CreateResponse =
   | { status: "ok"; api_key: ApiKeyRecord; secret: string }
@@ -38,7 +53,6 @@ export default function ApiKeysClient({
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<ApiKeyScope[]>(["upload", "read"]);
   const [createdSecret, setCreatedSecret] = useState("");
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState(initialError ?? "");
   const [submitting, setSubmitting] = useState(false);
   const createDisabledReason =
@@ -62,7 +76,6 @@ export default function ApiKeysClient({
     setSubmitting(true);
     setError("");
     setCreatedSecret("");
-    setCopied(false);
     try {
       const response = await fetch("/api/api-keys", {
         method: "POST",
@@ -117,153 +130,180 @@ export default function ApiKeysClient({
     });
   }
 
-  async function copyCreatedSecret() {
-    if (!createdSecret) return;
-    await navigator.clipboard.writeText(createdSecret);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
-  }
-
   return (
-    <div className="app-shell">
-      <header className="app-topbar">
-        <a href="/" aria-label="Rend home">
-          <img src="/rend-logo.svg" alt="Rend" className="app-logo" />
-        </a>
-        <nav>
-          <Link href="/dashboard/assets">Assets</Link>
-          <Link href="/dashboard/api-keys">API keys</Link>
-          <Link href="/dashboard/billing">Billing</Link>
-          <button onClick={signOutOfDashboard} type="button">
-            Sign out
-          </button>
-        </nav>
-      </header>
+    <>
+      <SubHeader title="API keys" docsHref="/docs#auth-api-keys" />
 
-      <main className="app-main">
-        <section className="app-page-head">
-          <div>
-            <p className="app-kicker">Rend app</p>
-            <h1>API keys</h1>
-          </div>
-        </section>
-
+      <DashboardContent>
+      <div className="mb-5 flex flex-col gap-3 empty:hidden">
         {createdSecret ? (
-          <section className="app-callout app-callout-done app-key-callout">
-            <div className="app-code-block">{createdSecret}</div>
-            <button onClick={copyCreatedSecret} type="button">
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </section>
-        ) : null}
-
-        {error ? (
-          <section className="app-callout app-callout-error">
-            <span>{error}</span>
-          </section>
-        ) : null}
-
-        <section
-          className={`app-callout ${
-            dashboardState.status === "ready_to_upload" ? "app-callout-done" : "app-callout-error"
-          }`}
-        >
-          <div>
-            <strong>{dashboardState.title}</strong>
-            <span>{dashboardState.message}</span>
-          </div>
-          {dashboardState.actionHref && dashboardState.actionLabel ? (
-            <Link className="app-link-button" href={dashboardState.actionHref}>
-              {dashboardState.actionLabel}
-            </Link>
-          ) : null}
-        </section>
-
-        {readOnlyReason ? (
-          <section className="app-callout app-callout-error">
-            <span>{readOnlyReason}</span>
-          </section>
-        ) : null}
-
-        <section className="app-panel app-form-panel">
-          <h2>Create key</h2>
-          <form className="app-key-form" onSubmit={createKey}>
-            <label htmlFor="api-key-name">Name</label>
-            <input
-              disabled={submitting || Boolean(createDisabledReason)}
-              id="api-key-name"
-              maxLength={80}
-              onChange={(event) => setName(event.currentTarget.value)}
-              type="text"
-              value={name}
-            />
-            <div className="app-scope-grid">
-              {API_KEY_SCOPES.map((scope) => (
-                <label key={scope}>
-                  <input
-                    checked={scopes.includes(scope)}
-                    disabled={submitting || Boolean(createDisabledReason)}
-                    onChange={() => toggleScope(scope)}
-                    type="checkbox"
-                  />
-                  <span>{scope}</span>
-                </label>
-              ))}
+          <Callout tone="success" title="API key created">
+            <p>Copy this secret now. You will not be able to see it again.</p>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md border border-[#cfe7d6] bg-card px-3 py-2 font-mono text-[12.5px] text-ink">
+                {createdSecret}
+              </code>
+              <CopyButton value={createdSecret} />
             </div>
-            <button disabled={submitting || Boolean(createDisabledReason) || !name.trim() || scopes.length === 0} type="submit">
-              {submitting ? "Creating..." : "Create key"}
-            </button>
+          </Callout>
+        ) : null}
+
+        {error ? <Callout tone="danger">{error}</Callout> : null}
+
+        {dashboardState.status !== "ready_to_upload" ? (
+          <Callout
+            tone={dashboardState.status === "billing_unavailable" ? "danger" : "warn"}
+            title={dashboardState.title}
+            action={
+              dashboardState.actionHref && dashboardState.actionLabel ? (
+                <Button href={dashboardState.actionHref} variant="secondary" size="sm" className="rounded-md">
+                  {dashboardState.actionLabel}
+                </Button>
+              ) : null
+            }
+          >
+            {dashboardState.message}
+          </Callout>
+        ) : null}
+
+        {readOnlyReason ? <Callout tone="danger">{readOnlyReason}</Callout> : null}
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+        <Panel title="Create key">
+          <form className="flex flex-col gap-4" onSubmit={createKey}>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="api-key-name" className="text-[13px] font-medium text-ink-soft">
+                Name
+              </label>
+              <input
+                id="api-key-name"
+                type="text"
+                maxLength={80}
+                placeholder="Production server"
+                disabled={submitting || Boolean(createDisabledReason)}
+                value={name}
+                onChange={(event) => setName(event.currentTarget.value)}
+                className="h-10 w-full rounded-md border border-line bg-card px-3 text-[14px] text-ink outline-none transition-colors placeholder:text-faint focus:border-ink/30 focus:ring-2 focus:ring-ink/15 disabled:opacity-60"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[13px] font-medium text-ink-soft">Scopes</span>
+              <div className="grid grid-cols-2 gap-2">
+                {API_KEY_SCOPES.map((scope) => {
+                  const checked = scopes.includes(scope);
+                  return (
+                    <label
+                      key={scope}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-[13px] transition-colors",
+                        checked
+                          ? "border-ink/30 bg-bg-sunken text-ink"
+                          : "border-line text-muted hover:border-ink/20",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        className="size-3.5 accent-ink"
+                        checked={checked}
+                        disabled={submitting || Boolean(createDisabledReason)}
+                        onChange={() => toggleScope(scope)}
+                      />
+                      <span className="font-medium">{scope}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <Button
+              type="submit"
+              className="rounded-md"
+              disabled={submitting || Boolean(createDisabledReason) || !name.trim() || scopes.length === 0}
+            >
+              <KeyRound className="size-4" />
+              {submitting ? "Creating" : "Create key"}
+            </Button>
           </form>
-        </section>
+        </Panel>
 
-        <section className="app-panel">
+        <Panel
+          title="Active keys"
+          actions={<span className="text-[12px] text-muted">{keys.length} total</span>}
+          flush
+        >
           {keys.length === 0 ? (
-            <div className="app-empty">No API keys.</div>
-          ) : (
-            <div className="app-table-wrap">
-              <table className="app-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Prefix</th>
-                    <th>Scopes</th>
-                    <th>Created</th>
-                    <th>Last used</th>
-                    <th>Status</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {keys.map((key) => (
-                    <tr key={key.id}>
-                      <td>{key.name}</td>
-                      <td className="app-mono">{key.prefix}</td>
-                      <td>{key.scopes.join(", ")}</td>
-                      <td>{formatTimestamp(key.created_at)}</td>
-                      <td>{formatTimestamp(key.last_used_at)}</td>
-                      <td>
-                        <span className={`app-pill ${key.revoked_at ? "app-state-deleted" : "app-state-ready"}`}>
-                          {key.revoked_at ? "revoked" : "active"}
-                        </span>
-                      </td>
-                      <td>
-                        <button
-                          className="app-danger"
-                          disabled={Boolean(key.revoked_at) || Boolean(readOnlyReason)}
-                          onClick={() => revokeKey(key.id)}
-                          type="button"
-                        >
-                          Revoke
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+              <span className="grid size-12 place-items-center rounded-full bg-bg-sunken text-faint">
+                <KeyRound className="size-6" />
+              </span>
+              <div>
+                <p className="font-head text-[17px] text-ink">No API keys yet</p>
+                <p className="mt-1 text-[13.5px] text-muted">
+                  Create a key to start uploading from your own backend.
+                </p>
+              </div>
             </div>
+          ) : (
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Name</TH>
+                  <TH>Prefix</TH>
+                  <TH className="hidden md:table-cell">Scopes</TH>
+                  <TH className="hidden lg:table-cell">Created</TH>
+                  <TH className="hidden lg:table-cell">Last used</TH>
+                  <TH>Status</TH>
+                  <TH className="text-right">{""}</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {keys.map((key) => (
+                  <TR key={key.id}>
+                    <TD className="font-medium text-ink">{key.name}</TD>
+                    <TD className="whitespace-nowrap font-mono text-[12px] text-muted">{key.prefix}</TD>
+                    <TD className="hidden md:table-cell">
+                      <span className="flex flex-wrap gap-1">
+                        {key.scopes.map((scope) => (
+                          <span
+                            key={scope}
+                            className="rounded border border-line bg-bg-sunken px-1.5 py-0.5 text-[11px] text-muted"
+                          >
+                            {scope}
+                          </span>
+                        ))}
+                      </span>
+                    </TD>
+                    <TD className="hidden whitespace-nowrap font-mono text-[12px] text-muted lg:table-cell">
+                      {formatTimestamp(key.created_at)}
+                    </TD>
+                    <TD className="hidden whitespace-nowrap font-mono text-[12px] text-muted lg:table-cell">
+                      {formatTimestamp(key.last_used_at)}
+                    </TD>
+                    <TD>
+                      <StatusBadge tone={key.revoked_at ? "danger" : "success"}>
+                        {key.revoked_at ? "Revoked" : "Active"}
+                      </StatusBadge>
+                    </TD>
+                    <TD className="text-right">
+                      <button
+                        type="button"
+                        disabled={Boolean(key.revoked_at) || Boolean(readOnlyReason)}
+                        onClick={() => revokeKey(key.id)}
+                        className="inline-flex h-8 items-center rounded-md border border-line px-2.5 text-[12.5px] font-medium text-[#9a2b22] transition-colors hover:border-[#eccac6] hover:bg-[#fcf3f1] disabled:pointer-events-none disabled:opacity-45"
+                      >
+                        Revoke
+                      </button>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
           )}
-        </section>
-      </main>
-    </div>
+        </Panel>
+      </div>
+      </DashboardContent>
+    </>
   );
 }
