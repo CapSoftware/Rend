@@ -9,6 +9,7 @@ import { getMarketingPage, START_HREF } from "@/lib/marketing-pages";
 import { pageMetadata } from "@/lib/seo";
 import { breadcrumbLd, webPageLd } from "@/lib/structured-data";
 import latest from "@/public/benchmarks/providers/latest.json";
+import reference1080 from "@/public/benchmarks/providers/reference-1080p.json";
 
 const page = getMarketingPage("/benchmarks");
 
@@ -26,8 +27,15 @@ const breadcrumbs = [
 // Pulled straight from the published artifact so the page never drifts from the run.
 const rend = latest.summary.providers.rend;
 const mux = latest.summary.providers.mux;
+const rend1080 = reference1080.summary.providers.rend;
+const mux1080 = reference1080.summary.providers.mux;
 
 const runDate = new Date(latest.generatedAt).toLocaleDateString("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+const reference1080RunDate = new Date(reference1080.generatedAt).toLocaleDateString("en-GB", {
   day: "numeric",
   month: "long",
   year: "numeric",
@@ -36,7 +44,13 @@ const durationSeconds = Math.round(latest.source.verification.observed.rend.dura
 
 const ms = (n: number) => `${Math.round(n).toLocaleString("en-US")} ms`;
 const resOf = (rendition: string) => `${rendition.split("x")[1]}p (${rendition.replace("x", " × ")})`;
-const pctSooner = Math.round((1 - rend.metrics.timeToFirstFrameMs.median / mux.metrics.timeToFirstFrameMs.median) * 100);
+const pctSooner1080 = Math.round(
+  (1 - rend1080.metrics.timeToFirstFrameMs.median / mux1080.metrics.timeToFirstFrameMs.median) * 100,
+);
+const browserLabel = `${latest.environment.browser.automation} ${latest.environment.browser.version}`;
+const medianGapMs = Math.abs(rend.metrics.timeToFirstFrameMs.median - mux.metrics.timeToFirstFrameMs.median);
+const medianLeader =
+  rend.metrics.timeToFirstFrameMs.median <= mux.metrics.timeToFirstFrameMs.median ? "Rend" : "Mux";
 
 const results = [
   {
@@ -64,19 +78,41 @@ const spread = [
   { label: "Slowest sample", rend: rend.metrics.timeToFirstFrameMs.max, mux: mux.metrics.timeToFirstFrameMs.max },
 ];
 
+const reference1080Results = [
+  {
+    id: "rend-1080",
+    name: "Rend",
+    firstFrame: ms(rend1080.metrics.timeToFirstFrameMs.median),
+    played: `${rend1080.successfulSamples} / ${rend1080.sampleCount}`,
+    stalls: rend1080.metrics.stallCount.max,
+    resolution: resOf(rend1080.observed.selectedRendition),
+  },
+  {
+    id: "mux-1080-reference",
+    name: "Mux",
+    firstFrame: ms(mux1080.metrics.timeToFirstFrameMs.median),
+    played: `${mux1080.successfulSamples} / ${mux1080.sampleCount}`,
+    stalls: mux1080.metrics.stallCount.max,
+    resolution: resOf(mux1080.observed.selectedRendition),
+  },
+];
+
 const method = [
   `The same source video, ${durationSeconds} seconds long, uploaded to both Rend and Mux.`,
   `${latest.run.sampleCountTarget} samples per provider, with provider order randomized each round.`,
   "A fresh browser context for every sample: no cookies, no stored state, and the cache disabled.",
   `A ${Math.round(latest.run.watchWindowMs / 1000)} second watch window per sample, timing the first painted frame and counting any stalls.`,
-  `Playwright driven Chrome ${latest.environment.browser.version}, run on a Daytona sandbox with the region set to US (Daytona picks a specific US region), the same machine for both providers.`,
+  `${browserLabel}, run on a Daytona sandbox with the region set to US (Daytona picks a specific US region), the same machine for both providers.`,
+  "For the headline 720p run, Rend used the production player's HLS/MSE path so the browser selected the 720p rendition.",
 ];
 
 const caveats = [
   "This is one video, one region, one browser profile, and one run. It is not a universal claim about either service.",
   "We did not purge or warm any CDN. Mux serves from its own network and Rend from ours, each in whatever cache state it happened to be in.",
   "Encoders, packaging and player implementations differ between the two providers.",
-  "Rend currently serves a single 1080p rendition for this asset rather than a full adaptive ladder, and Mux selected 720p. Source file identity is not independently verified beyond matching duration and metadata.",
+  "The headline run is resolution matched at 720p, but it uses Rend's HLS/MSE path to hold that resolution; the separate native-HLS reference run below selected 1080p.",
+  "The 1080p reference run is separate context and should not be averaged into the headline result.",
+  "Source file identity is not independently verified beyond matching duration and observable metadata.",
 ];
 
 const headCell = "border-b border-line pb-2.5 text-[13px] font-medium text-muted";
@@ -129,7 +165,7 @@ export default function BenchmarksPage() {
           <h2 className="mt-16 font-head text-[22px] leading-snug">Latest results</h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
             Time to first frame, median of {latest.run.sampleCountTarget} samples each. Last run {runDate}{" "}
-            on a Daytona sandbox with the region set to US.
+            on a Daytona sandbox with the region set to US. In this run, both players selected 720p.
           </p>
 
           <div className="mt-6 max-w-[760px] overflow-x-auto">
@@ -160,11 +196,55 @@ export default function BenchmarksPage() {
           </div>
 
           <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
-            Same source video ({durationSeconds} seconds). Rend served full {resOf(rend.observed.selectedRendition)}{" "}
-            while Mux selected {resOf(mux.observed.selectedRendition)}, so Rend moved more pixels and still
-            reached the first frame about {pctSooner}% sooner. Mux had one slow outlier near 6.8 seconds,
-            shown below, which lifted its median. Rend&apos;s five samples stayed between{" "}
-            {ms(rend.metrics.timeToFirstFrameMs.min)} and {ms(rend.metrics.timeToFirstFrameMs.max)}.
+            Same source video ({durationSeconds} seconds). Rend selected {resOf(rend.observed.selectedRendition)}{" "}
+            and Mux selected {resOf(mux.observed.selectedRendition)}, so this headline comparison is
+            resolution matched. {medianLeader} reached the first frame {ms(medianGapMs)}{" "}sooner on median.
+            Rend&apos;s five samples stayed between {ms(rend.metrics.timeToFirstFrameMs.min)} and{" "}
+            {ms(rend.metrics.timeToFirstFrameMs.max)}, with {rend.metrics.stallCount.max} stall recorded
+            across the five watch windows.
+          </p>
+
+          {/* 1080p reference */}
+          <h2 className="mt-16 font-head text-[22px] leading-snug">1080p reference run</h2>
+          <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
+            We also keep a separate native-HLS Daytona run where Rend selected 1080p. It is useful context
+            for startup on the production hot path at a heavier rendition, but it is not the headline 720p
+            comparison above. Run date {reference1080RunDate}.
+          </p>
+
+          <div className="mt-6 max-w-[760px] overflow-x-auto">
+            <table className="w-full min-w-[560px] border-collapse text-left text-[15px]">
+              <thead>
+                <tr>
+                  <th scope="col" className={headCell}>Provider</th>
+                  <th scope="col" className={headCell}>First frame (median)</th>
+                  <th scope="col" className={headCell}>Played</th>
+                  <th scope="col" className={headCell}>Stalls</th>
+                  <th scope="col" className={headCell}>Resolution</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reference1080Results.map((row) => (
+                  <tr key={row.id} className="border-b border-line-soft last:border-0">
+                    <th scope="row" className="py-4 pr-4 font-medium text-ink">
+                      {row.name}
+                    </th>
+                    <td className="py-4 pr-4 tabular-nums text-ink">{row.firstFrame}</td>
+                    <td className="py-4 pr-4 tabular-nums text-ink-soft">{row.played}</td>
+                    <td className="py-4 pr-4 tabular-nums text-ink-soft">{row.stalls}</td>
+                    <td className="py-4 tabular-nums text-ink-soft">{row.resolution}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
+            In that run, Rend reached first frame in {ms(rend1080.metrics.timeToFirstFrameMs.median)}{" "}
+            median while serving {resOf(rend1080.observed.selectedRendition)}. Mux selected{" "}
+            {resOf(mux1080.observed.selectedRendition)} and reached first frame in{" "}
+            {ms(mux1080.metrics.timeToFirstFrameMs.median)} median. Both providers had zero stalls.
+            Rend was about {pctSooner1080}% sooner on median in that reference run.
           </p>
 
           {/* Sample spread */}
@@ -231,10 +311,26 @@ export default function BenchmarksPage() {
           </p>
           <p className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[15px]">
             <a href={latest.artifacts.machineReadableUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
-              Summary JSON
+              Latest summary JSON
             </a>
             <a href={latest.artifacts.rawSamplesUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
-              Every raw sample
+              Latest raw samples
+            </a>
+            <a
+              href={reference1080.artifacts.machineReadableUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              1080p summary JSON
+            </a>
+            <a
+              href={reference1080.artifacts.rawSamplesUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              1080p raw samples
             </a>
           </p>
         </Container>
