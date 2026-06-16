@@ -11,13 +11,15 @@ import {
   redactAuthText,
 } from "./auth-events.ts";
 import { authSchema } from "./db/schema.ts";
-import { getSiteDb } from "./server-db.ts";
+import { getSiteDb, getSitePgPool } from "./server-db.ts";
 
 const LOCAL_AUTH_SECRET = "local-better-auth-secret-only-for-rend-development";
 const LOCAL_AUTH_URL = "http://localhost:3000";
 
 type AuthInstance = ReturnType<typeof betterAuth>;
 type AuthOtpEmailType = "sign-in" | "email-verification" | "forget-password" | "change-email";
+type AuthRateLimitRule = { window: number; max: number };
+type AuthRateLimitValue = { key: string; count: number; lastRequest: number };
 
 let authInstance: unknown = null;
 let resendClient: Resend | null = null;
@@ -97,6 +99,82 @@ function getResend() {
 
 function generateNumericOtp() {
   return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
+
+function rateLimitRetryAfterSeconds(lastRequest: number, windowSeconds: number) {
+  const retryAfterMs = lastRequest + windowSeconds * 1_000 - Date.now();
+  return Math.max(1, Math.ceil(retryAfterMs / 1_000));
+}
+
+function authRateLimitStorage() {
+  return {
+    async get(key: string) {
+      const result = await getSitePgPool().query(
+        "select key, count, last_request from rend_auth.rate_limit where key = $1 limit 1",
+        [key]
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      return {
+        key: row.key,
+        count: Number(row.count),
+        lastRequest: Number(row.last_request),
+      };
+    },
+    async set(key: string, value: AuthRateLimitValue, update?: boolean) {
+      if (update) {
+        await getSitePgPool().query(
+          "update rend_auth.rate_limit set count = $2, last_request = $3 where key = $1",
+          [key, value.count, value.lastRequest]
+        );
+        return;
+      }
+      await getSitePgPool().query(
+        `insert into rend_auth.rate_limit (key, count, last_request)
+         values ($1, $2, $3)
+         on conflict (key) do update set
+           count = excluded.count,
+           last_request = excluded.last_request`,
+        [key, value.count, value.lastRequest]
+      );
+    },
+    async consume(key: string, rule: AuthRateLimitRule) {
+      const now = Date.now();
+      const windowMs = rule.window * 1_000;
+      const result = await getSitePgPool().query(
+        `with consumed as (
+           insert into rend_auth.rate_limit (key, count, last_request)
+           values ($1, 1, $2)
+           on conflict (key) do update set
+             count = case
+               when $2 - rend_auth.rate_limit.last_request > $3 then 1
+               else rend_auth.rate_limit.count + 1
+             end,
+             last_request = $2
+           where
+             $2 - rend_auth.rate_limit.last_request > $3
+             or rend_auth.rate_limit.count < $4
+           returning count, last_request, true as allowed
+         ),
+         current as (
+           select count, last_request, false as allowed
+           from rend_auth.rate_limit
+           where key = $1 and not exists (select 1 from consumed)
+         )
+         select count, last_request, allowed from consumed
+         union all
+         select count, last_request, allowed from current
+         limit 1`,
+        [key, now, windowMs, rule.max]
+      );
+      const row = result.rows[0];
+      if (!row || row.allowed) return { allowed: true, retryAfter: null };
+      return {
+        allowed: false,
+        retryAfter: rateLimitRetryAfterSeconds(Number(row.last_request), rule.window),
+      };
+    },
+  };
 }
 
 export class AuthEmailDeliveryError extends Error {
@@ -417,6 +495,7 @@ export function getAuth(): AuthInstance {
       rateLimit: {
         enabled: true,
         storage: isProductionProfile() ? "database" : "memory",
+        customStorage: isProductionProfile() ? authRateLimitStorage() : undefined,
         modelName: "rateLimit",
         fields: {
           lastRequest: "last_request",
