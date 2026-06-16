@@ -7,6 +7,7 @@ import {
   safePlaybackBootstrapResponse,
   type UpstreamPlaybackResponse,
 } from "../../../../lib/player-bootstrap.ts";
+import { playbackProxyCookieHeader } from "../../../../lib/player-artifact-proxy.ts";
 import { getSiteDb } from "../../../../lib/server-db.ts";
 
 type UpstreamAssetResponse = {
@@ -250,5 +251,14 @@ export async function GET(
     );
   }
 
-  return jsonResponse(safeResponse);
+  const headers = new Headers();
+  const playbackCookie = playbackProxyCookieHeader(
+    request.url,
+    normalizedAssetId,
+    data?.playback_token,
+    safeResponse.ttl_seconds
+  );
+  if (playbackCookie) headers.append("set-cookie", playbackCookie);
+
+  return jsonResponse(safeResponse, { headers });
 }
