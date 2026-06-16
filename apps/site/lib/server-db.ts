@@ -37,7 +37,6 @@ function sitePoolConfig(): PoolConfig {
       30_000
     ),
     query_timeout: queryTimeoutMs,
-    statement_timeout: queryTimeoutMs,
   };
 }
 
