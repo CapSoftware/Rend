@@ -236,7 +236,7 @@ require_contains docs/templates/control-plane.Caddyfile "respond 404"
 
 require_contains docs/templates/edge-host.Caddyfile "path /internal/* /metrics"
 require_contains docs/templates/edge-host.Caddyfile "path_regexp canonical_playback ^/v/[0-9a-f]{8}"
-require_contains docs/templates/edge-host.Caddyfile "opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts"
+require_contains docs/templates/edge-host.Caddyfile "hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts)"
 require_contains docs/templates/edge-host.Caddyfile "reverse_proxy 127.0.0.1:4100"
 require_contains docs/templates/edge-host.Caddyfile 'remote_ip {$REND_EDGE_ALLOWED_PRIVATE_IPS}'
 require_contains docs/templates/edge-host.Caddyfile 'REND_EDGE_PRIVATE_HOSTNAME'
