@@ -21,6 +21,7 @@
     "launch:self-serve-readiness": "node scripts/self-serve-readiness.mjs",
     "billing:autumn-parity": "node scripts/autumn-catalog-parity.mjs",
     "launch:production-dry-run": "bun scripts/production-dry-run.mjs",
+    "launch:production-sdk-e2e": "node scripts/production-sdk-e2e.mjs",
     "backend:up": "bun run env:local && REND_ENV_PROFILE=local docker compose up -d",
     "backend:down": "docker compose down",
     "backend:api": "bun run env:local && REND_ENV_PROFILE=local cargo run -p rend-api",
