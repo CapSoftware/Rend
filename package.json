@@ -45,6 +45,8 @@
     "deploy:edge": "scripts/deploy-edge-host.sh",
     "deploy:verify:first-host": "scripts/verify-first-host-deploy.sh",
     "playback:readiness": "node scripts/playback-readiness-gate.mjs",
+    "benchmark:providers": "node scripts/benchmark-providers.mjs",
+    "benchmark:providers:daytona": "node scripts/run-daytona-provider-benchmark.mjs",
     "backend:benchmark:local": "scripts/benchmark-local-playback.sh",
     "backend:smoke:async-media": "scripts/smoke-async-media.sh",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
