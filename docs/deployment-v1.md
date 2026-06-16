@@ -35,30 +35,64 @@ S3-compatible object storage, and ClickHouse.
 
 ## Browser Media Path
 
-Current production browser playback is still same-origin through the site route:
+Production browser playback should use the site route only for JSON bootstrap,
+then send hot media bytes directly to the selected public edge hostname:
 
 ```txt
 browser
-  -> https://www.rend.so/api/player/{assetId}/artifact/{artifactPath}
-  -> Next.js route handler on the site deployment
-  -> rend-edge /v/{assetId}/{artifactPath}
+  -> https://www.rend.so/api/player/{assetId}
+  -> Next.js route handler uses Vercel geo headers and shared route config
+  -> route returns tokenless https://ash-1.play.rend.so/v/{assetId}/... URLs
+  -> https://ash-1.play.rend.so/v/{assetId}/{artifactPath}
+  -> edge ingress
+  -> rend-edge
   -> edge-local cache or object-storage fill
 ```
 
-`GET /api/player/{assetId}` returns same-origin artifact URLs, and the HLS
-manifest response is rewritten so segment URLs also point back through
-`/api/player/{assetId}/artifact/...`. That means Next/Vercel proxying remains in
-the media path for hosted browser playback. Edge headers such as
-`x-rend-cache: HIT`, `x-rend-edge-id`, and `x-rend-region` prove that the
-upstream `rend-edge` served the artifact from its local cache, but the viewer's
-HTTP request still terminates at the site route first.
+Production edge selection comes from the checked-in
+`@rend/playback-routing` route table. The site route uses Vercel's
+`@vercel/functions` `geolocation(request)` helper to read latitude, longitude,
+country, and country-region from the incoming request. It selects the closest
+configured metal route by great-circle distance. If coordinates are not
+available, it falls back through country, optional continent header, then the
+default metal route. Current public metal routes:
 
-Do not switch browser playback to direct edge delivery unless it is behind an
-explicit feature flag and the security model is reviewed. A safe direct-edge
-plan must keep playback tokens out of JavaScript-visible URLs, use only
-allowlisted public edge hostnames, preserve the HttpOnly playback credential
-boundary, avoid exposing `/internal/*`, and keep private/authenticated media
-private. Until then, same-origin proxying is the intended production path.
+```txt
+ash-1  us-east    https://ash-1.play.rend.so
+ams-1  amsterdam  https://ams-1.play.rend.so
+```
+
+`REND_PLAYER_EDGE_BASE_URLS` remains available as a non-production/local escape
+hatch, or as an explicit override with `REND_PLAYER_EDGE_BASE_URLS_MODE=override`.
+Production should not need a per-request control-plane lookup or a separate
+media load balancer just to choose the closest edge.
+
+Keep `REND_PLAYER_PLAYBACK_BASE_URL` as an emergency fallback single-edge base.
+`GET /api/player/{assetId}` returns direct
+`/v/{assetId}/...` media URLs and sets an HttpOnly playback cookie scoped to
+`/v/{assetId}/`. The cookie may use `Domain=rend.so` only when both the site host
+and media host are trusted Rend domains.
+
+The legacy same-origin artifact route
+`/api/player/{assetId}/artifact/{artifactPath}` remains as a fallback for local
+or unconfigured environments, but it should not carry production media bytes
+once direct edge delivery is configured. Edge headers such as
+`x-rend-cache: HIT`, `x-rend-edge-id`, and `x-rend-region` prove that the
+upstream `rend-edge` served the artifact from its local cache. The direct path
+removes Next/Vercel from the media byte path.
+
+The direct path keeps playback tokens out of JavaScript-visible URLs, uses only
+configured public edge hosts, requires credentialed CORS from allowed Rend
+origins, preserves the HttpOnly playback credential boundary, avoids exposing
+`/internal/*`, and keeps private/authenticated media private.
+
+The site route logs one structured `rend_player_edge_selected` event per
+playback bootstrap. The event includes Vercel request id, Vercel edge region
+from the geolocation helper, country, country-region, optional continent header,
+whether valid coordinates were present, selected metal route id/region,
+selection reason, playback host, and rounded route distance. It does not log IP
+addresses, cookies, auth headers, playback tokens, signed URLs, or raw
+coordinates.
 
 ## Local Docker Topology
 
@@ -153,6 +187,9 @@ API:
 - `REND_BILLING_STORAGE_SYNC_LAG_SECS`
 - `REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS`
 - `REND_PLAYBACK_BASE_URL`
+- `REND_PLAYER_PLAYBACK_BASE_URL` on the site deployment
+- `REND_PLAYER_EDGE_BASE_URLS` on local/test site deployments only, or with
+  `REND_PLAYER_EDGE_BASE_URLS_MODE=override` for emergency production override
 - `REND_PLAYBACK_COOKIE_DOMAIN`
 - `REND_MAX_UPLOAD_BYTES`
 - `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`
@@ -197,6 +234,7 @@ Edge:
 - `REND_EDGE_ID`
 - `REND_EDGE_REGION`
 - `REND_EDGE_BASE_URL`
+- `REND_EDGE_CORS_ALLOWED_ORIGINS`
 - `REND_EXPECTED_EDGES`
 - `REND_ALLOW_INSECURE_EDGE_URLS`
 - `REND_CONTROL_PLANE_URL`

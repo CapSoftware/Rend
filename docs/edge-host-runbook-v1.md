@@ -119,16 +119,17 @@ This section covers public playback, private/internal endpoints, metrics, and
 outbound origin/API telemetry.
 
 All endpoints currently share the edge service port inside the container
-(`4100`). For production-style exposure, bind the Docker publish address to
-loopback or a private interface and put Caddy or an equivalent reverse proxy in
-front of the container. Direct public `4100` exposure is disabled by default and
-requires an explicit `REND_EDGE_PUBLISH_ADDR` override plus
+(`4100`). For production exposure, bind the Docker publish address to loopback
+or a private interface and put Caddy or an equivalent reverse proxy in front of
+the container. Public browser media should enter through that `443` edge ingress
+on signed `/v/...` paths. Direct public `4100` exposure is disabled by default
+and requires an explicit `REND_EDGE_PUBLISH_ADDR` override plus
 `scripts/preflight-edge-host.sh --allow-direct-edge-exposure`; use that only for
 short production debugging with known test client IPs.
 
 | Direction | Port | Source | Destination | Purpose |
 | --- | --- | --- | --- | --- |
-| Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. |
+| Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. Requires allowed Rend origins for credentialed browser CORS. |
 | Inbound debugging-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while debugging only. Requires the explicit direct-exposure preflight override. |
 | Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
 | Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
@@ -229,7 +230,8 @@ API required set:
   `REND_PLAYBACK_SIGNING_KEY_ID`, `REND_PLAYBACK_SIGNING_SECRET`,
   `REND_PLAYBACK_TOKEN_TTL_SECS`, `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
 - Edge registry/fanout: `REND_EDGE_INTERNAL_TOKEN`,
-  `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`.
+  `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`,
+  `REND_EDGE_CORS_ALLOWED_ORIGINS`.
   `REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional fallback-only
   overrides and should be unset for normal production fanout.
 - Telemetry ingest/analytics: `REND_INTERNAL_TELEMETRY_TOKEN`,
