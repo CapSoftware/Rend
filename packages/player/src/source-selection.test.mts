@@ -27,6 +27,17 @@ test("selectedSource prefers HLS for hls_ready assets when HLS is supported", ()
   });
 });
 
+test("selectedSource can opt into opener-first startup for hls_ready assets", () => {
+  assert.deepEqual(
+    selectedSource(DATA, { nativeHls: true, hlsJs: true }, { startupMode: "opener" }),
+    {
+      label: "opener",
+      artifactPath: "opener.mp4",
+      url: DATA.opener_url,
+    }
+  );
+});
+
 test("selectedSource keeps opener as primary before HLS is ready", () => {
   const openerReady = {
     ...DATA,
@@ -46,6 +57,17 @@ test("hlsSource preserves native HLS before hls.js when the browser supports it"
     artifactPath: "hls/master.m3u8",
     url: DATA.manifest_url,
   });
+});
+
+test("hlsSource can prefer hls.js when MSE playback is requested", () => {
+  assert.deepEqual(
+    hlsSource(DATA, { nativeHls: true, hlsJs: true }, { playbackEngine: "mse" }),
+    {
+      label: "hls_js",
+      artifactPath: "hls/master.m3u8",
+      url: DATA.manifest_url,
+    }
+  );
 });
 
 test("hlsSource uses hls.js only when native HLS is unavailable", () => {
