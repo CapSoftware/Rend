@@ -41,6 +41,6 @@ Build this integration:
 3. Upload the source video, then wait for playable_state to become opener_ready or hls_ready before returning success.
 4. Store asset_id in my app database so future requests can fetch playback without reuploading.
 5. In browser UI, use ${siteOrigin}/embed/{assetId} for the hosted player, or call ${siteOrigin}/api/player/{assetId} from the site origin and render the returned source.
-6. Prefer manifest_url, then playback_url, then opener_url. Use the matching content type.
+6. Prefer the hosted Rend player for opener-first startup. For a bare video element, prefer manifest_url, then playback_url, then opener_url and use the matching content type.
 7. Handle billing_required, limit_exceeded, unauthorized, not_playable, suspended, deleted, and upload too large states with clear user-facing messages.
 8. Add a smoke test or script that uploads a small fixture, waits for playback, prints an embed URL or HTML snippet, reads analytics if available, and deletes the test asset.`;

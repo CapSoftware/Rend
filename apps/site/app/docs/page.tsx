@@ -353,7 +353,7 @@ export default function DocsPage() {
                 </p>
                 <CodeBlock code={PLAYBACK_BOOTSTRAP_CODE} language="json" title="playback-bootstrap.json" />
                 <ul>
-                  <li>Use <code>manifest_url</code> first when present, then <code>playback_url</code>, then <code>opener_url</code>.</li>
+                  <li>For a bare <code>video</code> element, use <code>manifest_url</code> first when present. The hosted Rend player starts with <code>opener_url</code> and hands off to HLS.</li>
                   <li>Artifact URLs are relative to the Rend site origin.</li>
                   <li>The hosted embed page is <code>/embed/{"{assetId}"}</code> and <code>/watch/{"{assetId}"}</code> aliases the same player.</li>
                 </ul>
