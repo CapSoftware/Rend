@@ -150,10 +150,12 @@ Worker:
   signing, edge internal auth, and Autumn billing
 - `REND_API_AUTO_MIGRATE=false` after the API migration step is deployed
 
-The `Release and Deploy Backend` workflow syncs the billing-only allowlist into
-the control-plane API and worker env files before deployment. The Production
-GitHub environment must include `AUTUMN_SECRET_KEY`; the sync helper refuses to
-run unless it is visibly a live Autumn key, and logs only key names.
+The `Release and Deploy Backend` workflow syncs the deploy-managed allowlist
+into the control-plane API and worker env files before deployment, including
+`CLICKHOUSE_*`, `REND_API_CORS_ALLOWED_ORIGINS`, and billing keys. The
+Production GitHub environment must include `CLICKHOUSE_URL`, `CLICKHOUSE_USER`,
+`CLICKHOUSE_PASSWORD`, and `AUTUMN_SECRET_KEY`; the sync helper refuses to run
+unless the Autumn key is visibly live, and logs only key names.
 - `REND_MEDIA_WORKER_ID`
 - `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`
 - `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`

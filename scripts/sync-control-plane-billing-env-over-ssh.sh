@@ -11,7 +11,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/sync-control-plane-billing-env-over-ssh.sh --host HOST --user USER [options]
 
-Sync the billing-only env allowlist into the production control-plane API and
+Sync the deploy-managed env allowlist into the production control-plane API and
 media-worker env files over SSH. Values are read from this process environment;
 only key names are printed.
 
@@ -24,6 +24,12 @@ Options:
   -h, --help            Show this help.
 
 Environment:
+  CLICKHOUSE_URL        Required ClickHouse HTTP endpoint.
+  CLICKHOUSE_DATABASE   ClickHouse database. Defaults to rend.
+  CLICKHOUSE_USER       Required ClickHouse user.
+  CLICKHOUSE_PASSWORD   Required ClickHouse password.
+  REND_API_CORS_ALLOWED_ORIGINS
+                        API CORS allowlist. Defaults to production Rend origins.
   AUTUMN_SECRET_KEY     Required live Autumn secret key.
   REND_SSH_KEY_PATH     Optional private key path passed to ssh/scp.
   REND_SSH_EXTRA_OPTS   Optional extra ssh options, split by shell words.
@@ -83,6 +89,9 @@ done
 [[ -n "$host" ]] || die "--host is required"
 [[ -n "$user" ]] || die "--user is required"
 [[ "$port" =~ ^[0-9]+$ ]] || die "--port must be numeric"
+[[ -n "${CLICKHOUSE_URL:-}" ]] || die "CLICKHOUSE_URL is required"
+[[ -n "${CLICKHOUSE_USER:-}" ]] || die "CLICKHOUSE_USER is required"
+[[ -n "${CLICKHOUSE_PASSWORD:-}" ]] || die "CLICKHOUSE_PASSWORD is required"
 [[ -n "${AUTUMN_SECRET_KEY:-}" ]] || die "AUTUMN_SECRET_KEY is required"
 is_live_autumn_key "$AUTUMN_SECRET_KEY" || die "AUTUMN_SECRET_KEY must be visibly marked as live"
 
@@ -103,8 +112,8 @@ if [[ -n "${REND_SSH_EXTRA_OPTS:-}" ]]; then
   scp_args+=("${extra_opts[@]}")
 fi
 
-fragment="$(mktemp "${TMPDIR:-/tmp}/rend-billing-env.XXXXXX")"
-merge_script="$(mktemp "${TMPDIR:-/tmp}/rend-billing-env-merge.XXXXXX.py")"
+fragment="$(mktemp "${TMPDIR:-/tmp}/rend-control-plane-env.XXXXXX")"
+merge_script="$(mktemp "${TMPDIR:-/tmp}/rend-control-plane-env-merge.XXXXXX.py")"
 cleanup() {
   rm -f "$fragment" "$merge_script"
 }
@@ -116,6 +125,8 @@ import sys
 
 target = sys.argv[1]
 defaults = {
+    "CLICKHOUSE_DATABASE": "rend",
+    "REND_API_CORS_ALLOWED_ORIGINS": "https://rend.so,https://www.rend.so",
     "REND_BILLING_MODE": "autumn",
     "AUTUMN_API_URL": "https://api.useautumn.com/v1",
     "AUTUMN_API_VERSION": "2.3.0",
@@ -134,6 +145,11 @@ defaults = {
     "REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS": "3600",
 }
 keys = [
+    "CLICKHOUSE_URL",
+    "CLICKHOUSE_DATABASE",
+    "CLICKHOUSE_USER",
+    "CLICKHOUSE_PASSWORD",
+    "REND_API_CORS_ALLOWED_ORIGINS",
     "REND_BILLING_MODE",
     "AUTUMN_SECRET_KEY",
     "AUTUMN_API_URL",
@@ -208,7 +224,7 @@ for target in targets:
     if missing:
         if output and output[-1].strip():
             output.append("")
-        output.append("# Managed billing configuration synced by Rend deploy workflow.")
+        output.append("# Managed control-plane configuration synced by Rend deploy workflow.")
         for key in missing:
             output.append(f"{key}={updates[key]}")
         changed.extend(missing)
@@ -221,12 +237,12 @@ for target in targets:
 PY
 
 target="$user@$host"
-remote_dir="/tmp/rend-billing-env-sync-$(date +%s)-$$"
+remote_dir="/tmp/rend-control-plane-env-sync-$(date +%s)-$$"
 remote_dir_q="$(shell_quote "$remote_dir")"
-remote_fragment="$remote_dir/billing.env"
+remote_fragment="$remote_dir/control-plane.env"
 remote_merge="$remote_dir/merge.py"
 
-echo "Preparing billing env sync bundle on $target"
+echo "Preparing control-plane env sync bundle on $target"
 ssh "${ssh_args[@]}" "$target" "rm -rf $remote_dir_q && mkdir -p $remote_dir_q"
 scp "${scp_args[@]}" "$fragment" "$target:$remote_fragment"
 scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
@@ -234,4 +250,4 @@ scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
 remote_command="python3 $(shell_quote "$remote_merge") $(shell_quote "$remote_fragment") $(shell_quote "$api_env") $(shell_quote "$worker_env")"
 ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$remote_command")"
 ssh "${ssh_args[@]}" "$target" "rm -rf $remote_dir_q"
-echo "Billing env sync completed for keys: REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
+echo "Control-plane env sync completed for keys: CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"

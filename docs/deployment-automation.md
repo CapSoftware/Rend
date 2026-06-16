@@ -58,6 +58,10 @@ Set these as `Production` environment secrets unless noted otherwise:
   scopes for synthetic readiness media.
 - `REND_EDGE_INTERNAL_TOKEN`: edge internal token for readiness warm, purge, and
   metrics checks.
+- `CLICKHOUSE_PASSWORD`: production ClickHouse password. `CLICKHOUSE_URL`,
+  `CLICKHOUSE_DATABASE`, and `CLICKHOUSE_USER` may also be set as secrets instead
+  of variables.
+- `AUTUMN_SECRET_KEY`: live Autumn secret key.
 
 Generate known-hosts entries from a trusted operator machine, verify the
 fingerprints out of band, then paste the lines into `REND_SSH_KNOWN_HOSTS`:
@@ -79,6 +83,11 @@ sudo docker login ghcr.io
 Set these as `Production` environment variables:
 
 - `REND_API_BASE_URL`: defaults to `https://api.rend.so` when omitted.
+- `CLICKHOUSE_URL`: production ClickHouse HTTP endpoint.
+- `CLICKHOUSE_DATABASE`: defaults to `rend` when omitted.
+- `CLICKHOUSE_USER`: production ClickHouse user.
+- `REND_API_CORS_ALLOWED_ORIGINS`: defaults to
+  `https://rend.so,https://www.rend.so` when omitted.
 - `REND_READINESS_EDGES`: comma-separated
   `edge_id=region=public_base[=private_base]` entries, for example:
 

@@ -141,6 +141,11 @@ jobs:
       REND_EDGE_AMS_SSH_HOST: ${{ secrets.REND_EDGE_AMS_SSH_HOST }}
       REND_EDGE_AMS_SSH_USER: ${{ secrets.REND_EDGE_AMS_SSH_USER }}
       REND_EDGE_AMS_SSH_PORT: ${{ secrets.REND_EDGE_AMS_SSH_PORT }}
+      CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL || vars.CLICKHOUSE_URL }}
+      CLICKHOUSE_DATABASE: ${{ secrets.CLICKHOUSE_DATABASE || vars.CLICKHOUSE_DATABASE || 'rend' }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || vars.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      REND_API_CORS_ALLOWED_ORIGINS: ${{ vars.REND_API_CORS_ALLOWED_ORIGINS || 'https://rend.so,https://www.rend.so' }}
       AUTUMN_SECRET_KEY: ${{ secrets.AUTUMN_SECRET_KEY }}
       AUTUMN_API_URL: ${{ vars.AUTUMN_API_URL || 'https://api.useautumn.com/v1' }}
       AUTUMN_API_VERSION: ${{ vars.AUTUMN_API_VERSION || '2.3.0' }}
@@ -187,10 +192,13 @@ jobs:
           chmod 600 "$HOME/.ssh/known_hosts"
           echo "REND_SSH_KEY_PATH=$SSH_KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Sync control-plane billing env
+      - name: Sync control-plane deploy env
         if: env.DEPLOY_CONTROL_PLANE == 'true'
         run: |
           set -euo pipefail
+          : "${CLICKHOUSE_URL:?CLICKHOUSE_URL Production secret or variable is required}"
+          : "${CLICKHOUSE_USER:?CLICKHOUSE_USER Production secret or variable is required}"
+          : "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD Production environment secret is required}"
           : "${AUTUMN_SECRET_KEY:?AUTUMN_SECRET_KEY Production environment secret is required}"
 
           scripts/sync-control-plane-billing-env-over-ssh.sh \
