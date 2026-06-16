@@ -16,10 +16,10 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, options, post},
 };
 use bytes::Bytes;
 use futures_util::stream;
@@ -81,6 +81,7 @@ struct EdgeConfig {
     cache_min_free_bytes: u64,
     control_plane: Option<ControlPlaneConfig>,
     request_timeout: Duration,
+    cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -197,6 +198,7 @@ impl EdgeConfig {
             "REND_EDGE_CACHE_MIN_FREE_BYTES",
             DEFAULT_CACHE_MIN_FREE_BYTES,
         )?;
+        let cors_allowed_origins = cors_allowed_origins_from_env(rend_env)?;
         let heartbeat_interval = env_duration_secs(
             "REND_EDGE_HEARTBEAT_INTERVAL_SECS",
             DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS,
@@ -232,6 +234,7 @@ impl EdgeConfig {
             cache_min_free_bytes,
             control_plane,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
+            cors_allowed_origins,
         })
     }
 }
@@ -797,6 +800,54 @@ fn optional_i64_env(key: &str) -> Result<Option<i64>> {
     Ok(Some(parsed))
 }
 
+fn cors_allowed_origins_from_env(rend_env: RendEnv) -> Result<Vec<String>> {
+    let configured = env_string("REND_EDGE_CORS_ALLOWED_ORIGINS", "");
+    let default_origins = if rend_env.is_strict() {
+        "https://rend.so,https://www.rend.so"
+    } else {
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+    };
+    let raw_origins = if configured.trim().is_empty() {
+        default_origins
+    } else {
+        configured.as_str()
+    };
+
+    raw_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_cors_origin)
+        .collect()
+}
+
+fn normalize_cors_origin(value: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(value)
+        .with_context(|| format!("REND_EDGE_CORS_ALLOWED_ORIGINS contains invalid URL: {value}"))?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "REND_EDGE_CORS_ALLOWED_ORIGINS entries must use http or https"
+    );
+    anyhow::ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "REND_EDGE_CORS_ALLOWED_ORIGINS entries must not include credentials"
+    );
+    anyhow::ensure!(
+        (parsed.path().is_empty() || parsed.path() == "/")
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "REND_EDGE_CORS_ALLOWED_ORIGINS entries must be origins only"
+    );
+    let host = parsed
+        .host_str()
+        .context("REND_EDGE_CORS_ALLOWED_ORIGINS entries must include a host")?;
+    let mut origin = format!("{}://{}", parsed.scheme(), host);
+    if let Some(port) = parsed.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    Ok(origin)
+}
+
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let internal_routes = Router::new()
         .route("/warm", post(warm))
@@ -820,7 +871,14 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             )),
         )
         .nest("/internal", internal_routes)
-        .route("/v/{asset_id}/{*artifact_path}", get(playback))
+        .route(
+            "/v/{asset_id}/{*artifact_path}",
+            get(playback).route_layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/v/{asset_id}/{*artifact_path}",
+            options(playback_preflight).route_layer(DefaultBodyLimit::disable()),
+        )
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
@@ -1109,9 +1167,10 @@ async fn playback(
     let started = Instant::now();
     let asset_id = path.asset_id.clone();
     let artifact_path = path.artifact_path.clone();
+    let cors_origin = playback_cors_origin(&state.config, &headers).map(str::to_owned);
     let cookie_token = playback_token_cookie(&headers);
     let token = query.token.as_deref().or(cookie_token.as_deref());
-    let result = playback_inner(state.clone(), path, token).await;
+    let result = playback_inner(state.clone(), path, token, cors_origin.as_deref()).await;
     let (response, error_code) = match result {
         Ok(response) => (response, None),
         Err(error) => {
@@ -1130,6 +1189,34 @@ async fn playback(
     );
     record_cache_metrics(&state, &response);
     response
+}
+
+async fn playback_preflight(
+    State(state): State<Arc<AppState>>,
+    AxumPath(path): AxumPath<PlaybackPath>,
+    headers: HeaderMap,
+) -> Response {
+    if map_playback_artifact(&path.asset_id, &path.artifact_path).is_err() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let Some(origin) = playback_cors_origin(&state.config, &headers) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+        .header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
+        .header(header::ACCESS_CONTROL_ALLOW_METHODS, Method::GET.as_str())
+        .header(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "accept, content-type, range",
+        )
+        .header(header::ACCESS_CONTROL_MAX_AGE, "600")
+        .header(header::VARY, "Origin")
+        .body(Body::empty())
+        .expect("preflight response headers are static and valid")
 }
 
 fn record_cache_metrics(state: &AppState, response: &Response) {
@@ -1160,6 +1247,7 @@ async fn playback_inner(
     state: Arc<AppState>,
     path: PlaybackPath,
     token: Option<&str>,
+    cors_origin: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
     let now = current_unix_timestamp().map_err(|error| PlaybackError::Io(error.to_string()))?;
     validate_playback_request(
@@ -1179,6 +1267,7 @@ async fn playback_inner(
             &artifact,
             "HIT",
             bytes,
+            cors_origin,
         ));
     }
 
@@ -1187,7 +1276,14 @@ async fn playback_inner(
         .acquire(&artifact.cache_key, state.config.max_in_flight_fills)?
     {
         FillSlot::Leader(leader) => {
-            stream_origin_artifact_response(state.clone(), artifact, cache_path, leader).await
+            stream_origin_artifact_response(
+                state.clone(),
+                artifact,
+                cache_path,
+                leader,
+                cors_origin,
+            )
+            .await
         }
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
@@ -1197,6 +1293,7 @@ async fn playback_inner(
                 &artifact,
                 "COALESCED",
                 bytes,
+                cors_origin,
             ))
         }
     }
@@ -1299,6 +1396,7 @@ fn artifact_bytes_response(
     artifact: &PlaybackArtifact,
     cache_status: &'static str,
     bytes: Vec<u8>,
+    cors_origin: Option<&str>,
 ) -> Response {
     let content_length = u64::try_from(bytes.len()).ok();
     artifact_response(
@@ -1307,6 +1405,7 @@ fn artifact_bytes_response(
         cache_status,
         Body::from(bytes),
         content_length,
+        cors_origin,
     )
 }
 
@@ -1315,6 +1414,7 @@ async fn stream_origin_artifact_response(
     artifact: PlaybackArtifact,
     cache_path: PathBuf,
     leader: FillLeaderGuard,
+    cors_origin: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
     let stream = match prepare_streamed_origin_fill(&state, &artifact, cache_path).await {
         Ok(stream) => stream,
@@ -1343,6 +1443,7 @@ async fn stream_origin_artifact_response(
         "MISS",
         Body::from_stream(body_stream),
         content_length,
+        cors_origin,
     ))
 }
 
@@ -2192,12 +2293,43 @@ fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
     })
 }
 
+fn playback_cors_origin<'a>(config: &EdgeConfig, headers: &'a HeaderMap) -> Option<&'a str> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let is_configured_origin = config
+        .cors_allowed_origins
+        .iter()
+        .any(|allowed| allowed.as_str() == origin);
+    (is_configured_origin || is_trusted_rend_cors_origin(origin)).then_some(origin)
+}
+
+fn is_trusted_rend_cors_origin(origin: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || (parsed.path() != "" && parsed.path() != "/")
+    {
+        return false;
+    }
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    host == "rend.so" || host.ends_with(".rend.so")
+}
+
 fn artifact_response(
     config: &EdgeConfig,
     content_type: &'static str,
     cache_status: &'static str,
     body: Body,
     content_length: Option<u64>,
+    cors_origin: Option<&str>,
 ) -> Response {
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -2206,11 +2338,17 @@ fn artifact_response(
         .header("x-rend-cache", cache_status)
         .header("x-rend-edge-id", &config.edge_id)
         .header("x-rend-region", &config.region)
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
             "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region",
         );
+
+    if let Some(origin) = cors_origin {
+        builder = builder
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
+            .header(header::VARY, "Origin");
+    }
 
     if let Some(content_length) = content_length {
         builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());

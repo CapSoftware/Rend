@@ -291,6 +291,10 @@ fn test_state_with_max_in_flight_and_telemetry(
         cache_min_free_bytes: 0,
         control_plane: None,
         request_timeout: Duration::from_secs(10),
+        cors_allowed_origins: vec![
+            "https://rend.so".to_owned(),
+            "https://www.rend.so".to_owned(),
+        ],
     };
     let s3 = build_s3_client(&config);
 
@@ -335,6 +339,10 @@ fn test_state_with_resource_limits(
         cache_min_free_bytes,
         control_plane: None,
         request_timeout: Duration::from_secs(10),
+        cors_allowed_origins: vec![
+            "https://rend.so".to_owned(),
+            "https://www.rend.so".to_owned(),
+        ],
     };
     let s3 = build_s3_client(&config);
 
@@ -442,7 +450,9 @@ struct PlaybackTestResponse {
     cache_status: Option<String>,
     content_type: Option<String>,
     access_control_allow_origin: Option<String>,
+    access_control_allow_credentials: Option<String>,
     access_control_expose_headers: Option<String>,
+    vary: Option<String>,
     edge_id: Option<String>,
     region: Option<String>,
     body: Vec<u8>,
@@ -463,9 +473,29 @@ async fn get_playback_with_cookie(
     uri: impl AsRef<str>,
     cookie: Option<String>,
 ) -> PlaybackTestResponse {
+    get_playback_with_cookie_and_origin(app, uri, cookie, None).await
+}
+
+async fn get_playback_with_origin(
+    app: Router,
+    uri: impl AsRef<str>,
+    origin: impl AsRef<str>,
+) -> PlaybackTestResponse {
+    get_playback_with_cookie_and_origin(app, uri, None, Some(origin.as_ref().to_owned())).await
+}
+
+async fn get_playback_with_cookie_and_origin(
+    app: Router,
+    uri: impl AsRef<str>,
+    cookie: Option<String>,
+    origin: Option<String>,
+) -> PlaybackTestResponse {
     let mut request = Request::builder().method("GET").uri(uri.as_ref());
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
+    }
+    if let Some(origin) = origin {
+        request = request.header(header::ORIGIN, origin);
     }
     let response = app
         .oneshot(request.body(Body::empty()).unwrap())
@@ -496,8 +526,16 @@ async fn get_playback_with_cookie(
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
+        access_control_allow_credentials: headers
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
         access_control_expose_headers: headers
             .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        vary: headers
+            .get(header::VARY)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         edge_id: headers
@@ -510,6 +548,19 @@ async fn get_playback_with_cookie(
             .map(str::to_owned),
         body,
     }
+}
+
+async fn options_playback(app: Router, uri: impl AsRef<str>, origin: impl AsRef<str>) -> Response {
+    app.oneshot(
+        Request::builder()
+            .method("OPTIONS")
+            .uri(uri.as_ref())
+            .header(header::ORIGIN, origin.as_ref())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn get_playback_concurrently(
@@ -1090,7 +1141,9 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     );
     assert_eq!(response.cache_status.as_deref(), Some("HIT"));
     assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
-    assert_eq!(response.access_control_allow_origin.as_deref(), Some("*"));
+    assert_eq!(response.access_control_allow_origin.as_deref(), None);
+    assert_eq!(response.access_control_allow_credentials.as_deref(), None);
+    assert_eq!(response.vary.as_deref(), None);
     assert_eq!(
         response.access_control_expose_headers.as_deref(),
         Some(
@@ -1101,6 +1154,73 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.region.as_deref(), Some("test"));
     assert_eq!(response.body, b"cached-opener");
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_serves_credentialed_cors_for_allowed_origin() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-cors-hit");
+    let cache_path = cache_dir.join("videos/asset-123/hls/master.m3u8");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"#EXTM3U\n").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_origin(
+        app,
+        signed_playback_uri("asset-123", "hls/master.m3u8"),
+        "https://preview.rend.so",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.access_control_allow_origin.as_deref(),
+        Some("https://preview.rend.so")
+    );
+    assert_eq!(
+        response.access_control_allow_credentials.as_deref(),
+        Some("true")
+    );
+    assert_eq!(response.vary.as_deref(), Some("Origin"));
+    assert_eq!(response.body, b"#EXTM3U\n");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_preflight_rejects_untrusted_origins() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let state = test_state(test_cache_dir("playback-cors-preflight"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let uri = "/v/asset-123/hls/720p/segment_00000.ts";
+
+    let allowed = options_playback(app.clone(), uri, "https://rend.so").await;
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        allowed
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("https://rend.so")
+    );
+    assert_eq!(
+        allowed
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
+    );
+
+    let rejected = options_playback(app, uri, "https://evil.example").await;
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(
+        rejected
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
 }
 
 #[tokio::test]
