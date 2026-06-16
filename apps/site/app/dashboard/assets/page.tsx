@@ -30,12 +30,16 @@ export default async function AssetsPage() {
 
   try {
     const { assets } = await listAssets(access);
-    return <AssetsClient dashboardState={dashboardState} initialAssets={assets} readOnlyReason={readOnlyReason} />;
+    return (
+      <AssetsClient
+        dashboardState={dashboardState}
+        initialAssets={assets}
+        readOnlyReason={readOnlyReason}
+      />
+    );
   } catch (error) {
     const message =
-      error instanceof AssetApiError
-        ? error.body.message
-        : "Rend API request failed";
+      error instanceof AssetApiError ? error.body.message : "Rend API request failed";
     return (
       <AssetsClient
         dashboardState={dashboardState}
