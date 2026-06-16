@@ -97,6 +97,16 @@ Options:
   --include-mutating-smoke
       Permit production-check to run local mutating smoke commands. Local and
       sandbox modes run them by default.
+  --include-production-sdk-e2e
+      Permit production-check to run the published npm SDK E2E against Rend
+      production. Also requires --allow-production-mutation and
+      --acknowledge-real-billing.
+  --allow-production-mutation
+      Required with --include-production-sdk-e2e before the SDK E2E can mutate
+      production.
+  --acknowledge-real-billing
+      Required with --include-production-sdk-e2e because live Autumn usage can
+      create billing artifacts.
   --release-manifest FILE
       Validate a release image manifest. Env: REND_RELEASE_MANIFEST.
   --release-dry-run
@@ -121,6 +131,9 @@ function parseArgs(argv) {
     releaseDryRun: truthy(process.env.REND_LAUNCH_RELEASE_DRY_RUN),
     allowLiveBillingMutation: truthy(process.env.REND_LAUNCH_ALLOW_LIVE_BILLING_MUTATION),
     includeMutatingSmoke: truthy(process.env.REND_LAUNCH_INCLUDE_MUTATING_SMOKE),
+    includeProductionSdkE2e: truthy(process.env.REND_LAUNCH_INCLUDE_PRODUCTION_SDK_E2E),
+    allowProductionMutation: truthy(process.env.REND_LAUNCH_ALLOW_PRODUCTION_MUTATION),
+    acknowledgeRealBilling: truthy(process.env.REND_LAUNCH_ACKNOWLEDGE_REAL_BILLING),
     timeoutMs: positiveInteger(process.env.REND_LAUNCH_GATE_TIMEOUT_MS, defaultCommandTimeoutMs),
   };
 
@@ -152,6 +165,9 @@ function parseArgs(argv) {
     } else if (arg === "--release-dry-run") args.releaseDryRun = true;
     else if (arg === "--allow-live-billing-mutation") args.allowLiveBillingMutation = true;
     else if (arg === "--include-mutating-smoke") args.includeMutatingSmoke = true;
+    else if (arg === "--include-production-sdk-e2e") args.includeProductionSdkE2e = true;
+    else if (arg === "--allow-production-mutation") args.allowProductionMutation = true;
+    else if (arg === "--acknowledge-real-billing") args.acknowledgeRealBilling = true;
     else if (arg === "--timeout-ms") args.timeoutMs = positiveInteger(next(), defaultCommandTimeoutMs);
     else if (arg.startsWith("--timeout-ms=")) {
       args.timeoutMs = positiveInteger(arg.slice("--timeout-ms=".length), defaultCommandTimeoutMs);
@@ -1043,6 +1059,79 @@ async function validateSelfServeReadiness(context) {
   return step;
 }
 
+async function runProductionSdkE2e(context) {
+  if (context.args.mode !== "production-check") {
+    return skipStep(
+      context,
+      "production-sdk-e2e",
+      "sdk",
+      "published npm SDK production E2E",
+      "skipped outside production-check",
+    );
+  }
+  if (!context.args.includeProductionSdkE2e) {
+    return skipStep(
+      context,
+      "production-sdk-e2e",
+      "sdk",
+      "published npm SDK production E2E",
+      "skipped; pass --include-production-sdk-e2e with production mutation acknowledgements to run",
+    );
+  }
+  if (!context.args.allowProductionMutation || !context.args.acknowledgeRealBilling) {
+    return runStep(
+      context,
+      {
+        id: "production-sdk-e2e",
+        group: "sdk",
+        title: "published npm SDK production E2E",
+      },
+      async () => ({
+        status: "fail",
+        summary: "requires --allow-production-mutation and --acknowledge-real-billing",
+        data: {
+          include_production_sdk_e2e: context.args.includeProductionSdkE2e,
+          allow_production_mutation: context.args.allowProductionMutation,
+          acknowledge_real_billing: context.args.acknowledgeRealBilling,
+        },
+      }),
+    );
+  }
+
+  const artifactPath = path.join(context.outputDir, "production-sdk-e2e.json");
+  const commandArgs = [
+    "scripts/production-sdk-e2e.mjs",
+    "--allow-production-mutation",
+    "--acknowledge-real-billing",
+    "--env-file",
+    context.args.envFile || ".env.production.local",
+    "--artifact",
+    artifactPath,
+    "--timeout-ms",
+    String(Math.min(context.args.timeoutMs, 20 * 60 * 1_000)),
+  ];
+  const step = await runCommandStep(
+    context,
+    command(
+      "production-sdk-e2e",
+      "sdk",
+      "published npm SDK production E2E",
+      "node",
+      commandArgs,
+      { timeoutMs: Math.max(context.args.timeoutMs, 20 * 60 * 1_000) },
+    ),
+  );
+  const recorded = context.steps.at(-1);
+  if (recorded?.id === "production-sdk-e2e") {
+    recorded.artifacts = [
+      ...(recorded.artifacts || []),
+      displayPath(artifactPath),
+      displayPath(path.join(launchDir, "production-sdk-e2e-latest.json")),
+    ];
+  }
+  return step;
+}
+
 function isSafeCatalogId(value) {
   return /^[A-Za-z0-9_.:-]{1,128}$/.test(String(value || ""));
 }
@@ -1456,6 +1545,7 @@ function buildSteps(context) {
     () => validateAutumnCatalog(context),
     () => validateAutumnCatalogParity(context),
     () => validateSelfServeReadiness(context),
+    () => runProductionSdkE2e(context),
     () =>
       runCommandStep(context, command("openapi:check", "openapi", "OpenAPI check", "bun", ["run", "openapi:check"], { timeoutMs: 180_000 })),
     () =>
