@@ -8,10 +8,58 @@ const FORWARDED_RESPONSE_HEADERS = [
   "x-rend-region",
 ] as const;
 
+export const PLAYBACK_COOKIE_NAME = "__rend_playback";
+
 type ArtifactResponseHeaderOptions = {
   contentType?: string;
   rewrittenBody?: string;
 };
+
+function safeCookieValue(value: unknown) {
+  if (typeof value !== "string" || value.length > 4096) return undefined;
+  return /^[a-zA-Z0-9._~-]+$/.test(value) ? value : undefined;
+}
+
+export function playbackCookieFromHeaders(requestHeaders: Headers) {
+  const cookieHeader = requestHeaders.get("cookie");
+  if (!cookieHeader) return undefined;
+
+  for (const cookie of cookieHeader.split(";")) {
+    const separatorIndex = cookie.indexOf("=");
+    if (separatorIndex === -1) continue;
+    const name = cookie.slice(0, separatorIndex).trim();
+    if (name !== PLAYBACK_COOKIE_NAME) continue;
+    return safeCookieValue(cookie.slice(separatorIndex + 1).trim());
+  }
+
+  return undefined;
+}
+
+export function playbackProxyCookieHeader(
+  requestUrl: string,
+  assetId: string,
+  playbackToken: unknown,
+  ttlSeconds: unknown
+) {
+  const token = safeCookieValue(playbackToken);
+  const maxAge = typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
+    ? Math.max(0, Math.floor(ttlSeconds))
+    : 0;
+  if (!token || maxAge <= 0) return undefined;
+
+  const url = new URL(requestUrl);
+  const isSecure = url.protocol === "https:";
+  const path = `/api/player/${encodeURIComponent(assetId)}/artifact/`;
+  const parts = [
+    `${PLAYBACK_COOKIE_NAME}=${token}`,
+    `Path=${path}`,
+    `Max-Age=${maxAge}`,
+    "HttpOnly",
+    `SameSite=${isSecure ? "None" : "Lax"}`,
+  ];
+  if (isSecure) parts.push("Secure");
+  return parts.join("; ");
+}
 
 export function playbackArtifactFetchHeaders(
   requestHeaders: Headers,
@@ -21,7 +69,7 @@ export function playbackArtifactFetchHeaders(
   const headers = new Headers();
   const range = requestHeaders.get("range");
   if (range && artifactPath !== "hls/master.m3u8") headers.set("range", range);
-  if (cookie) headers.set("cookie", `__rend_playback=${cookie}`);
+  if (cookie) headers.set("cookie", `${PLAYBACK_COOKIE_NAME}=${cookie}`);
   return headers;
 }
 
