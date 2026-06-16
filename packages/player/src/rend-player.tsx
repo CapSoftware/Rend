@@ -228,6 +228,9 @@ const HLS_STARTUP_CONFIG = {
   startFragPrefetch: true,
   startLevel: -1,
   testBandwidth: true,
+  xhrSetup: (xhr: XMLHttpRequest) => {
+    xhr.withCredentials = true;
+  },
 };
 
 function isNativeHlsSupported(video: HTMLVideoElement) {
@@ -256,7 +259,7 @@ function signedHlsLine(line: string, baseUrl: URL, token: string | null) {
 async function signedHlsManifestObjectUrl(manifestUrl: string, signal?: AbortSignal) {
   const parsedManifestUrl = new URL(manifestUrl, window.location.href);
   const token = parsedManifestUrl.searchParams.get("token");
-  const response = await fetch(parsedManifestUrl.toString(), { signal });
+  const response = await fetch(parsedManifestUrl.toString(), { credentials: "include", signal });
   const cacheHeaders = readableTelemetryHeaders(response.headers);
   const labels = telemetryLabelsFromHeaders(response.headers);
 
@@ -1125,7 +1128,7 @@ export function RendPlayer({
       link.rel = index === 0 && hint.artifact_path === "opener.mp4" ? "preload" : "prefetch";
       link.as = hint.artifact_path === "opener.mp4" ? "video" : "fetch";
       link.href = hint.url;
-      link.crossOrigin = "anonymous";
+      link.crossOrigin = "use-credentials";
       link.dataset.rendPrefetch = hint.artifact_path;
       document.head.appendChild(link);
       return link;
@@ -1165,7 +1168,7 @@ export function RendPlayer({
           poster={poster}
           playsInline
           preload={preload}
-          crossOrigin="anonymous"
+          crossOrigin="use-credentials"
           onLoadedMetadata={() => {
             updateObservedVideoStats();
             const metadataMs = recordTiming("metadataMs");
