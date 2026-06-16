@@ -44,8 +44,12 @@ allows new email OTP sign-ups, auto-creates a workspace on first dashboard acces
 and logs OTP codes to the server console when `RESEND_API_KEY` is not configured.
 Production self-serve signup must set `REND_SELF_SERVE_SIGNUP_ENABLED=true`,
 `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` or `REND_AUTH_BASE_URL`,
-`RESEND_API_KEY`, `REND_AUTH_EMAIL_FROM`, `REND_SITE_INTERNAL_TOKEN`, and Autumn
-billing env.
+`REND_AUTH_TRUSTED_ORIGINS`, `RESEND_API_KEY`, `REND_AUTH_EMAIL_FROM`,
+`REND_AUTH_OTP_PROBE_EMAIL`, `REND_SITE_INTERNAL_TOKEN`, and Autumn billing env.
+Run `bun run launch:auth-otp-diagnostics` for a non-mutating production auth
+config and DB-table check. Add `-- --probe-email ops-test@example.com` to send
+one real self-serve OTP request through `/api/auth`; artifacts redact emails,
+provider keys, cookies, headers, and OTP/code values.
 
 The site keeps all Rend API calls server-side, scopes dashboard data by active
 organization, and exposes only sanitized asset, analytics, startup telemetry,
