@@ -1,45 +1,45 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-16T11:17:47.113Z",
+  "generatedAt": "2026-06-16T13:41:18.265Z",
   "run": {
-    "id": "20260616T111207Z",
+    "id": "20260616T133539Z",
     "status": "completed",
-    "startedAt": "2026-06-16T11:12:07.952Z",
-    "finishedAt": "2026-06-16T11:17:47.112Z",
+    "startedAt": "2026-06-16T13:35:39.706Z",
+    "finishedAt": "2026-06-16T13:41:18.263Z",
     "region": "daytona-us",
     "regionLabel": "Daytona us (us requested)",
     "runnerKind": "daytona",
-    "runnerLabel": "043106f6-c7ef-4504-9ad9-e59018be6bfd",
+    "runnerLabel": "1c7c631b-2d78-4c8f-841d-57a4ee1ff9de",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
     "providerOrderRandomized": true,
     "providerOrderByRound": [
       [
-        "rend",
-        "mux"
-      ],
-      [
-        "mux",
-        "rend"
-      ],
-      [
-        "mux",
-        "rend"
-      ],
-      [
         "mux",
         "rend"
       ],
       [
         "rend",
         "mux"
+      ],
+      [
+        "mux",
+        "rend"
+      ],
+      [
+        "rend",
+        "mux"
+      ],
+      [
+        "mux",
+        "rend"
       ]
     ]
   },
   "source": {
     "urls": {
-      "rend": "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+      "rend": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
       "mux": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk"
     },
     "verification": {
@@ -50,7 +50,7 @@
         "rend": {
           "durationMedianSeconds": 75.2,
           "naturalResolution": "1920x1080",
-          "playbackMode": "hls-via-mse"
+          "playbackMode": "hls"
         },
         "mux": {
           "durationMedianSeconds": 75.2,
@@ -75,6 +75,7 @@
       "One video does not represent every workload, codec ladder, region, or viewer device.",
       "The harness does not purge or manipulate Mux CDN caches.",
       "The harness does not warm only Rend during direct comparisons.",
+      "Selected resolutions and rendition ladders may differ; current Rend media generation emits one HLS rendition for an asset rather than a 480p/720p/1080p ABR ladder.",
       "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals."
     ]
   },
@@ -110,7 +111,7 @@
     {
       "id": "rend",
       "name": "Rend",
-      "url": "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+      "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
       "playerHost": "www.rend.so"
     },
     {
@@ -151,43 +152,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 677.4,
-            "median": 823.3,
-            "p75": 1168.2,
-            "p95": 1710.4,
-            "max": 1846
+            "min": 596.9,
+            "median": 619.4,
+            "p75": 986.3,
+            "p95": 1123.1,
+            "max": 1157.3
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 662.5,
-            "median": 802.5,
-            "p75": 1122.5,
-            "p95": 1679.7,
-            "max": 1819
+            "min": 575.8,
+            "median": 597.5,
+            "p75": 958.9,
+            "p95": 1104,
+            "max": 1140.3
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 673.2,
-            "median": 824.2,
-            "p75": 1163.5,
-            "p95": 1699.7,
-            "max": 1833.7
+            "min": 596.3,
+            "median": 615.4,
+            "p75": 969.8,
+            "p95": 1121.4,
+            "max": 1159.3
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 677.4,
-            "median": 823.3,
-            "p75": 1168.2,
-            "p95": 1710.4,
-            "max": 1846
+            "min": 596.9,
+            "median": 619.4,
+            "p75": 986.3,
+            "p95": 1123.1,
+            "max": 1157.3
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30687.7,
-            "median": 30836,
-            "p75": 31186.3,
-            "p95": 31725.8,
-            "max": 31860.7
+            "min": 30611.1,
+            "median": 30654.9,
+            "p75": 31001.4,
+            "p95": 31133.6,
+            "max": 31166.7
           },
           "stallCount": {
             "count": 5,
@@ -199,11 +200,11 @@
           },
           "stallDurationMs": {
             "count": 5,
-            "min": 24739.5,
-            "median": 26157.8,
-            "p75": 26176.9,
-            "p95": 26247,
-            "max": 26264.5
+            "min": 26280.3,
+            "median": 26326.3,
+            "p75": 26332.4,
+            "p95": 26357.7,
+            "max": 26364
           }
         },
         "observed": {
@@ -217,7 +218,7 @@
           },
           "naturalResolution": "1920x1080",
           "renderedResolution": "1078x606",
-          "playbackMode": "hls-via-mse",
+          "playbackMode": "hls",
           "selectedRendition": "1920x1080"
         },
         "browserNetworkErrors": 0
@@ -230,43 +231,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 520.4,
-            "median": 551.9,
-            "p75": 573,
-            "p95": 629.4,
-            "max": 643.5
+            "min": 504.6,
+            "median": 593.3,
+            "p75": 741.7,
+            "p95": 823.7,
+            "max": 844.2
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 485.8,
-            "median": 509.7,
-            "p75": 544.1,
-            "p95": 601.9,
-            "max": 616.3
+            "min": 484.9,
+            "median": 562.3,
+            "p75": 685.4,
+            "p95": 802.4,
+            "max": 831.6
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 519.8,
-            "median": 527.3,
-            "p75": 555.6,
-            "p95": 611.4,
-            "max": 625.3
+            "min": 533.7,
+            "median": 596.7,
+            "p75": 827.8,
+            "p95": 845.7,
+            "max": 850.2
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 520.4,
-            "median": 551.9,
-            "p75": 573,
-            "p95": 629.4,
-            "max": 643.5
+            "min": 504.6,
+            "median": 593.3,
+            "p75": 741.7,
+            "p95": 823.7,
+            "max": 844.2
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30561.1,
-            "median": 30573.6,
-            "p75": 30609.6,
-            "p95": 30709.7,
-            "max": 30734.7
+            "min": 30579.2,
+            "median": 30685.8,
+            "p75": 30872.2,
+            "p95": 30896.8,
+            "max": 30902.9
           },
           "stallCount": {
             "count": 5,
@@ -309,7 +310,7 @@
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-16T11:17:47.114Z",
+    "checkedAt": "2026-06-16T13:41:18.266Z",
     "patternsVersion": 1,
     "findings": []
   }
