@@ -45,7 +45,7 @@ export const marketingPages: MarketingPage[] = [
       "What Rend does for developers: one API call to upload, encoding included, fast starts from the edge, and tooling your AI editor understands.",
     ogSubtitle: "One call to upload, one fast playback URL out. Encoding, storage and delivery handled.",
     summary:
-      "What Rend does: upload with one API call, encoding included, warmed openers for fast cold starts, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
+      "What Rend does: upload with one API call, encoding included, warmed HLS startup bytes for fast cold starts, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
     priority: 0.9,
     faqs: [
       {
@@ -58,7 +58,7 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "What do I get back to play the video?",
-        a: "An HLS stream for adaptive playback and a small MP4 opener for instant starts. Browser playback uses same-origin URLs with no tokens to manage, so you drop in one source and it plays.",
+        a: "An adaptive HLS ladder with startup playlists and early segments warmed at the edge. Browser playback uses same-origin URLs with no tokens to manage, so you drop in one source and it plays.",
       },
       {
         q: "Can I run it on my own servers?",
@@ -77,10 +77,10 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "Why Rend is fast",
     description:
-      "Rend starts playback from the edge nearest your viewer. The opening seconds of each video are warmed onto edge-local RAM and NVMe, so the first frame shows fast, even on a cold request.",
-    ogSubtitle: "Warmed openers on bare-metal edge nodes, so the first frame shows fast, even cold.",
+      "Rend starts playback from the edge nearest your viewer. The HLS master, startup playlist, and first segments are warmed onto edge-local RAM and NVMe, so the first frame shows fast, even on a cold request.",
+    ogSubtitle: "Warmed HLS startup bytes on bare-metal edge nodes, so the first frame shows fast, even cold.",
     summary:
-      "Why Rend is fast: bare-metal edge nodes instead of shared functions, the opening seconds of each video warmed onto edge-local RAM and NVMe, and openers pushed to the edge before the first viewer arrives so cold starts stay fast.",
+      "Why Rend is fast: bare-metal edge nodes instead of shared functions, HLS startup playlists and early segments warmed onto edge-local RAM and NVMe, and the first playback bytes pushed to the edge before the first viewer arrives so cold starts stay fast.",
     priority: 0.9,
     faqs: [
       {
@@ -88,8 +88,8 @@ export const marketingPages: MarketingPage[] = [
         a: "It is rarely the server working hard. The wait comes from the round trips across the internet before the first frame can show. The further the first bytes have to travel, the longer playback takes to begin.",
       },
       {
-        q: "What is a warmed opener?",
-        a: "When you upload, Rend builds a small file from the video's opening seconds and pushes it to the edge before anyone presses play. That first request can hand back real frames while the rest of the video streams in behind it.",
+        q: "What gets warmed?",
+        a: "When you upload, Rend warms the HLS master playlist, the initial rendition playlist, and the first media segments at the edge before anyone presses play. The first request can start from local cache while adaptive playback continues normally.",
       },
       {
         q: "Do you run on serverless functions?",
@@ -159,7 +159,7 @@ export const marketingPages: MarketingPage[] = [
     faqs: [
       {
         q: "How is Rend different from minute-billed platforms?",
-        a: "They charge per minute of video plus tiers, and things like encoding and fast cold starts are often extras. Rend bills delivery and storage by resolution, includes encoding, and warms openers at the edge by default.",
+        a: "They charge per minute of video plus tiers, and things like encoding and fast cold starts are often extras. Rend bills delivery and storage by resolution, includes encoding, and warms HLS startup bytes at the edge by default.",
       },
       {
         q: "How does Rend compare to budget per-GB CDNs?",
