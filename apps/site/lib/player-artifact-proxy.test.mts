@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
+  playbackProxyCookieHeader,
 } from "./player-artifact-proxy.ts";
 
 test("rewritten manifest headers use transformed body length and drop range metadata", () => {
@@ -64,4 +66,47 @@ test("binary artifact fetches preserve range requests", () => {
 
   assert.equal(headers.get("range"), "bytes=0-99");
   assert.equal(headers.get("cookie"), "__rend_playback=cookie-value");
+});
+
+test("proxy playback cookie is scoped to one asset artifact path", () => {
+  const header = playbackProxyCookieHeader(
+    "https://rend.so/api/player/00000000-0000-0000-0000-000000000001",
+    "00000000-0000-0000-0000-000000000001",
+    "v1.claims.signature",
+    900
+  );
+
+  assert.match(header ?? "", /^__rend_playback=v1\.claims\.signature;/);
+  assert.match(header ?? "", /Path=\/api\/player\/00000000-0000-0000-0000-000000000001\/artifact\//);
+  assert.match(header ?? "", /Max-Age=900/);
+  assert.match(header ?? "", /HttpOnly/);
+  assert.match(header ?? "", /SameSite=None/);
+  assert.match(header ?? "", /Secure/);
+});
+
+test("proxy playback cookie uses local-safe attributes on http", () => {
+  const header = playbackProxyCookieHeader(
+    "http://127.0.0.1:3000/api/player/00000000-0000-0000-0000-000000000001",
+    "00000000-0000-0000-0000-000000000001",
+    "v1.claims.signature",
+    900
+  );
+
+  assert.match(header ?? "", /SameSite=Lax/);
+  assert.doesNotMatch(header ?? "", /Secure/);
+});
+
+test("playback cookie parser returns only safe cookie values", () => {
+  assert.equal(
+    playbackCookieFromHeaders(new Headers({ cookie: "theme=dark; __rend_playback=v1.claims.signature" })),
+    "v1.claims.signature"
+  );
+  assert.equal(
+    playbackCookieFromHeaders(new Headers({ cookie: "__rend_playback=bad;value" })),
+    "bad"
+  );
+  assert.equal(
+    playbackCookieFromHeaders(new Headers({ cookie: "__rend_playback=bad value" })),
+    undefined
+  );
 });
