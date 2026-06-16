@@ -185,7 +185,7 @@ export const marketingPages: MarketingPage[] = [
       "An honest startup benchmark: time to first frame for Rend versus Mux on the same source video, measured from a clean browser with the raw results published.",
     ogSubtitle: "Time to first frame, Rend versus Mux on the same source video, with raw results published.",
     summary:
-      "A startup speed benchmark comparing Rend and Mux on the same source video: median time to first frame, stall counts and reliability across five randomized samples from a clean browser in Daytona US, with the full raw artifacts published.",
+      "A startup speed benchmark comparing Rend and Mux on the same source video: median time to first frame, stall counts and reliability across five randomized samples from a clean browser in Daytona US, with the full raw artifacts published. Rend served 1080p and Mux served 720p.",
     priority: 0.8,
     faqs: [
       {
@@ -197,8 +197,8 @@ export const marketingPages: MarketingPage[] = [
         a: "We use the same source video, the same machine and browser, a clean cache for every sample, and we randomize provider order each round. We also publish the raw results and the caveats so you can check the methodology yourself.",
       },
       {
-        q: "Why force the headline run to 720p?",
-        a: "The headline comparison keeps both players at 1280 by 720 so the startup numbers are easier to compare. We also publish a separate native-HLS Rend reference run where the browser selected 1920 by 1080.",
+        q: "Why did Rend serve 1080p and Mux serve 720p?",
+        a: "Each player selected its own rendition for the same source video. Rend served full 1920 by 1080 while Mux selected 1280 by 720, so Rend delivered more pixels and still reached the first frame sooner in this run.",
       },
       {
         q: "Can I reproduce these numbers?",
