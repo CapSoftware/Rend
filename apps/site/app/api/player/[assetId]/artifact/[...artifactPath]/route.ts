@@ -254,6 +254,8 @@ async function artifactResponseFromEdge(
     const manifest = await edgeResponse.text().catch(() => "");
     const rewrittenManifest = rewriteManifest(manifest, assetId, targetUrl, playbackBaseUrl);
     const headers = playbackArtifactResponseHeaders(edgeResponse.headers, {
+      artifactPath,
+      cacheable: edgeResponse.ok,
       contentType: "application/vnd.apple.mpegurl",
       rewrittenBody: rewrittenManifest,
     });
@@ -264,7 +266,10 @@ async function artifactResponseFromEdge(
     });
   }
 
-  const headers = playbackArtifactResponseHeaders(edgeResponse.headers);
+  const headers = playbackArtifactResponseHeaders(edgeResponse.headers, {
+    artifactPath,
+    cacheable: edgeResponse.ok,
+  });
   if (setCookie) headers.append("set-cookie", setCookie);
   return new Response(edgeResponse.body, {
     status: edgeResponse.status,
