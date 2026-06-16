@@ -11,6 +11,7 @@ type NavLink = { label: string; href: string; external?: boolean };
 const defaultNav: NavLink[] = [
   { label: "Features", href: "/features" },
   { label: "Performance", href: "/performance" },
+  { label: "Benchmarks", href: "/benchmarks" },
   { label: "Pricing", href: "/pricing" },
   { label: "Docs", href: "/docs" },
   { label: "GitHub", href: "https://github.com/CapSoftware/Rend", external: true },
