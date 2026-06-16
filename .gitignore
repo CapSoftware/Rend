@@ -15,6 +15,7 @@ docs/*
 !docs/openapi/*.json
 !docs/templates/
 !docs/templates/*.yml
+!docs/rend-abr-ladder-plan.md
 
 # rust
 target/
@@ -49,6 +50,7 @@ dist/
 .DS_Store
 *.pem
 .rend/
+apps/site/.scratch-*.mjs
 
 # debug
 npm-debug.log*
