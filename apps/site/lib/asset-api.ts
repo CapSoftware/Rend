@@ -72,6 +72,15 @@ function siteInternalToken() {
   return isProductionProfile() ? "" : LOCAL_SITE_INTERNAL_TOKEN;
 }
 
+export function assetSiteInternalToken() {
+  return siteInternalToken();
+}
+
+export function publicAssetApiBaseUrl() {
+  const configured = envString("REND_PUBLIC_API_BASE_URL") || envString("REND_API_BASE_URL", DEFAULT_API_BASE_URL);
+  return configured.replace(/\/+$/, "");
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
