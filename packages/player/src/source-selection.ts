@@ -63,5 +63,8 @@ export function selectedSource(
   data: PlaybackSourceData,
   support: HlsSupport
 ): SourceSelection | null {
-  return openerSource(data) ?? hlsSource(data, support) ?? fallbackPrimarySource(data);
+  const hls = hlsSource(data, support);
+  if (data.playable_state === "hls_ready" && hls) return hls;
+
+  return openerSource(data) ?? hls ?? fallbackPrimarySource(data);
 }
