@@ -33,6 +33,33 @@ Run the public launch gate before deploy or promotion; see
 Production dependencies are external managed services: Postgres, Redis,
 S3-compatible object storage, and ClickHouse.
 
+## Browser Media Path
+
+Current production browser playback is still same-origin through the site route:
+
+```txt
+browser
+  -> https://www.rend.so/api/player/{assetId}/artifact/{artifactPath}
+  -> Next.js route handler on the site deployment
+  -> rend-edge /v/{assetId}/{artifactPath}
+  -> edge-local cache or object-storage fill
+```
+
+`GET /api/player/{assetId}` returns same-origin artifact URLs, and the HLS
+manifest response is rewritten so segment URLs also point back through
+`/api/player/{assetId}/artifact/...`. That means Next/Vercel proxying remains in
+the media path for hosted browser playback. Edge headers such as
+`x-rend-cache: HIT`, `x-rend-edge-id`, and `x-rend-region` prove that the
+upstream `rend-edge` served the artifact from its local cache, but the viewer's
+HTTP request still terminates at the site route first.
+
+Do not switch browser playback to direct edge delivery unless it is behind an
+explicit feature flag and the security model is reviewed. A safe direct-edge
+plan must keep playback tokens out of JavaScript-visible URLs, use only
+allowlisted public edge hostnames, preserve the HttpOnly playback credential
+boundary, avoid exposing `/internal/*`, and keep private/authenticated media
+private. Until then, same-origin proxying is the intended production path.
+
 ## Local Docker Topology
 
 `compose.yml` mirrors the production roles with local services:
@@ -184,7 +211,7 @@ Edge:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `REND_EDGE_INTERNAL_TOKEN`
-- `REND_EDGE_WARM_MAX_ARTIFACTS`
+- `REND_EDGE_WARM_MAX_ARTIFACTS` (default `16`; enough for the HLS master, four variant playlists, and the first two segments for each generated tier)
 - `REND_EDGE_MAX_IN_FLIGHT_FILLS`
 - `REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
