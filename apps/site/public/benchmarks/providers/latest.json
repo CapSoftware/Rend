@@ -1,25 +1,21 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-16T14:25:59.114Z",
+  "generatedAt": "2026-06-16T21:22:05.214Z",
   "run": {
-    "id": "20260616T142014Z",
+    "id": "20260616T211627Z",
     "status": "completed",
-    "startedAt": "2026-06-16T14:20:14.515Z",
-    "finishedAt": "2026-06-16T14:25:59.113Z",
+    "startedAt": "2026-06-16T21:16:27.886Z",
+    "finishedAt": "2026-06-16T21:22:05.214Z",
     "region": "daytona-us",
     "regionLabel": "Daytona us (us requested)",
     "runnerKind": "daytona",
-    "runnerLabel": "296ac734-0c8d-4007-96ee-6a68737e5637",
+    "runnerLabel": "9080824d-1b28-488b-b2a8-003c45cc29b8",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
     "providerOrderRandomized": true,
     "providerOrderByRound": [
       [
-        "mux",
-        "rend"
-      ],
-      [
         "rend",
         "mux"
       ],
@@ -30,6 +26,10 @@
       [
         "mux",
         "rend"
+      ],
+      [
+        "rend",
+        "mux"
       ],
       [
         "mux",
@@ -39,7 +39,7 @@
   },
   "source": {
     "urls": {
-      "rend": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
+      "rend": "https://www.rend.so/watch/83971e6c-4fb1-4620-9bfd-6fe71b8b672f?autoplay=1",
       "mux": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk"
     },
     "verification": {
@@ -75,7 +75,7 @@
       "One video does not represent every workload, codec ladder, region, or viewer device.",
       "The harness does not purge or manipulate Mux CDN caches.",
       "The harness does not warm only Rend during direct comparisons.",
-      "Selected resolutions and rendition ladders may differ; current Rend media generation emits one HLS rendition for an asset rather than a 480p/720p/1080p ABR ladder.",
+      "Selected resolutions and rendition ladders may differ; current Rend media generation emits an ABR ladder using the supported 720p/1080p/2k/4k billing tiers.",
       "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals."
     ]
   },
@@ -111,7 +111,7 @@
     {
       "id": "rend",
       "name": "Rend",
-      "url": "https://www.rend.so/watch/63573b06-5a69-43c2-94e8-9338ebec368d",
+      "url": "https://www.rend.so/watch/83971e6c-4fb1-4620-9bfd-6fe71b8b672f?autoplay=1",
       "playerHost": "www.rend.so"
     },
     {
@@ -152,43 +152,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 590.6,
-            "median": 615.1,
-            "p75": 676.4,
-            "p95": 1055.4,
-            "max": 1150.2
+            "min": 449.2,
+            "median": 530.6,
+            "p75": 626.6,
+            "p95": 875.8,
+            "max": 938.1
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 574.3,
-            "median": 601.8,
-            "p75": 646.4,
-            "p95": 1033.1,
-            "max": 1129.8
+            "min": 419.1,
+            "median": 485.2,
+            "p75": 580.7,
+            "p95": 725.3,
+            "max": 761.4
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 598.6,
-            "median": 630.3,
-            "p75": 663.8,
-            "p95": 1050.8,
-            "max": 1147.5
+            "min": 420.4,
+            "median": 486.6,
+            "p75": 581.5,
+            "p95": 726.2,
+            "max": 762.4
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 590.6,
-            "median": 615.1,
-            "p75": 676.4,
-            "p95": 1055.4,
-            "max": 1150.2
+            "min": 449.2,
+            "median": 530.6,
+            "p75": 626.6,
+            "p95": 875.8,
+            "max": 938.1
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30627.2,
-            "median": 30627.8,
-            "p75": 30695.8,
-            "p95": 31073.3,
-            "max": 31167.7
+            "min": 30432.3,
+            "median": 30508,
+            "p75": 30592.2,
+            "p95": 30936.9,
+            "max": 31023.1
           },
           "stallCount": {
             "count": 5,
@@ -231,43 +231,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 494.5,
-            "median": 767.4,
-            "p75": 773.1,
-            "p95": 5612.8,
-            "max": 6822.7
+            "min": 522.7,
+            "median": 604.1,
+            "p75": 667.5,
+            "p95": 787.5,
+            "max": 817.5
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 477.9,
-            "median": 720.6,
-            "p75": 743,
-            "p95": 5569.1,
-            "max": 6775.6
+            "min": 510.8,
+            "median": 579.1,
+            "p75": 639.3,
+            "p95": 748.9,
+            "max": 776.3
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 542,
-            "median": 776.1,
-            "p75": 835.9,
-            "p95": 5633.4,
-            "max": 6832.8
+            "min": 526.9,
+            "median": 619.7,
+            "p75": 654.9,
+            "p95": 787.1,
+            "max": 820.2
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 494.5,
-            "median": 767.4,
-            "p75": 773.1,
-            "p95": 5612.8,
-            "max": 6822.7
+            "min": 522.7,
+            "median": 604.1,
+            "p75": 667.5,
+            "p95": 787.5,
+            "max": 817.5
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30626.5,
-            "median": 30837,
-            "p75": 30880.1,
-            "p95": 35696.8,
-            "max": 36901
+            "min": 30559.5,
+            "median": 30653,
+            "p75": 30689.8,
+            "p95": 30853,
+            "max": 30893.8
           },
           "stallCount": {
             "count": 5,
@@ -310,7 +310,7 @@
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-16T14:25:59.115Z",
+    "checkedAt": "2026-06-16T21:22:05.215Z",
     "patternsVersion": 1,
     "findings": []
   }
