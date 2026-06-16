@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import Effects from "@/components/Effects";
+import { AgentPromptButton } from "@/components/marketing/AgentPromptButton";
 import { ComparisonTable } from "@/components/marketing/ComparisonTable";
 import { features } from "@/components/marketing/feature-data";
 import { ArrowRight, GitHubMark } from "@/components/marketing/Icons";
@@ -15,6 +16,7 @@ import { Container } from "@/components/ui/Container";
 import { Grid } from "@/components/ui/Grid";
 import { Section } from "@/components/ui/Section";
 import { SectionHeading } from "@/components/ui/SectionHeading";
+import { AGENT_PROMPT_CODE, agentResourceLinks } from "@/lib/agent-readiness";
 import { GITHUB_URL, START_HREF } from "@/lib/marketing-pages";
 import { organizationLd, websiteLd } from "@/lib/structured-data";
 
@@ -90,6 +92,15 @@ export default function Home() {
                 <Button href="/docs" size="lg" variant="secondary" className="w-full sm:w-auto">
                   Read the quickstart
                 </Button>
+              </div>
+
+              <div className="animate-rise animate-rise-4 mt-5">
+                <AgentPromptButton
+                  promptCode={AGENT_PROMPT_CODE}
+                  resources={agentResourceLinks}
+                  leadingLabel="or"
+                  size="sm"
+                />
               </div>
             </div>
           </Container>
