@@ -5,6 +5,7 @@ export type UpstreamPlaybackResponse = {
   playback_url?: unknown;
   playback_content_type?: unknown;
   playback_token_expires_at?: unknown;
+  playback_token?: unknown;
   ttl_seconds?: unknown;
   opener_url?: unknown;
   opener_content_type?: unknown;
