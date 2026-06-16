@@ -210,28 +210,50 @@ fn event_record_for_asset(asset_id: &str, sequence: i64, event_type: &str) -> As
 
 fn hls_artifact_records() -> Vec<PlaybackArtifactRecord> {
     vec![
-        artifact_record("opener", "videos/asset-123/opener.mp4", "video/mp4"),
         artifact_record(
             "manifest",
             "videos/asset-123/hls/master.m3u8",
             "application/vnd.apple.mpegurl",
         ),
         artifact_record(
+            "manifest",
+            "videos/asset-123/hls/720p/index.m3u8",
+            "application/vnd.apple.mpegurl",
+        ),
+        artifact_record(
+            "manifest",
+            "videos/asset-123/hls/1080p/index.m3u8",
+            "application/vnd.apple.mpegurl",
+        ),
+        artifact_record(
             "segment",
-            "videos/asset-123/hls/segment_00002.ts",
+            "videos/asset-123/hls/720p/segment_00002.ts",
             "video/mp2t",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/segment_00000.ts",
+            "videos/asset-123/hls/720p/segment_00000.ts",
             "video/mp2t",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/segment_00001.ts",
+            "videos/asset-123/hls/720p/segment_00001.ts",
+            "video/mp2t",
+        ),
+        artifact_record(
+            "segment",
+            "videos/asset-123/hls/1080p/segment_00000.ts",
             "video/mp2t",
         ),
     ]
+}
+
+fn opener_artifact_records() -> Vec<PlaybackArtifactRecord> {
+    vec![artifact_record(
+        "opener",
+        "videos/asset-123/opener.mp4",
+        "video/mp4",
+    )]
 }
 
 async fn route_response(app: Router, path: &str, auth: Option<&str>) -> Response {
@@ -1141,7 +1163,7 @@ fn playback_bootstrap_ready_asset_without_artifact_returns_404() {
 }
 
 #[test]
-fn playback_bootstrap_hls_ready_returns_manifest_opener_and_segment_hints() {
+fn playback_bootstrap_hls_ready_returns_manifest_and_ladder_prefetch_hints() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
         &hls_artifact_records(),
@@ -1162,11 +1184,8 @@ fn playback_bootstrap_hls_ready_returns_manifest_opener_and_segment_hints() {
         response.playback_content_type.as_deref(),
         Some("application/vnd.apple.mpegurl")
     );
-    assert_eq!(
-        response.opener_url.as_deref().map(url_without_token),
-        Some("http://127.0.0.1:4100/v/asset-123/opener.mp4".to_owned())
-    );
-    assert_eq!(response.opener_content_type.as_deref(), Some("video/mp4"));
+    assert!(response.opener_url.is_none());
+    assert!(response.opener_content_type.is_none());
     assert_eq!(
         response.manifest_url.as_deref().map(url_without_token),
         Some("http://127.0.0.1:4100/v/asset-123/hls/master.m3u8".to_owned())
@@ -1174,12 +1193,15 @@ fn playback_bootstrap_hls_ready_returns_manifest_opener_and_segment_hints() {
     assert_eq!(response.prefetch_hints.len(), 2);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/segment_00000.ts"
+        "hls/720p/index.m3u8"
     );
-    assert_eq!(response.prefetch_hints[0].content_type, "video/mp2t");
+    assert_eq!(
+        response.prefetch_hints[0].content_type,
+        "application/vnd.apple.mpegurl"
+    );
     assert_eq!(
         response.prefetch_hints[1].artifact_path,
-        "hls/segment_00001.ts"
+        "hls/720p/segment_00000.ts"
     );
 }
 
@@ -1187,7 +1209,7 @@ fn playback_bootstrap_hls_ready_returns_manifest_opener_and_segment_hints() {
 fn playback_bootstrap_opener_ready_returns_opener_primary_without_manifest() {
     let response = playback_bootstrap_response(
         Some(asset_record("opener_ready")),
-        &hls_artifact_records(),
+        &opener_artifact_records(),
         "http://127.0.0.1:4100",
         &test_issuer(),
         2,
@@ -1260,7 +1282,7 @@ fn playback_bootstrap_prefetch_hints_are_bounded() {
     assert_eq!(response.prefetch_hints.len(), 1);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/segment_00000.ts"
+        "hls/720p/index.m3u8"
     );
 }
 
@@ -1320,21 +1342,83 @@ fn edge_warm_request_is_absent_when_no_artifacts_are_selected() {
 }
 
 #[test]
-fn edge_warm_artifact_paths_select_opener_manifest_and_first_segments() {
+fn edge_warm_artifact_paths_prioritize_manifest_low_playlist_and_first_segments() {
     let generated = vec![
-        "hls/segment_00002.ts".to_owned(),
-        "hls/segment_00000.ts".to_owned(),
+        "hls/master.m3u8".to_owned(),
+        "hls/1080p/index.m3u8".to_owned(),
+        "hls/720p/segment_00002.ts".to_owned(),
+        "hls/720p/segment_00000.ts".to_owned(),
         "thumbnail.jpg".to_owned(),
-        "hls/segment_00001.ts".to_owned(),
+        "hls/720p/index.m3u8".to_owned(),
+        "hls/720p/segment_00001.ts".to_owned(),
+        "hls/1080p/segment_00000.ts".to_owned(),
     ];
 
     assert_eq!(
         edge_warm_artifact_paths("hls_ready", &generated, 4),
         vec![
-            "opener.mp4".to_owned(),
             "hls/master.m3u8".to_owned(),
-            "hls/segment_00000.ts".to_owned(),
-            "hls/segment_00001.ts".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
+            "hls/720p/segment_00001.ts".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn edge_warm_artifact_paths_include_opener_only_when_present_and_hls_budget_remains() {
+    let generated = vec![
+        "hls/master.m3u8".to_owned(),
+        "hls/720p/index.m3u8".to_owned(),
+        "hls/720p/segment_00000.ts".to_owned(),
+        "opener.mp4".to_owned(),
+    ];
+
+    assert_eq!(
+        edge_warm_artifact_paths("hls_ready", &generated, 4),
+        vec![
+            "hls/master.m3u8".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
+            "opener.mp4".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn edge_warm_artifact_paths_default_budget_covers_full_ladder_startup() {
+    let generated = vec![
+        "hls/master.m3u8".to_owned(),
+        "hls/4k/segment_00001.ts".to_owned(),
+        "hls/720p/segment_00001.ts".to_owned(),
+        "hls/1080p/index.m3u8".to_owned(),
+        "hls/2k/segment_00000.ts".to_owned(),
+        "hls/720p/index.m3u8".to_owned(),
+        "hls/4k/index.m3u8".to_owned(),
+        "hls/1080p/segment_00000.ts".to_owned(),
+        "hls/2k/index.m3u8".to_owned(),
+        "hls/720p/segment_00000.ts".to_owned(),
+        "hls/1080p/segment_00001.ts".to_owned(),
+        "hls/4k/segment_00000.ts".to_owned(),
+        "hls/2k/segment_00001.ts".to_owned(),
+    ];
+
+    assert_eq!(
+        edge_warm_artifact_paths("hls_ready", &generated, DEFAULT_EDGE_WARM_MAX_ARTIFACTS),
+        vec![
+            "hls/master.m3u8".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
+            "hls/720p/segment_00001.ts".to_owned(),
+            "hls/1080p/index.m3u8".to_owned(),
+            "hls/1080p/segment_00000.ts".to_owned(),
+            "hls/1080p/segment_00001.ts".to_owned(),
+            "hls/2k/index.m3u8".to_owned(),
+            "hls/2k/segment_00000.ts".to_owned(),
+            "hls/2k/segment_00001.ts".to_owned(),
+            "hls/4k/index.m3u8".to_owned(),
+            "hls/4k/segment_00000.ts".to_owned(),
+            "hls/4k/segment_00001.ts".to_owned(),
         ]
     );
 }
@@ -1497,8 +1581,11 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
         max_artifacts: 3,
     };
     let generated = vec![
-        "hls/segment_00001.ts".to_owned(),
-        "hls/segment_00000.ts".to_owned(),
+        "hls/master.m3u8".to_owned(),
+        "hls/1080p/index.m3u8".to_owned(),
+        "hls/720p/segment_00001.ts".to_owned(),
+        "hls/720p/index.m3u8".to_owned(),
+        "hls/720p/segment_00000.ts".to_owned(),
     ];
 
     maybe_warm_edge(
@@ -1528,9 +1615,9 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
     assert_eq!(
         request.artifact_paths,
         vec![
-            "opener.mp4".to_owned(),
             "hls/master.m3u8".to_owned(),
-            "hls/segment_00000.ts".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
         ]
     );
 }
