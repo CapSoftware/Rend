@@ -1,14 +1,21 @@
 import type { Metadata } from "next";
-import { SiteHeader } from "@/components/marketing/SiteHeader";
+import type { ReactNode } from "react";
+import Effects from "@/components/Effects";
+import { AgentPromptButton } from "@/components/marketing/AgentPromptButton";
+import { ArrowRight, GitHubMark } from "@/components/marketing/Icons";
 import { SiteFooter } from "@/components/marketing/SiteFooter";
-import {
-  ogImageSize,
-  siteLocale,
-  siteName,
-} from "@/lib/seo";
+import { SiteHeader } from "@/components/marketing/SiteHeader";
+import { Button } from "@/components/ui/Button";
+import { cn } from "@/components/ui/cn";
+import { Container } from "@/components/ui/Container";
+import { agentResourceLinks } from "@/lib/agent-readiness";
+import { GITHUB_URL } from "@/lib/marketing-pages";
+import { ogImageSize, siteLocale, siteName } from "@/lib/seo";
 import DocsCommandPalette from "../../components/DocsCommandPalette";
 import DocsCopyButton from "../../components/DocsCopyButton";
+import { DocsSidebarNav } from "../../components/DocsSidebarNav";
 import {
+  AGENT_PROMPT_CODE,
   AUTH_HEADER_CODE,
   CURL_UPLOAD_CODE,
   LOCAL_DOCKER_CODE,
@@ -69,276 +76,394 @@ function CodeBlock({
   title: string;
 }) {
   return (
-    <figure className="docs-code-block">
-      <figcaption>
-        <span>{title}</span>
+    <figure className="my-6 overflow-hidden border border-line bg-card">
+      <figcaption className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+        <span className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px] font-medium text-muted">
+          {title}
+        </span>
         <DocsCopyButton value={code} />
       </figcaption>
-      <pre tabIndex={0}>
+      <pre
+        tabIndex={0}
+        className="max-h-[440px] overflow-auto bg-[#11100e] px-4 py-4 font-mono text-[12.5px] leading-[1.7] text-[#f7f2e8] outline-none [tab-size:2] focus-visible:ring-2 focus-visible:ring-ink/40 focus-visible:ring-inset"
+      >
         <code className={`language-${language}`}>{code}</code>
       </pre>
     </figure>
   );
 }
 
-function DocsNav({ label }: { label: string }) {
+function DocSection({
+  id,
+  label,
+  title,
+  children,
+}: {
+  id: string;
+  label: string;
+  title: string;
+  children: ReactNode;
+}) {
   return (
-    <nav aria-label={label} className="docs-nav-list">
-      {docsNavItems.map((item) => (
-        <a href={item.href} key={item.href}>
-          <span>{item.title}</span>
-          <small>{item.description}</small>
-        </a>
-      ))}
-    </nav>
+    <section id={id} aria-labelledby={`${id}-title`} className="scroll-mt-28">
+      <p className="eyebrow mb-4">{label}</p>
+      <h2
+        id={`${id}-title`}
+        className="font-head text-[clamp(25px,3.6vw,33px)] leading-[1.16] tracking-[-0.01em] text-ink"
+      >
+        {title}
+      </h2>
+      <div className="mt-5">{children}</div>
+    </section>
   );
 }
 
+const quickstartSteps = [
+  <>Sign in at <code>/login</code> with an email code. Rend creates your workspace automatically.</>,
+  <>Choose a plan from the Billing page. Billable uploads and API-key creation stay disabled until billing is ready.</>,
+  <>Create an API key from the Rend dashboard with <code>upload</code>, <code>read</code>, <code>delete</code>, and <code>analytics</code> scopes.</>,
+  <>Upload a video with <code>POST /v1/videos</code> or <code>client.uploadAsset</code>.</>,
+  <>Poll the asset until <code>playable_state</code> is <code>opener_ready</code> or <code>hls_ready</code>.</>,
+  <>Fetch <code>/api/player/{"{assetId}"}</code> from the site and embed the returned same-origin source.</>,
+  <>Delete the asset with <code>DELETE /v1/assets/{"{assetId}"}</code> when it is no longer needed.</>,
+];
+
+const authScopes = [
+  { scope: "upload", allows: "Upload a source video." },
+  {
+    scope: "read",
+    allows: "List assets, fetch asset details, poll lifecycle events, and bootstrap playback.",
+  },
+  { scope: "delete", allows: "Delete an asset and its Rend-owned origin objects." },
+  { scope: "analytics", allows: "Fetch playback request analytics." },
+];
+
+const errorStates: { state: string; where: ReactNode; meaning: string }[] = [
+  {
+    state: "billing_required",
+    where: "Dashboard API key creation returns 402",
+    meaning: "The workspace needs an active plan before creating API keys.",
+  },
+  {
+    state: "limit_exceeded",
+    where: <><code>POST /v1/videos</code> returns 403</>,
+    meaning: "Billing is missing, inactive, or out of plan balance before the upload body is accepted.",
+  },
+  {
+    state: "not_playable",
+    where: <><code>GET /api/player/{"{assetId}"}</code> returns 409</>,
+    meaning: "The asset exists, but no opener or HLS artifact is ready yet.",
+  },
+  {
+    state: "suspended",
+    where: "API calls return 403, or asset summaries include suspension fields",
+    meaning: "The asset or organization is blocked from normal API use.",
+  },
+  {
+    state: "unauthorized",
+    where: "API calls return 401",
+    meaning: "The bearer API key is missing, malformed, revoked, or invalid.",
+  },
+  {
+    state: "upload too large",
+    where: <><code>POST /v1/videos</code> returns 413</>,
+    meaning: "The upload exceeds the configured maximum size.",
+  },
+  {
+    state: "deleted",
+    where: "Asset reads or playback return unavailable/not found",
+    meaning: "The asset was deleted; bootstrap and artifact paths should no longer play.",
+  },
+];
+
 export default function DocsPage() {
   return (
-    <div className="docs-page">
+    <div className="overflow-x-clip">
+      <Effects />
       <SiteHeader>
         <DocsCommandPalette items={docsCommandItems} />
       </SiteHeader>
 
-      <main className="docs-main">
-        <section className="docs-intro" aria-labelledby="docs-title">
-          <p className="docs-kicker">Rend docs</p>
-          <h1 id="docs-title">Upload video, get a playable Rend URL.</h1>
-          <p>
-            This is the public integration path for Rend: API-key control-plane calls for assets,
-            and anonymous same-origin site routes for browser playback.
-          </p>
+      <main>
+        {/* ------------------------------- Hero ------------------------------- */}
+        <section className="relative pb-10 pt-10 sm:pt-14 md:pb-12 md:pt-16">
+          <Container size="wide">
+            <div className="max-w-[760px]">
+              <p className="eyebrow animate-rise mb-5">Documentation</p>
+              <h1 className="animate-rise animate-rise-2 text-[clamp(32px,6vw,52px)] leading-[1.05] tracking-[-0.02em]">
+                Upload a video, get a playable URL
+              </h1>
+              <p className="animate-rise animate-rise-3 mt-5 max-w-[640px] text-[17px] leading-[1.62] text-muted">
+                This is the public integration path for Rend: API-key control-plane calls for assets,
+                and anonymous same-origin site routes for browser playback.
+              </p>
+              <div className="animate-rise animate-rise-4 mt-8 flex flex-col gap-3 sm:flex-row">
+                <Button href="#quickstart" size="md">
+                  Start the quickstart <ArrowRight />
+                </Button>
+                <Button href={GITHUB_URL} external variant="secondary" size="md">
+                  <GitHubMark />
+                  SDK on GitHub
+                </Button>
+              </div>
+              <div className="animate-rise animate-rise-5 mt-5">
+                <AgentPromptButton
+                  promptCode={AGENT_PROMPT_CODE}
+                  resources={agentResourceLinks}
+                  leadingLabel="or"
+                />
+              </div>
+            </div>
+          </Container>
         </section>
 
-        <details className="docs-mobile-nav">
-          <summary>Docs menu</summary>
-          <DocsNav label="Mobile docs sections" />
-        </details>
+        {/* ------------------------------- Shell ------------------------------- */}
+        <Container size="wide" className="pb-[clamp(56px,8vw,96px)]">
+          {/* Mobile section menu */}
+          <details className="mb-8 overflow-hidden rounded-[14px] border border-line bg-card lg:hidden">
+            <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-[14px] font-medium text-ink [&::-webkit-details-marker]:hidden">
+              Browse docs
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </summary>
+            <div className="border-t border-line p-2">
+              <DocsSidebarNav items={docsNavItems} />
+            </div>
+          </details>
 
-        <div className="docs-shell">
-          <aside className="docs-sidebar">
-            <DocsNav label="Docs sections" />
-          </aside>
+          <div className="lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:gap-14 xl:grid-cols-[228px_minmax(0,1fr)] xl:gap-20">
+            <aside className="hidden lg:block">
+              <div className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto pb-8">
+                <p className="mb-3 px-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-faint">
+                  On this page
+                </p>
+                <DocsSidebarNav items={docsNavItems} />
+              </div>
+            </aside>
 
-          <article className="docs-content">
-            <section id="quickstart" aria-labelledby="quickstart-title">
-              <p className="docs-section-label">Quickstart</p>
-              <h2 id="quickstart-title">Sign up, upload, embed, delete</h2>
-              <ol className="docs-steps">
-                <li>Sign in at <code>/login</code> with an email code. Rend creates your workspace automatically.</li>
-                <li>Choose a plan from the Billing page. Billable uploads and API-key creation stay disabled until billing is ready.</li>
-                <li>Create an API key from the Rend dashboard with <code>upload</code>, <code>read</code>, <code>delete</code>, and <code>analytics</code> scopes.</li>
-                <li>Upload a video with <code>POST /v1/videos</code> or <code>client.uploadAsset</code>.</li>
-                <li>Poll the asset until <code>playable_state</code> is <code>opener_ready</code> or <code>hls_ready</code>.</li>
-                <li>Fetch <code>/api/player/{"{assetId}"}</code> from the site and embed the returned same-origin source.</li>
-                <li>Delete the asset with <code>DELETE /v1/assets/{"{assetId}"}</code> when it is no longer needed.</li>
-              </ol>
-              <CodeBlock code={QUICKSTART_SDK_CODE} language="ts" title="quickstart.ts" />
-            </section>
+            <article className="docs-prose min-w-0 max-w-[768px] space-y-16 sm:space-y-[72px]">
+              <DocSection id="quickstart" label="Quickstart" title="Sign up, upload, embed, delete">
+                <ol className="docs-steps">
+                  {quickstartSteps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ol>
+                <CodeBlock code={QUICKSTART_SDK_CODE} language="ts" title="quickstart.ts" />
+              </DocSection>
 
-            <section id="sdk-guide" aria-labelledby="sdk-guide-title">
-              <p className="docs-section-label">SDK</p>
-              <h2 id="sdk-guide-title">Use the generated TypeScript SDK</h2>
-              <p>
-                The SDK lives in{" "}
-                <a href="https://github.com/CapSoftware/Rend/tree/main/packages/sdk">packages/sdk</a>
-                {" "}and is generated from the public OpenAPI contract. It uses the API base URL for
-                authenticated asset calls and the site base URL for browser-safe playback bootstrap.
-              </p>
-              <ul>
-                <li><code>apiKey</code> is sent only to the API server as a bearer token.</li>
-                <li><code>apiBaseUrl</code> defaults to <code>https://api.rend.so</code>.</li>
-                <li><code>siteBaseUrl</code> defaults to <code>https://rend.so</code>.</li>
-                <li><code>waitForPlayableAsset</code> returns when the asset can be played or throws on timeout.</li>
-              </ul>
-              <CodeBlock code={SDK_GUIDE_CODE} language="ts" title="sdk-usage.ts" />
-            </section>
+              <DocSection id="agent-setup" label="Agents" title="Hand Rend to a coding agent">
+                <p>
+                  Rend exposes a small, stable surface for agents: <a href="/llms.txt">llms.txt</a>
+                  {" "}for discovery, <a href="/llms-full.txt">llms-full.txt</a> for larger context
+                  windows, <a href="/openapi.json">OpenAPI JSON</a> for the public contract, and the
+                  generated{" "}
+                  <a href="https://github.com/CapSoftware/Rend/tree/main/packages/sdk">TypeScript SDK</a>.
+                </p>
+                <p>
+                  Use this prompt when you want an agent to add upload, playback, error handling and a
+                  cleanup smoke test to an app without exposing API keys in browser code.
+                </p>
+                <div className="my-6">
+                  <AgentPromptButton promptCode={AGENT_PROMPT_CODE} resources={agentResourceLinks} />
+                </div>
+                <ul>
+                  <li>Authenticated API calls go to <code>https://api.rend.so</code> with bearer auth.</li>
+                  <li>Browser playback uses <code>https://rend.so/embed/{"{assetId}"}</code> or <code>/api/player/{"{assetId}"}</code> on the site origin.</li>
+                  <li>Agents should prefer the SDK for app code and OpenAPI for generated tools.</li>
+                </ul>
+              </DocSection>
 
-            <section id="curl-guide" aria-labelledby="curl-guide-title">
-              <p className="docs-section-label">curl</p>
-              <h2 id="curl-guide-title">Use the public API directly</h2>
-              <p>
-                The public control-plane shape is <code>/v1/videos</code>, <code>/v1/assets</code>,
-                <code>/v1/assets/{"{assetId}"}/events</code>, and <code>/v1/assets/{"{assetId}"}/analytics/playback</code>.
-                Browser playback uses the site route <code>/api/player/{"{assetId}"}</code>.
-              </p>
-              <CodeBlock code={CURL_UPLOAD_CODE} language="sh" title="curl-flow.sh" />
-            </section>
-
-            <section id="auth-api-keys" aria-labelledby="auth-api-keys-title">
-              <p className="docs-section-label">Auth</p>
-              <h2 id="auth-api-keys-title">API keys and scopes</h2>
-              <p>
-                Authenticated API calls use a bearer API key. Store the key server-side, pass it to
-                the SDK as <code>apiKey</code>, and avoid exposing it in browser bundles.
-              </p>
-              <CodeBlock code={AUTH_HEADER_CODE} language="http" title="auth-header.txt" />
-              <table className="docs-table">
-                <thead>
-                  <tr>
-                    <th>Scope</th>
-                    <th>Allows</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>upload</td>
-                    <td>Upload a source video.</td>
-                  </tr>
-                  <tr>
-                    <td>read</td>
-                    <td>List assets, fetch asset details, poll lifecycle events, and bootstrap playback.</td>
-                  </tr>
-                  <tr>
-                    <td>delete</td>
-                    <td>Delete an asset and its Rend-owned origin objects.</td>
-                  </tr>
-                  <tr>
-                    <td>analytics</td>
-                    <td>Fetch playback request analytics.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </section>
-
-            <section id="playback-embed" aria-labelledby="playback-embed-title">
-              <p className="docs-section-label">Playback</p>
-              <h2 id="playback-embed-title">Tokenless same-origin browser playback</h2>
-              <p>
-                Browser code does not call the API server for playback. Call the site bootstrap route
-                and use the returned same-origin artifact URL in a <code>video</code> element or the Rend player.
-                The JSON response does not expose provider URLs or signed query strings.
-              </p>
-              <CodeBlock code={PLAYBACK_BOOTSTRAP_CODE} language="json" title="playback-bootstrap.json" />
-              <ul>
-                <li>Use <code>manifest_url</code> first when present, then <code>playback_url</code>, then <code>opener_url</code>.</li>
-                <li>Artifact URLs are relative to the Rend site origin.</li>
-                <li>The hosted embed page is <code>/embed/{"{assetId}"}</code> and <code>/watch/{"{assetId}"}</code> aliases the same player.</li>
-              </ul>
-            </section>
-
-            <section id="billing-usage" aria-labelledby="billing-usage-title">
-              <p className="docs-section-label">Billing</p>
-              <h2 id="billing-usage-title">Autumn billing and usage limits</h2>
-              <p>
-                Hosted Rend uses Autumn as the source of truth for plans, credits, balances,
-                checkout, and the billing portal. New workspaces are created on first email-OTP
-                sign-in and synced to Autumn by organization ID. API-key creation and uploads can
-                return <code>billing_required</code> or <code>limit_exceeded</code> until a plan is active
-                and within limits; upload denials happen before the source body is accepted.
-              </p>
-              <ul>
-                <li>Customer-facing delivery usage is tracked as delivered video seconds by <code>720p</code>, <code>1080p</code>, <code>2K</code>, and <code>4K</code> tier.</li>
-                <li>Customer-facing storage usage is tracked as active asset duration prorated into second-months by the same tiers.</li>
-                <li>Upload/source bytes remain local safety limits and are not customer-facing Autumn meters.</li>
-                <li>Already-issued playback artifact URLs do not call Autumn, Postgres, or the Rend API on the playback hot path.</li>
-              </ul>
-            </section>
-
-            <section id="error-states" aria-labelledby="error-states-title">
-              <p className="docs-section-label">Errors</p>
-              <h2 id="error-states-title">Common states and responses</h2>
-              <table className="docs-table">
-                <thead>
-                  <tr>
-                    <th>State</th>
-                    <th>Where</th>
-                    <th>Meaning</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>billing_required</td>
-                    <td>Dashboard API key creation returns 402</td>
-                    <td>The workspace needs an active plan before creating API keys.</td>
-                  </tr>
-                  <tr>
-                    <td>limit_exceeded</td>
-                    <td><code>POST /v1/videos</code> returns 403</td>
-                    <td>Billing is missing, inactive, or out of plan balance before the upload body is accepted.</td>
-                  </tr>
-                  <tr>
-                    <td>not_playable</td>
-                    <td><code>GET /api/player/{"{assetId}"}</code> returns 409</td>
-                    <td>The asset exists, but no opener or HLS artifact is ready yet.</td>
-                  </tr>
-                  <tr>
-                    <td>suspended</td>
-                    <td>API calls return 403, or asset summaries include suspension fields</td>
-                    <td>The asset or organization is blocked from normal API use.</td>
-                  </tr>
-                  <tr>
-                    <td>unauthorized</td>
-                    <td>API calls return 401</td>
-                    <td>The bearer API key is missing, malformed, revoked, or invalid.</td>
-                  </tr>
-                  <tr>
-                    <td>upload too large</td>
-                    <td><code>POST /v1/videos</code> returns 413</td>
-                    <td>The upload exceeds the configured maximum size.</td>
-                  </tr>
-                  <tr>
-                    <td>deleted</td>
-                    <td>Asset reads or playback return unavailable/not found</td>
-                    <td>The asset was deleted; bootstrap and artifact paths should no longer play.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </section>
-
-            <section id="local-docker" aria-labelledby="local-docker-title">
-              <p className="docs-section-label">Local</p>
-              <h2 id="local-docker-title">Local Docker development path</h2>
-              <p>
-                The local stack runs Postgres, Redis, ClickHouse, MinIO, the API, media worker, and
-                edge service. Create API keys through the local dashboard or run the SDK smoke, which
-                creates a local smoke key when <code>REND_API_KEY</code> is not set.
-              </p>
-              <CodeBlock code={LOCAL_DOCKER_CODE} language="sh" title="local-dev.sh" />
-            </section>
-
-            <section id="production-notes" aria-labelledby="production-notes-title">
-              <p className="docs-section-label">Production</p>
-              <h2 id="production-notes-title">Production profile notes</h2>
-              <ul>
-                <li>Use <code>REND_ENV=production</code> for hosted production services.</li>
-                <li>Set <code>REND_SELF_SERVE_SIGNUP_ENABLED=true</code> intentionally for public self-serve signup.</li>
-                <li>Configure Better Auth with secure production secrets and Resend email delivery.</li>
-                <li>Keep API keys and provider credentials out of <code>NEXT_PUBLIC_*</code> values.</li>
-                <li>Set <code>REND_API_BASE_URL</code> for server-side API calls and <code>REND_SITE_BASE_URL</code> for playback bootstrap clients.</li>
-                <li>Run <code>bun run launch:self-serve-readiness</code> and <code>bun run launch:gate -- --mode production-check</code> before public V1 launch.</li>
-                <li>Run <code>bun run openapi:check</code> after changing the public contract or SDK generator.</li>
-              </ul>
-            </section>
-
-            <section id="reference" aria-labelledby="reference-title">
-              <p className="docs-section-label">Reference</p>
-              <h2 id="reference-title">OpenAPI and SDK source</h2>
-              <ul>
-                <li>
-                  <a href="/openapi.json">OpenAPI JSON</a> is the canonical public API contract served by the site.
-                </li>
-                <li>
+              <DocSection id="sdk-guide" label="SDK" title="Use the generated TypeScript SDK">
+                <p>
+                  The SDK lives in{" "}
                   <a href="https://github.com/CapSoftware/Rend/tree/main/packages/sdk">packages/sdk</a>
-                  {" "}contains the generated TypeScript client.
-                </li>
-                <li>
-                  <a href="/llms.txt">llms.txt</a> lists stable docs anchors for agents.
-                </li>
-              </ul>
-            </section>
-          </article>
+                  {" "}and is generated from the public OpenAPI contract. It uses the API base URL for
+                  authenticated asset calls and the site base URL for browser-safe playback bootstrap.
+                </p>
+                <ul>
+                  <li><code>apiKey</code> is sent only to the API server as a bearer token.</li>
+                  <li><code>apiBaseUrl</code> defaults to <code>https://api.rend.so</code>.</li>
+                  <li><code>siteBaseUrl</code> defaults to <code>https://rend.so</code>.</li>
+                  <li><code>waitForPlayableAsset</code> returns when the asset can be played or throws on timeout.</li>
+                </ul>
+                <CodeBlock code={SDK_GUIDE_CODE} language="ts" title="sdk-usage.ts" />
+              </DocSection>
 
-          <aside className="docs-toc" aria-label="On this page">
-            <p>On this page</p>
-            {docsNavItems.map((item) => (
-              <a href={item.href} key={item.href}>
-                {item.title}
-              </a>
-            ))}
-          </aside>
-        </div>
+              <DocSection id="curl-guide" label="curl" title="Use the public API directly">
+                <p>
+                  The public control-plane shape is <code>/v1/videos</code>, <code>/v1/assets</code>,
+                  {" "}<code>/v1/assets/{"{assetId}"}/events</code>, and{" "}
+                  <code>/v1/assets/{"{assetId}"}/analytics/playback</code>. Browser playback uses the
+                  site route <code>/api/player/{"{assetId}"}</code>.
+                </p>
+                <CodeBlock code={CURL_UPLOAD_CODE} language="sh" title="curl-flow.sh" />
+              </DocSection>
+
+              <DocSection id="auth-api-keys" label="Auth" title="API keys and scopes">
+                <p>
+                  Authenticated API calls use a bearer API key. Store the key server-side, pass it to
+                  the SDK as <code>apiKey</code>, and avoid exposing it in browser bundles.
+                </p>
+                <CodeBlock code={AUTH_HEADER_CODE} language="http" title="auth-header.txt" />
+                <div className="my-6 overflow-hidden rounded-[14px] border border-line bg-card">
+                  <table className="w-full border-separate border-spacing-0 text-left">
+                    <thead>
+                      <tr className="bg-bg-sunken/60">
+                        <th scope="col" className="px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+                          Scope
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+                          Allows
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {authScopes.map((row, i) => (
+                        <tr key={row.scope}>
+                          <th
+                            scope="row"
+                            className={cn(
+                              "whitespace-nowrap px-4 py-3.5 text-left align-top font-mono text-[13px] font-medium text-ink",
+                              i !== 0 && "border-t border-line-soft",
+                            )}
+                          >
+                            {row.scope}
+                          </th>
+                          <td
+                            className={cn(
+                              "px-4 py-3.5 align-top text-[14.5px] leading-[1.6] text-ink-soft",
+                              i !== 0 && "border-t border-line-soft",
+                            )}
+                          >
+                            {row.allows}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </DocSection>
+
+              <DocSection id="playback-embed" label="Playback" title="Tokenless same-origin browser playback">
+                <p>
+                  Browser code does not call the API server for playback. Call the site bootstrap route
+                  and use the returned same-origin artifact URL in a <code>video</code> element or the
+                  Rend player. The JSON response does not expose provider URLs or signed query strings.
+                </p>
+                <CodeBlock code={PLAYBACK_BOOTSTRAP_CODE} language="json" title="playback-bootstrap.json" />
+                <ul>
+                  <li>Use <code>manifest_url</code> first when present, then <code>playback_url</code>, then <code>opener_url</code>.</li>
+                  <li>Artifact URLs are relative to the Rend site origin.</li>
+                  <li>The hosted embed page is <code>/embed/{"{assetId}"}</code> and <code>/watch/{"{assetId}"}</code> aliases the same player.</li>
+                </ul>
+              </DocSection>
+
+              <DocSection id="billing-usage" label="Billing" title="Autumn billing and usage limits">
+                <p>
+                  Hosted Rend uses Autumn as the source of truth for plans, credits, balances,
+                  checkout, and the billing portal. New workspaces are created on first email-OTP
+                  sign-in and synced to Autumn by organization ID. API-key creation and uploads can
+                  return <code>billing_required</code> or <code>limit_exceeded</code> until a plan is
+                  active and within limits; upload denials happen before the source body is accepted.
+                </p>
+                <ul>
+                  <li>Customer-facing delivery usage is tracked as delivered video seconds by <code>720p</code>, <code>1080p</code>, <code>2K</code>, and <code>4K</code> tier.</li>
+                  <li>Customer-facing storage usage is tracked as active asset duration prorated into second-months by the same tiers.</li>
+                  <li>Upload/source bytes remain local safety limits and are not customer-facing Autumn meters.</li>
+                  <li>Already-issued playback artifact URLs do not call Autumn, Postgres, or the Rend API on the playback hot path.</li>
+                </ul>
+              </DocSection>
+
+              <DocSection id="error-states" label="Errors" title="Common states and responses">
+                <div className="my-6 overflow-hidden rounded-[14px] border border-line bg-card">
+                  <table className="w-full border-separate border-spacing-0 text-left">
+                    <thead>
+                      <tr className="bg-bg-sunken/60">
+                        <th scope="col" className="px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+                          State
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+                          Where
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+                          Meaning
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {errorStates.map((row, i) => (
+                        <tr key={row.state}>
+                          <th
+                            scope="row"
+                            className={cn(
+                              "whitespace-nowrap px-4 py-3.5 text-left align-top font-mono text-[13px] font-medium text-ink",
+                              i !== 0 && "border-t border-line-soft",
+                            )}
+                          >
+                            {row.state}
+                          </th>
+                          <td
+                            className={cn(
+                              "px-4 py-3.5 align-top text-[14px] leading-[1.55] text-ink-soft",
+                              i !== 0 && "border-t border-line-soft",
+                            )}
+                          >
+                            {row.where}
+                          </td>
+                          <td
+                            className={cn(
+                              "px-4 py-3.5 align-top text-[14px] leading-[1.55] text-ink-soft",
+                              i !== 0 && "border-t border-line-soft",
+                            )}
+                          >
+                            {row.meaning}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </DocSection>
+
+              <DocSection id="local-docker" label="Local" title="Local Docker development path">
+                <p>
+                  The local stack runs Postgres, Redis, ClickHouse, MinIO, the API, media worker, and
+                  edge service. Create API keys through the local dashboard or run the SDK smoke, which
+                  creates a local smoke key when <code>REND_API_KEY</code> is not set.
+                </p>
+                <CodeBlock code={LOCAL_DOCKER_CODE} language="sh" title="local-dev.sh" />
+              </DocSection>
+
+              <DocSection id="production-notes" label="Production" title="Production profile notes">
+                <ul>
+                  <li>Use <code>REND_ENV=production</code> for hosted production services.</li>
+                  <li>Set <code>REND_SELF_SERVE_SIGNUP_ENABLED=true</code> intentionally for public self-serve signup.</li>
+                  <li>Configure Better Auth with secure production secrets and Resend email delivery.</li>
+                  <li>Keep API keys and provider credentials out of <code>NEXT_PUBLIC_*</code> values.</li>
+                  <li>Set <code>REND_API_BASE_URL</code> for server-side API calls and <code>REND_SITE_BASE_URL</code> for playback bootstrap clients.</li>
+                  <li>Run <code>bun run launch:self-serve-readiness</code> and <code>bun run launch:gate -- --mode production-check</code> before public V1 launch.</li>
+                  <li>Run <code>bun run openapi:check</code> after changing the public contract or SDK generator.</li>
+                </ul>
+              </DocSection>
+
+              <DocSection id="reference" label="Reference" title="OpenAPI and SDK source">
+                <ul>
+                  <li>
+                    <a href="/openapi.json">OpenAPI JSON</a> is the canonical public API contract served by the site.
+                  </li>
+                  <li>
+                    <a href="https://github.com/CapSoftware/Rend/tree/main/packages/sdk">packages/sdk</a>
+                    {" "}contains the generated TypeScript client.
+                  </li>
+                  <li>
+                    <a href="/llms.txt">llms.txt</a> lists stable docs anchors for agents.
+                  </li>
+                </ul>
+              </DocSection>
+            </article>
+          </div>
+        </Container>
       </main>
       <SiteFooter />
     </div>
