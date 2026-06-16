@@ -1,6 +1,12 @@
-export type ClassValue = string | number | false | null | undefined;
+import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
 
-/** Tiny classnames joiner: filters falsy values and joins with spaces. */
+export type { ClassValue };
+
+/**
+ * Merge class names: resolves conditional values (clsx) and dedupes conflicting
+ * Tailwind utilities so a later class wins over an earlier one (tailwind-merge).
+ */
 export function cn(...values: ClassValue[]): string {
-  return values.filter(Boolean).join(" ");
+  return twMerge(clsx(values));
 }
