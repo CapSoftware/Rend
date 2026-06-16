@@ -69,6 +69,7 @@
     "openapi:contract": "bun run --cwd apps/site test:contract",
     "openapi:sdk-test": "bun run --cwd packages/sdk test",
     "sdk:integration-smoke": "node scripts/with-root-env.mjs --profile local bun scripts/sdk-integration-smoke.mjs",
+    "test": "turbo test",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
     "clean": "turbo clean"
@@ -81,8 +82,10 @@
     "postcss": "8.5.15"
   },
   "devDependencies": {
+    "@daytona/sdk": "^0.187.0",
     "dotenv": "^17.4.2",
     "dotenv-expand": "^13.0.0",
+    "playwright": "^1.57.0",
     "turbo": "^2.9.18"
   }
 }
