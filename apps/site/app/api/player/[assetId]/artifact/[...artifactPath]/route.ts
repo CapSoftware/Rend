@@ -5,6 +5,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { assets, organization } from "../../../../../../lib/db/schema.ts";
 import {
   PLAYBACK_COOKIE_NAME,
+  isHlsManifestArtifactPath,
   playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
@@ -23,6 +24,7 @@ type UpstreamPlaybackResponse = {
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
+const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -60,8 +62,14 @@ function normalizeAssetId(value: string) {
 function safeArtifactPath(value: string | undefined) {
   if (!value || value.includes("\\") || value.includes("..")) return undefined;
   if (value === "opener.mp4" || value === "hls/master.m3u8") return value;
-  const segment = value.startsWith("hls/") ? value.slice("hls/".length) : "";
-  return /^segment_[0-9]+\.ts$/.test(segment) ? value : undefined;
+  const parts = value.split("/");
+  if (parts.length === 2 && parts[0] === "hls" && /^segment_[0-9]+\.ts$/.test(parts[1] ?? "")) {
+    return value;
+  }
+  if (parts.length === 3 && parts[0] === "hls" && HLS_RENDITION_NAMES.has(parts[1] ?? "")) {
+    if (parts[2] === "index.m3u8" || /^segment_[0-9]+\.ts$/.test(parts[2] ?? "")) return value;
+  }
+  return undefined;
 }
 
 function artifactPathFromParams(value: string[] | undefined) {
@@ -250,7 +258,7 @@ async function artifactResponseFromEdge(
   playbackBaseUrl: string | null,
   setCookie?: string
 ) {
-  if (artifactPath === "hls/master.m3u8" && edgeResponse.ok) {
+  if (isHlsManifestArtifactPath(artifactPath) && edgeResponse.ok) {
     const manifest = await edgeResponse.text().catch(() => "");
     const rewrittenManifest = rewriteManifest(manifest, assetId, targetUrl, playbackBaseUrl);
     const headers = playbackArtifactResponseHeaders(edgeResponse.headers, {
