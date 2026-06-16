@@ -4,7 +4,9 @@ export type {
   PlaybackBootstrapReady,
   PlaybackBootstrapResponse,
   PlaybackPrefetchHint,
+  RendPlayerPlaybackEngine,
   RendPlayerProps,
+  RendPlayerStartupMode,
   RendPlayerState,
   RendPlayerTimings,
 } from "./rend-player";
