@@ -51,12 +51,14 @@ config and DB-table check. Add `-- --probe-email ops-test@example.com` to send
 one real self-serve OTP request through `/api/auth`; artifacts redact emails,
 provider keys, cookies, headers, and OTP/code values.
 
-The site keeps all Rend API calls server-side, scopes dashboard data by active
-organization, and exposes only sanitized asset, analytics, startup telemetry,
-and tokenless playback proxy data to the browser. Owner/admin users can manage
-org API keys at `/dashboard/api-keys` after billing readiness; API keys are shown
-once, stored hashed, and scoped to upload/read/delete/analytics permissions. The
-local full-flow check is:
+The site keeps dashboard reads/deletes server-side, scopes dashboard data by
+active organization, and exposes only sanitized asset, analytics, startup
+telemetry, and tokenless playback proxy data to the browser. Dashboard uploads
+request a short-lived upload token from `/api/assets/upload-token`, then send the
+video body directly to `REND_PUBLIC_API_BASE_URL` so files do not pass through
+Vercel. Owner/admin users can manage org API keys at `/dashboard/api-keys` after
+billing readiness; API keys are shown once, stored hashed, and scoped to
+upload/read/delete/analytics permissions. The local full-flow check is:
 
 ```bash
 bun run e2e:site-assets
