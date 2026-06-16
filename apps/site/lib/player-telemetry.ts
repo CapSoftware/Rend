@@ -18,9 +18,15 @@ const PHASES = new Set<RendPlayerTelemetryPhase>([
   "player_load",
   "bootstrap_complete",
   "source_selected",
+  "source_handoff",
+  "hls_ready",
+  "hls_level_switch",
+  "hls_fragment_loaded",
   "metadata_loaded",
   "canplay",
   "first_frame",
+  "stall_start",
+  "stall_end",
   "bootstrap_failure",
   "playback_failure",
 ]);
@@ -133,6 +139,24 @@ function safeTiming(value: unknown) {
   return Math.round(value);
 }
 
+function safeMediaDimension(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value < 1 || value > 16_384) return undefined;
+  return Math.round(value);
+}
+
+function safeBitrate(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value < 1 || value > 1_000_000_000) return undefined;
+  return Math.round(value);
+}
+
+function safeIndex(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  if (value < 0 || value > 1_000_000) return undefined;
+  return value;
+}
+
 function safeHttpStatus(value: unknown) {
   if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
   return value >= 100 && value <= 599 ? value : undefined;
@@ -207,11 +231,36 @@ function sanitizeEvent(
       : undefined;
   addOptional(event, "selected_playback_mode", playbackMode);
 
+  const previousPlaybackMode =
+    typeof value.previous_playback_mode === "string" &&
+    PLAYBACK_MODES.has(value.previous_playback_mode as RendPlayerPlaybackMode)
+      ? (value.previous_playback_mode as RendPlayerPlaybackMode)
+      : undefined;
+  addOptional(event, "previous_playback_mode", previousPlaybackMode);
+
   if (value.selected_artifact_path !== undefined) {
     const artifactPath = safeArtifactPath(value.selected_artifact_path);
     if (!artifactPath) return { error: "invalid_selected_artifact_path" };
     event.selected_artifact_path = artifactPath;
   }
+
+  if (value.previous_artifact_path !== undefined) {
+    const artifactPath = safeArtifactPath(value.previous_artifact_path);
+    if (!artifactPath) return { error: "invalid_previous_artifact_path" };
+    event.previous_artifact_path = artifactPath;
+  }
+
+  addOptional(event, "selected_width", safeMediaDimension(value.selected_width));
+  addOptional(event, "selected_height", safeMediaDimension(value.selected_height));
+  addOptional(event, "selected_bitrate", safeBitrate(value.selected_bitrate));
+  addOptional(event, "hls_level_index", safeIndex(value.hls_level_index));
+  addOptional(event, "hls_fragment_index", safeIndex(value.hls_fragment_index));
+  addOptional(event, "hls_fragment_duration_ms", safeTiming(value.hls_fragment_duration_ms));
+  addOptional(event, "hls_fragment_load_ms", safeTiming(value.hls_fragment_load_ms));
+  addOptional(event, "stall_reason", safeLabel(value.stall_reason));
+  addOptional(event, "stall_start_ms", safeTiming(value.stall_start_ms));
+  addOptional(event, "stall_end_ms", safeTiming(value.stall_end_ms));
+  addOptional(event, "stall_duration_ms", safeTiming(value.stall_duration_ms));
 
   addOptional(event, "metadata_loaded_ms", safeTiming(value.metadata_loaded_ms));
   addOptional(event, "canplay_ms", safeTiming(value.canplay_ms));
