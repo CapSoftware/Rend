@@ -1049,22 +1049,41 @@ export function RendPlayer({
   useEffect(() => {
     if (!bootstrap || bootstrap.status !== "ready") return;
     const hints: PlaybackPrefetchHint[] = [];
-    if (bootstrap.opener_url) {
-      hints.push({
-        artifact_path: "opener.mp4",
-        content_type: bootstrap.opener_content_type ?? "video/mp4",
-        url: bootstrap.opener_url,
-      });
+    const seenHints = new Set<string>();
+    const pushHint = (hint: PlaybackPrefetchHint) => {
+      if (seenHints.has(hint.artifact_path)) return;
+      seenHints.add(hint.artifact_path);
+      hints.push(hint);
+    };
+    const openerHint = bootstrap.opener_url
+      ? {
+          artifact_path: "opener.mp4",
+          content_type: bootstrap.opener_content_type ?? "video/mp4",
+          url: bootstrap.opener_url,
+        }
+      : null;
+    const manifestHint = bootstrap.manifest_url
+      ? {
+          artifact_path: "hls/master.m3u8",
+          content_type:
+            bootstrap.manifest_content_type ?? "application/vnd.apple.mpegurl",
+          url: bootstrap.manifest_url,
+        }
+      : null;
+
+    if (bootstrap.playable_state === "hls_ready") {
+      if (manifestHint) pushHint(manifestHint);
+      for (const hint of bootstrap.prefetch_hints.slice(0, Math.max(0, maxPrefetchHints))) {
+        pushHint(hint);
+      }
+      if (openerHint) pushHint(openerHint);
+    } else {
+      if (openerHint) pushHint(openerHint);
+      if (manifestHint) pushHint(manifestHint);
+      for (const hint of bootstrap.prefetch_hints.slice(0, Math.max(0, maxPrefetchHints))) {
+        pushHint(hint);
+      }
     }
-    if (bootstrap.manifest_url) {
-      hints.push({
-        artifact_path: "hls/master.m3u8",
-        content_type:
-          bootstrap.manifest_content_type ?? "application/vnd.apple.mpegurl",
-        url: bootstrap.manifest_url,
-      });
-    }
-    hints.push(...bootstrap.prefetch_hints.slice(0, Math.max(0, maxPrefetchHints)));
 
     const links = hints.map((hint, index) => {
       const link = document.createElement("link");
