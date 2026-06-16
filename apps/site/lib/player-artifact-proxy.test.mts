@@ -5,6 +5,7 @@ import {
   playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
+  playbackDirectCookieHeader,
   playbackProxyCookieHeader,
 } from "./player-artifact-proxy.ts";
 
@@ -133,6 +134,25 @@ test("proxy playback cookie uses local-safe attributes on http", () => {
 
   assert.match(header ?? "", /SameSite=Lax/);
   assert.doesNotMatch(header ?? "", /Secure/);
+});
+
+test("direct playback cookie is scoped to the edge asset path and optional rend domain", () => {
+  const header = playbackDirectCookieHeader(
+    "https://www.rend.so/api/player/00000000-0000-0000-0000-000000000001",
+    "00000000-0000-0000-0000-000000000001",
+    "v1.claims.signature",
+    900,
+    "https://media.rend.so",
+    "rend.so"
+  );
+
+  assert.match(header ?? "", /^__rend_playback=v1\.claims\.signature;/);
+  assert.match(header ?? "", /Path=\/v\/00000000-0000-0000-0000-000000000001\//);
+  assert.match(header ?? "", /Domain=rend\.so/);
+  assert.match(header ?? "", /Max-Age=900/);
+  assert.match(header ?? "", /HttpOnly/);
+  assert.match(header ?? "", /SameSite=None/);
+  assert.match(header ?? "", /Secure/);
 });
 
 test("playback cookie parser returns only safe cookie values", () => {

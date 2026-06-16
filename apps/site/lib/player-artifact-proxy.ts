@@ -72,6 +72,36 @@ export function playbackProxyCookieHeader(
   return parts.join("; ");
 }
 
+export function playbackDirectCookieHeader(
+  requestUrl: string,
+  assetId: string,
+  playbackToken: unknown,
+  ttlSeconds: unknown,
+  playbackBaseUrl: string,
+  cookieDomain?: string
+) {
+  const token = safeCookieValue(playbackToken);
+  const maxAge = typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
+    ? Math.max(0, Math.floor(ttlSeconds))
+    : 0;
+  if (!token || maxAge <= 0) return undefined;
+
+  const request = new URL(requestUrl);
+  const playbackBase = new URL(playbackBaseUrl);
+  const isSecure = request.protocol === "https:" || playbackBase.protocol === "https:";
+  const path = `/v/${encodeURIComponent(assetId)}/`;
+  const parts = [
+    `${PLAYBACK_COOKIE_NAME}=${token}`,
+    `Path=${path}`,
+    `Max-Age=${maxAge}`,
+    "HttpOnly",
+    `SameSite=${isSecure ? "None" : "Lax"}`,
+  ];
+  if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
+  if (isSecure) parts.push("Secure");
+  return parts.join("; ");
+}
+
 export function playbackArtifactFetchHeaders(
   requestHeaders: Headers,
   cookie: string | undefined,
