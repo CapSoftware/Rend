@@ -67,6 +67,14 @@ Options:
   --email-domain DOMAIN
       Domain for the synthetic self-serve user. Defaults to
       REND_PRODUCTION_SDK_E2E_EMAIL_DOMAIN or ${DEFAULT_EMAIL_DOMAIN}.
+  --otp-command COMMAND
+      Command that prints the six-digit OTP from the test inbox after this
+      script requests it. Output is parsed and never written to artifacts.
+  --otp-code CODE
+      Six-digit OTP already received out of band. Must be paired with
+      --skip-otp-request so this run does not request a newer code.
+  --skip-otp-request
+      Use an existing self-serve OTP instead of requesting a new one in this run.
   --timeout-ms NUMBER
       Asset playable and browser timeout. Defaults to ${DEFAULT_TIMEOUT_MS}.
   --usage-timeout-ms NUMBER
@@ -91,6 +99,9 @@ function parseArgs(argv) {
     planId: process.env.REND_AUTUMN_INTERNAL_SDK_E2E_PLAN_ID || process.env.REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID || DEFAULT_INTERNAL_TEST_PLAN_ID,
     fixture: process.env.REND_PRODUCTION_SDK_E2E_FIXTURE || DEFAULT_FIXTURE_PATH,
     emailDomain: process.env.REND_PRODUCTION_SDK_E2E_EMAIL_DOMAIN || DEFAULT_EMAIL_DOMAIN,
+    otpCommand: process.env.REND_PRODUCTION_SDK_E2E_OTP_COMMAND || "",
+    otpCode: process.env.REND_PRODUCTION_SDK_E2E_OTP_CODE || "",
+    skipOtpRequest: truthy(process.env.REND_PRODUCTION_SDK_E2E_SKIP_OTP_REQUEST),
     artifact: process.env.REND_PRODUCTION_SDK_E2E_ARTIFACT || "",
     timeoutMs: positiveInteger(process.env.REND_PRODUCTION_SDK_E2E_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     intervalMs: positiveInteger(process.env.REND_PRODUCTION_SDK_E2E_INTERVAL_MS, DEFAULT_INTERVAL_MS),
@@ -120,6 +131,11 @@ function parseArgs(argv) {
     else if (arg.startsWith("--fixture=")) args.fixture = arg.slice("--fixture=".length);
     else if (arg === "--email-domain") args.emailDomain = next();
     else if (arg.startsWith("--email-domain=")) args.emailDomain = arg.slice("--email-domain=".length);
+    else if (arg === "--otp-command") args.otpCommand = next();
+    else if (arg.startsWith("--otp-command=")) args.otpCommand = arg.slice("--otp-command=".length);
+    else if (arg === "--otp-code") args.otpCode = next();
+    else if (arg.startsWith("--otp-code=")) args.otpCode = arg.slice("--otp-code=".length);
+    else if (arg === "--skip-otp-request") args.skipOtpRequest = true;
     else if (arg === "--artifact") args.artifact = next();
     else if (arg.startsWith("--artifact=")) args.artifact = arg.slice("--artifact=".length);
     else if (arg === "--timeout-ms") args.timeoutMs = positiveInteger(next(), DEFAULT_TIMEOUT_MS);
@@ -206,6 +222,9 @@ function redactUnsafeText(value) {
     .replace(/((?:^|\n)\s*(?:cookie|set-cookie):\s*)[^\n\r]+/gi, "$1[redacted]")
     .replace(/(\b__rend_playback=)[^;\s]+/gi, "$1[redacted]")
     .replace(/([?&](?:token|signature|sig|secret|session|client_secret|checkout_session_id)=)[^&\s"']+/gi, "$1[redacted]")
+    .replace(/"otp"\s*:\s*"[^"]+"/gi, '"otp":"[redacted]"')
+    .replace(/"code"\s*:\s*"[^"]+"/gi, '"code":"[redacted]"')
+    .replace(/\b\d{6}\b/g, "[redacted-code]")
     .replace(
       /\bhttps?:\/\/(?:localhost|0\.0\.0\.0|127(?:\.\d{1,3}){3}|\[?::1\]?|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|[A-Za-z0-9.-]+\.internal)(?::\d+)?[^\s"'<>)]*/gi,
       "[redacted-internal-url]",
@@ -278,6 +297,17 @@ function validateSafety(args, env) {
   }
   if (!/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(String(args.emailDomain || "").trim())) {
     errors.push("--email-domain must be a DNS domain");
+  }
+  const otpCodeConfigured = Boolean(String(args.otpCode || "").trim());
+  const otpCommandConfigured = Boolean(String(args.otpCommand || "").trim());
+  if (!otpCommandConfigured && !otpCodeConfigured) {
+    errors.push("production SDK E2E requires --otp-command or --otp-code for the true self-serve OTP path");
+  }
+  if (otpCodeConfigured && !args.skipOtpRequest) {
+    errors.push("--otp-code must be paired with --skip-otp-request to avoid requesting a newer code");
+  }
+  if (otpCodeConfigured && !/^\d{6}$/.test(String(args.otpCode).trim())) {
+    errors.push("--otp-code must be exactly six digits");
   }
   if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(String(args.planId || ""))) {
     errors.push("--plan-id must be a safe Autumn plan id");
@@ -394,21 +424,6 @@ function syntheticUserEmail(context) {
   return `production-sdk-e2e+${safeRunId}@${context.args.emailDomain}`;
 }
 
-async function createServerSideOtp(context, email) {
-  const otp = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
-  const identifier = `sign-in-otp-${email.toLowerCase()}`;
-  const storedOtp = crypto.createHash("sha256").update(otp, "utf8").digest("base64url");
-  await context.db.query("DELETE FROM rend_auth.verification WHERE identifier = $1", [identifier]);
-  await context.db.query(
-    `
-INSERT INTO rend_auth.verification (identifier, value, expires_at, created_at, updated_at)
-VALUES ($1, $2, now() + interval '5 minutes', now(), now())
-`,
-    [identifier, `${storedOtp}:0`],
-  );
-  return otp;
-}
-
 function setCookieHeaders(response) {
   if (typeof response.headers.getSetCookie === "function") return response.headers.getSetCookie();
   const combined = response.headers.get("set-cookie");
@@ -481,6 +496,87 @@ async function fetchWithTimeout(url, init = {}) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${new URL(url).pathname} request failed: ${redactUnsafeText(message)}`);
   }
+}
+
+async function requestSelfServeOtp(context, email) {
+  let result = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      result = await fetchJson(new URL("/api/auth/email-otp/send-verification-otp", context.siteBaseUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          origin: new URL(context.siteBaseUrl).origin,
+        },
+        body: JSON.stringify({
+          email,
+          legal_assent: "accepted",
+          legal_assent_version: LEGAL_ASSENT_VERSION,
+          type: "sign-in",
+        }),
+      });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/HTTP 429/.test(message) || attempt === 2) throw error;
+      await sleep(65_000);
+    }
+  }
+  if (!result) throw new Error("OTP request did not return a response");
+  rememberCookies(context, result.response);
+  return {
+    user_email: email,
+    accepted: true,
+    cookie_count: context.cookieJar.size,
+  };
+}
+
+function otpFromText(value) {
+  const match = String(value || "").match(/\b(\d{6})\b/);
+  return match ? match[1] : "";
+}
+
+function otpCodeFromArgs(context) {
+  const code = String(context.args.otpCode || "").trim();
+  return /^\d{6}$/.test(code) ? code : "";
+}
+
+function runOtpCommand(context, email) {
+  const command = String(context.args.otpCommand || "").trim();
+  if (!command) return "";
+  const result = spawnSync(command, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: cleanCommandEnv({
+      REND_PRODUCTION_SDK_E2E_EMAIL: email,
+      REND_PRODUCTION_SDK_E2E_RUN_ID: context.runId,
+      REND_PRODUCTION_SDK_E2E_REQUESTED_AT: new Date().toISOString(),
+    }),
+    shell: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: Math.min(context.args.timeoutMs, 120_000),
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error) throw new Error(`OTP command failed: ${redactUnsafeText(result.error.message)}`);
+  if (result.status !== 0) {
+    throw new Error(`OTP command exited with ${result.status ?? result.signal ?? "unknown"}`);
+  }
+  const code = otpFromText(result.stdout);
+  if (!code) throw new Error("OTP command did not print a six-digit code");
+  return code;
+}
+
+function obtainSelfServeOtp(context, email) {
+  const argumentCode = otpCodeFromArgs(context);
+  if (argumentCode) {
+    context.otpCode = argumentCode;
+    return { source: "provided_code", obtained: true };
+  }
+  const commandCode = runOtpCommand(context, email);
+  if (!commandCode) throw new Error("self-serve OTP code was not available");
+  context.otpCode = commandCode;
+  return { source: "otp_command", obtained: true };
 }
 
 async function signInWithOtp(context, email, otp) {
@@ -1541,7 +1637,7 @@ function scanRedactionLeaks(text, file) {
     ["signed URL parameter", /[?&](?:token|signature|sig|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token)=[^&\s"']+/i],
     ["checkout or payment URL", /\bhttps:\/\/[^\s"']*(?:checkout|billing|payment|stripe)[^\s"']*[?&][^\s"']+/i],
     ["internal token header", /\bx-rend-(?:site|internal)-token\b/i],
-    ["otp field", /"otp"\s*:/i],
+    ["otp or code value", /"(?:otp|code)"\s*:\s*"(?!\[redacted\])[^"]+"/i],
   ];
   for (const [name, pattern] of patterns) {
     if (pattern.test(text)) findings.push({ file, pattern: name });
@@ -2095,6 +2191,7 @@ async function main() {
     cookieJar: new Map(),
     userId: "",
     userEmail: "",
+    otpCode: "",
     organizationId: "",
     organizationName: "",
     organizationSlug: "",
@@ -2159,47 +2256,48 @@ async function main() {
 
     await runStep(context, "browser-install", "install browser runtime", async () => installBrowser(context));
 
-    await runStep(context, "self-serve-otp-create", "server-side OTP for self-serve sign-in", async () => {
+    await runStep(context, "self-serve-account-email", "synthetic self-serve email", async () => {
       context.userEmail = syntheticUserEmail(context);
-      context.otp = await createServerSideOtp(context, context.userEmail);
       return {
         user_email: context.userEmail,
-        otp_created: true,
+        email_domain: context.args.emailDomain,
       };
     });
 
-    let selfServeReady = false;
-    const signInAttempt = await runAttemptStep(context, "self-serve-otp-sign-in", "public email OTP sign-in", async () => {
-      const result = await signInWithOtp(context, context.userEmail, context.otp);
-      delete context.otp;
+    if (!args.skipOtpRequest) {
+      await runStep(context, "self-serve-otp-request", "public self-serve OTP request", async () =>
+        requestSelfServeOtp(context, context.userEmail),
+      );
+    } else {
+      await runStep(context, "self-serve-otp-request", "public self-serve OTP request", async () => ({
+        skipped: true,
+        reason: "existing OTP code supplied with --skip-otp-request",
+      }));
+    }
+
+    await runStep(context, "self-serve-otp-code-source", "self-serve OTP code retrieval", async () => {
+      return obtainSelfServeOtp(context, context.userEmail);
+    });
+
+    await runStep(context, "self-serve-otp-sign-in", "public email OTP sign-in", async () => {
+      const result = await signInWithOtp(context, context.userEmail, context.otpCode);
+      delete context.otpCode;
       return result;
     });
 
-    if (signInAttempt.ok) {
-      const provisionAttempt = await runAttemptStep(context, "self-serve-org-provision", "dashboard workspace auto-creation", async () => {
-        await assertDashboardSession(context, "/dashboard/assets");
-        const result = await dbJson(context, selfServeProvisioningSql(), [context.userEmail]);
-        if (!result.email_verified) throw new Error("self-serve user email was not verified");
-        if (result.member_count !== 1) throw new Error(`expected exactly one membership, found ${result.member_count}`);
-        if (result.billing_customer_count !== 1) {
-          throw new Error(`expected exactly one billing customer row, found ${result.billing_customer_count}`);
-        }
-        context.organizationId = result.organization_id;
-        context.organizationName = result.organization_name;
-        context.organizationSlug = result.organization_slug;
-        return result;
-      });
-      selfServeReady = provisionAttempt.ok;
-    }
-
-    if (!selfServeReady) {
-      const reason = signInAttempt.ok
-        ? "dashboard self-serve provisioning failed"
-        : signInAttempt.error || "self-serve sign-in failed";
-      await runStep(context, "operator-safe-test-account", "operator-safe internal test account provisioning", async () =>
-        provisionOperatorSafeAccount(context, reason),
-      );
-    }
+    await runStep(context, "self-serve-org-provision", "dashboard workspace auto-creation", async () => {
+      await assertDashboardSession(context, "/dashboard/assets");
+      const result = await dbJson(context, selfServeProvisioningSql(), [context.userEmail]);
+      if (!result.email_verified) throw new Error("self-serve user email was not verified");
+      if (result.member_count !== 1) throw new Error(`expected exactly one membership, found ${result.member_count}`);
+      if (result.billing_customer_count !== 1) {
+        throw new Error(`expected exactly one billing customer row, found ${result.billing_customer_count}`);
+      }
+      context.organizationId = result.organization_id;
+      context.organizationName = result.organization_name;
+      context.organizationSlug = result.organization_slug;
+      return result;
+    });
 
     await runStep(context, "autumn-customer-plan", "Autumn internal test customer and plan", async () => {
       await autumnPost(context, "customers.get_or_create", {
@@ -2217,11 +2315,8 @@ async function main() {
     });
 
     await runStep(context, "production-api-key", "production API key creation", async () => {
-      if (selfServeReady) {
-        await assertDashboardSession(context, "/dashboard/billing");
-        return createApiKeyThroughDashboard(context);
-      }
-      return createApiKeyOperatorSafe(context);
+      await assertDashboardSession(context, "/dashboard/billing");
+      return createApiKeyThroughDashboard(context);
     });
 
     await runStep(context, "published-sdk-flow", "published SDK upload/read/playback/analytics", async () => {
@@ -2250,6 +2345,7 @@ async function main() {
     status = "fail";
     failure = redactUnsafeText(error instanceof Error ? error.message : String(error));
   } finally {
+    delete context.otpCode;
     if (!context.assetId && context.tempProjectDir) {
       context.assetId = await readConsumerStateAssetId(context);
     }
@@ -2360,6 +2456,8 @@ async function main() {
       organization_slug: context.organizationSlug || null,
       plan_id: args.planId,
       internal_test_customer: true,
+      true_self_serve_otp: true,
+      operator_fallback_disabled: true,
       operator_safe_fallback: context.operatorSafeProvisioning,
     },
     asset_id: context.assetId || null,
