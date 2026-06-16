@@ -89,36 +89,49 @@ export default function DocsCommandPalette({ items }: DocsCommandPaletteProps) {
       <button
         aria-haspopup="dialog"
         aria-expanded={open}
-        className="docs-command-trigger"
+        className="hidden h-9 items-center gap-2.5 border border-line bg-card pl-3 pr-2.5 text-[13px] font-medium text-muted transition hover:border-ink/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30 sm:inline-flex"
         onClick={() => setOpen(true)}
         ref={triggerRef}
         type="button"
       >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+          <path d="M21 21l-4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
         <span>Search docs</span>
-        <kbd>⌘K</kbd>
+        <kbd className="ml-1 border border-line bg-bg-sunken px-1.5 py-0.5 font-mono text-[10.5px] font-medium leading-none text-faint">
+          ⌘K
+        </kbd>
       </button>
 
       {open ? (
         <div
           aria-labelledby="docs-command-title"
           aria-modal="true"
-          className="docs-command-overlay"
+          className="fixed inset-0 z-[60] grid items-start justify-items-center bg-ink/30 px-4 pb-6 pt-[12vh] backdrop-blur-sm"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) close();
           }}
           role="dialog"
         >
-          <div className="docs-command-dialog">
-            <div className="docs-command-head">
-              <h2 id="docs-command-title">Search docs</h2>
-              <button aria-label="Close search" onClick={close} type="button">
+          <div className="w-[min(620px,100%)] overflow-hidden rounded-2xl border border-line bg-card shadow-[0_30px_80px_-24px_rgba(22,21,19,0.4)]">
+            <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+              <h2 id="docs-command-title" className="text-[14px] font-medium text-ink">
+                Search docs
+              </h2>
+              <button
+                aria-label="Close search"
+                onClick={close}
+                type="button"
+                className="grid h-7 w-7 place-items-center rounded-md border border-line bg-card text-[18px] leading-none text-muted transition hover:border-ink/30 hover:text-ink"
+              >
                 ×
               </button>
             </div>
             <input
               aria-controls="docs-command-results"
               aria-label="Search docs"
-              className="docs-command-input"
+              className="w-full border-b border-line bg-card px-4 py-3.5 text-[15px] text-ink outline-none placeholder:text-faint"
               onChange={(event) => setQuery(event.currentTarget.value)}
               onKeyDown={onInputKeyDown}
               placeholder="Type a section or command..."
@@ -126,25 +139,35 @@ export default function DocsCommandPalette({ items }: DocsCommandPaletteProps) {
               type="search"
               value={query}
             />
-            <div className="docs-command-list" id="docs-command-results" role="listbox">
+            <div
+              className="max-h-[min(380px,56vh)] overflow-y-auto p-2"
+              id="docs-command-results"
+              role="listbox"
+            >
               {filteredItems.length === 0 ? (
-                <div className="docs-command-empty">No results found.</div>
+                <div className="px-3 py-5 text-[14px] text-muted">No results found.</div>
               ) : (
                 filteredItems.map((item, index) => (
                   <button
                     aria-selected={index === activeIndex}
-                    className="docs-command-item"
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-colors aria-selected:bg-bg-sunken hover:bg-bg-sunken/70 focus-visible:bg-bg-sunken focus-visible:outline-none"
                     key={`${item.group}-${item.href}`}
                     onClick={() => navigateTo(item)}
                     onMouseEnter={() => setActiveIndex(index)}
                     role="option"
                     type="button"
                   >
-                    <span>
-                      <strong>{item.title}</strong>
-                      <small>{item.description}</small>
+                    <span className="grid min-w-0 gap-0.5">
+                      <strong className="text-[14px] font-medium leading-tight text-ink">
+                        {item.title}
+                      </strong>
+                      <small className="truncate text-[12px] leading-tight text-muted">
+                        {item.description}
+                      </small>
                     </span>
-                    <em>{item.group}</em>
+                    <em className="shrink-0 text-[11px] font-medium uppercase not-italic tracking-[0.06em] text-faint">
+                      {item.group}
+                    </em>
                   </button>
                 ))
               )}
