@@ -390,6 +390,19 @@ async fn get_metrics(app: Router, token: Option<&str>) -> Response {
         .unwrap()
 }
 
+async fn get_cache_inspect(app: Router, query: &str, token: Option<&str>) -> Response {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(format!("/internal/cache/inspect?{query}"));
+    if let Some(token) = token {
+        builder = builder.header("x-rend-internal-token", token);
+    }
+
+    app.oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
 async fn response_json(response: Response) -> Value {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
@@ -596,6 +609,26 @@ fn maps_hls_segment_to_goal_three_object_and_cache_key() {
 }
 
 #[test]
+fn maps_hls_ladder_playlist_and_segment_to_goal_three_object_and_cache_key() {
+    assert_eq!(
+        map_playback_artifact("asset-123", "hls/720p/index.m3u8").unwrap(),
+        PlaybackArtifact {
+            object_key: "videos/asset-123/hls/720p/index.m3u8".to_owned(),
+            cache_key: "videos/asset-123/hls/720p/index.m3u8".to_owned(),
+            content_type: "application/vnd.apple.mpegurl",
+        }
+    );
+    assert_eq!(
+        map_playback_artifact("asset-123", "hls/720p/segment_00000.ts").unwrap(),
+        PlaybackArtifact {
+            object_key: "videos/asset-123/hls/720p/segment_00000.ts".to_owned(),
+            cache_key: "videos/asset-123/hls/720p/segment_00000.ts".to_owned(),
+            content_type: "video/mp2t",
+        }
+    );
+}
+
+#[test]
 fn rejects_unsupported_artifact_paths() {
     for artifact_path in [
         "source",
@@ -605,6 +638,9 @@ fn rejects_unsupported_artifact_paths() {
         "hls/master.m3u8/extra",
         "hls/segment_00000.m4s",
         "hls/segment_abc.ts",
+        "hls/480p/index.m3u8",
+        "hls/720p/playlist.m3u8",
+        "hls/720p/segment_latest.ts",
         "hls/nested/segment_00000.ts",
         "../opener.mp4",
         "hls/../opener.mp4",
@@ -690,6 +726,118 @@ async fn warm_rejects_unsafe_asset_id() {
     .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cache_inspect_requires_internal_token() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let state = test_state(test_cache_dir("cache-inspect-auth"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let query = "asset_id=asset-123&artifact_path=opener.mp4";
+
+    let response = get_cache_inspect(app.clone(), query, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = get_cache_inspect(app, query, Some("wrong-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn cache_inspect_reports_redacted_local_cache_and_storage_fields() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let state = test_state(test_cache_dir("cache-inspect-hit"), origin_endpoint);
+    write_test_cache_artifact(
+        &state,
+        "videos/asset-123/hls/master.m3u8",
+        b"#EXTM3U\n",
+        5_000,
+    )
+    .await;
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_cache_inspect(
+        app,
+        "asset_id=asset-123&artifact_path=hls%2Fmaster.m3u8",
+        Some("test-internal-token"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["artifact_path"], "hls/master.m3u8");
+    assert_eq!(json["exists_in_local_cache"], true);
+    assert_eq!(json["byte_size"], 8);
+    assert_eq!(json["edge_id"], "test-edge");
+    assert_eq!(json["region"], "test");
+    assert!(json.get("cache_dir_mount_target").is_some());
+    assert!(json.get("cache_dir_mount_source").is_some());
+    assert!(json.get("cache_dir_fstype").is_some());
+    assert!(json.get("block_device_name").is_some());
+    assert!(json.get("rotational").is_some());
+    assert!(matches!(
+        json["inferred_storage_tier"].as_str(),
+        Some("nvme" | "ssd" | "unknown")
+    ));
+
+    let serialized = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!serialized.contains("videos/asset-123"));
+    assert!(!serialized.contains("object_key"));
+    assert!(!serialized.contains("cache_key"));
+    assert!(!serialized.contains("token"));
+}
+
+#[tokio::test]
+async fn cache_inspect_rejects_unsupported_artifact_path_without_echoing_it() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let state = test_state(test_cache_dir("cache-inspect-invalid"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_cache_inspect(
+        app,
+        "asset_id=asset-123&artifact_path=..%2Fopener.mp4",
+        Some("test-internal-token"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("unsupported playback artifact path"));
+    assert!(!text.contains("../opener.mp4"));
+}
+
+#[test]
+fn cache_storage_helpers_parse_mountinfo_and_redact_private_sources() {
+    let entries = parse_mountinfo(
+        "36 25 259:1 / /var/lib/rend/edge\\040cache rw,relatime - xfs /dev/nvme0n1p1 rw\n\
+         37 25 0:45 / /var/spool/rend rw,relatime - none /private/host/path rw\n",
+    );
+
+    assert_eq!(
+        entries[0],
+        MountInfoEntry {
+            target: "/var/lib/rend/edge cache".to_owned(),
+            source: "/dev/nvme0n1p1".to_owned(),
+            fstype: "xfs".to_owned(),
+        }
+    );
+    assert_eq!(redacted_mount_source("/dev/nvme0n1p1"), "/dev/nvme0n1p1");
+    assert_eq!(redacted_mount_source("/private/host/path"), "path-redacted");
+    assert_eq!(base_block_device_name("nvme0n1p1"), "nvme0n1");
+    assert_eq!(base_block_device_name("sda1"), "sda");
+    assert_eq!(base_block_device_name("dm-0"), "dm-0");
+    assert_eq!(
+        infer_storage_tier(Some("nvme0n1"), Some(false)),
+        InferredStorageTier::Nvme
+    );
+    assert_eq!(
+        infer_storage_tier(Some("sda"), Some(false)),
+        InferredStorageTier::Ssd
+    );
+    assert_eq!(
+        infer_storage_tier(Some("sda"), Some(true)),
+        InferredStorageTier::Unknown
+    );
 }
 
 #[tokio::test]
@@ -945,7 +1093,9 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.access_control_allow_origin.as_deref(), Some("*"));
     assert_eq!(
         response.access_control_expose_headers.as_deref(),
-        Some("cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region")
+        Some(
+            "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
+        )
     );
     assert_eq!(response.edge_id.as_deref(), Some("test-edge"));
     assert_eq!(response.region.as_deref(), Some("test"));
