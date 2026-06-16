@@ -207,12 +207,19 @@ export const PLAYBACK_BOOTSTRAP_CODE = `GET https://rend.so/api/player/018f52b2-
   "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
   "source_state": "uploaded",
   "playable_state": "hls_ready",
-  "manifest_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
+  "playback_url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/master.m3u8",
+  "playback_content_type": "application/vnd.apple.mpegurl",
+  "manifest_url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/master.m3u8",
   "manifest_content_type": "application/vnd.apple.mpegurl",
-  "opener_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/opener.mp4",
-  "opener_content_type": "video/mp4",
+  "playback_token_expires_at": 1781432100,
   "ttl_seconds": 900,
-  "prefetch_hints": []
+  "prefetch_hints": [
+    {
+      "artifact_path": "hls/1080p/segment_00000.ts",
+      "url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/1080p/segment_00000.ts",
+      "content_type": "video/mp2t"
+    }
+  ]
 }`;
 
 export const LOCAL_DOCKER_CODE = `bun install

@@ -49,7 +49,7 @@ test("docs examples match the public API and SDK surface", () => {
   assert.match(CURL_UPLOAD_CODE, /\/v1\/assets\/\$ASSET_ID\/analytics\/playback/);
   assert.match(CURL_UPLOAD_CODE, /\/api\/player\/\$ASSET_ID/);
   assert.match(AUTH_HEADER_CODE, /^Authorization: Bearer \$REND_API_KEY$/);
-  assert.match(PLAYBACK_BOOTSTRAP_CODE, /\/api\/player\/018f52b2-5401-7f3b-ae2e-4923f4d62120\/artifact\/hls\/master\.m3u8/);
+  assert.match(PLAYBACK_BOOTSTRAP_CODE, /https:\/\/ash-1\.play\.rend\.so\/v\/018f52b2-5401-7f3b-ae2e-4923f4d62120\/hls\/master\.m3u8/);
   assert.match(LOCAL_DOCKER_CODE, /bun run sdk:integration-smoke/);
   assert.match(AGENT_PROMPT_CODE, /\/llms\.txt/);
   assert.match(AGENT_PROMPT_CODE, /\/openapi\.json/);
