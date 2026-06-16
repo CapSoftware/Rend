@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rend_config::{env_string, env_usize};
-use rend_playback_auth::is_valid_hls_segment_name;
+use rend_playback_auth::is_asset_playback_path;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -402,13 +402,7 @@ fn validate_optional_uuid(value: &str, field: &str) -> std::result::Result<(), A
 
 fn normalize_artifact_path(value: &str) -> std::result::Result<String, AppError> {
     let value = normalize_safe_text(value, "artifact_path", 256)?;
-    let supported = match value.split('/').collect::<Vec<_>>().as_slice() {
-        ["opener.mp4"] => true,
-        ["hls", "master.m3u8"] => true,
-        ["hls", segment_name] => is_valid_hls_segment_name(segment_name),
-        _ => false,
-    };
-    if !supported {
+    if !is_asset_playback_path(&value) {
         return Err(AppError::bad_request("unsupported artifact_path"));
     }
     Ok(value)
@@ -599,12 +593,17 @@ fn fallback_delivered_duration_ms(
     artifact_path: &str,
     metadata: Option<&AssetPlaybackBillingMetadata>,
 ) -> Option<i64> {
+    if !is_asset_playback_path(artifact_path) {
+        return None;
+    }
+
     match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
         ["opener.mp4"] => metadata
             .and_then(|value| value.duration_ms)
             .map(|duration_ms| duration_ms.min(5_000)),
         ["hls", "master.m3u8"] => Some(0),
-        ["hls", segment_name] if is_valid_hls_segment_name(segment_name) => Some(2_000),
+        ["hls", _, "index.m3u8"] => Some(0),
+        ["hls", _] | ["hls", _, _] => Some(2_000),
         _ => None,
     }
 }
@@ -852,6 +851,22 @@ mod tests {
         .unwrap();
         assert_eq!(normalized[0].cache_status, "MISS");
         assert_eq!(normalized[0].artifact_path, "hls/master.m3u8");
+
+        let mut event = event_json();
+        event["artifact_path"] = serde_json::json!("hls/720p/segment_00000.ts");
+        let batch = serde_json::from_value::<PlaybackTelemetryBatch>(serde_json::json!({
+            "events": [event]
+        }))
+        .unwrap();
+        let normalized = normalize_playback_telemetry_batch(
+            batch,
+            2,
+            DateTime::parse_from_rfc3339("2026-06-13T12:00:01.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap();
+        assert_eq!(normalized[0].artifact_path, "hls/720p/segment_00000.ts");
 
         let mut event = event_json();
         event["artifact_path"] = serde_json::json!("hls/../secret");
