@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 @theme inline {
   --color-bg: #fcfbf8;
@@ -14,6 +15,16 @@
   --color-live: #3f8f5b;
   --font-head: var(--font-headland);
   --font-body: var(--font-inter);
+
+  /* Dashboard sidebar tokens (warm light, consumed by the shadcn sidebar) */
+  --color-sidebar: #f8f6ef;
+  --color-sidebar-foreground: #423f38;
+  --color-sidebar-primary: #161513;
+  --color-sidebar-primary-foreground: #fcfbf8;
+  --color-sidebar-accent: #efece4;
+  --color-sidebar-accent-foreground: #161513;
+  --color-sidebar-border: #e7e3da;
+  --color-sidebar-ring: #b5872b;
 }
 
 @layer components {
