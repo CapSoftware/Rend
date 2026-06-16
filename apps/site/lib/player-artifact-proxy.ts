@@ -20,6 +20,11 @@ type ArtifactResponseHeaderOptions = {
 
 const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL = "private, max-age=31536000, immutable";
 const PRIVATE_MANIFEST_CACHE_CONTROL = "private, max-age=60, stale-while-revalidate=300";
+const HLS_VARIANT_MANIFEST_PATH_RE = /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/;
+
+export function isHlsManifestArtifactPath(artifactPath: string | undefined) {
+  return artifactPath === "hls/master.m3u8" || HLS_VARIANT_MANIFEST_PATH_RE.test(artifactPath ?? "");
+}
 
 function safeCookieValue(value: unknown) {
   if (typeof value !== "string" || value.length > 4096) return undefined;
@@ -74,7 +79,7 @@ export function playbackArtifactFetchHeaders(
 ) {
   const headers = new Headers();
   const range = requestHeaders.get("range");
-  if (range && artifactPath !== "hls/master.m3u8") headers.set("range", range);
+  if (range && !isHlsManifestArtifactPath(artifactPath)) headers.set("range", range);
   if (cookie) headers.set("cookie", `${PLAYBACK_COOKIE_NAME}=${cookie}`);
   return headers;
 }
@@ -104,7 +109,7 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
 export function playbackArtifactCacheControl(artifactPath: string | undefined, cacheable = true) {
   if (!cacheable) return "no-store";
   if (artifactPath === "opener.mp4") return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
-  if (artifactPath === "hls/master.m3u8") return PRIVATE_MANIFEST_CACHE_CONTROL;
+  if (isHlsManifestArtifactPath(artifactPath)) return PRIVATE_MANIFEST_CACHE_CONTROL;
   if (artifactPath?.startsWith("hls/")) return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
   return "no-store";
 }
