@@ -1,8 +1,15 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { betterAuth } from "better-auth";
 import { emailOTP, organization } from "better-auth/plugins";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { Resend } from "resend";
+import {
+  authEmailSummary,
+  authSubjectId,
+  logAuthEvent,
+  normalizeAuthEmail,
+  redactAuthText,
+} from "./auth-events.ts";
 import { authSchema } from "./db/schema.ts";
 import { getSiteDb } from "./server-db.ts";
 
@@ -10,6 +17,7 @@ const LOCAL_AUTH_SECRET = "local-better-auth-secret-only-for-rend-development";
 const LOCAL_AUTH_URL = "http://localhost:3000";
 
 type AuthInstance = ReturnType<typeof betterAuth>;
+type AuthOtpEmailType = "sign-in" | "email-verification" | "forget-password" | "change-email";
 
 let authInstance: unknown = null;
 let resendClient: Resend | null = null;
@@ -22,6 +30,12 @@ function envBoolean(name: string, fallback = false) {
   const value = envString(name).toLowerCase();
   if (!value) return fallback;
   return ["1", "true", "yes", "on"].includes(value);
+}
+
+function envPositiveInteger(name: string, fallback: number, min: number, max: number) {
+  const value = Number(envString(name));
+  if (!Number.isFinite(value) || (value <= 0 && min > 0) || value < 0) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
 function isProductionProfile() {
@@ -53,11 +67,25 @@ function authSecret() {
   return LOCAL_AUTH_SECRET;
 }
 
+function addOrigin(origins: Set<string>, value: string) {
+  if (!value) return;
+  try {
+    origins.add(new URL(value).origin);
+  } catch {
+    // Invalid URLs are rejected elsewhere by production diagnostics/env checks.
+  }
+}
+
 function trustedOrigins() {
-  return envString("REND_AUTH_TRUSTED_ORIGINS")
+  const origins = new Set(
+    envString("REND_AUTH_TRUSTED_ORIGINS")
     .split(",")
     .map((origin) => origin.trim())
-    .filter(Boolean);
+      .filter(Boolean)
+  );
+  addOrigin(origins, authBaseUrl());
+  addOrigin(origins, envString("REND_PUBLIC_SITE_BASE_URL"));
+  return [...origins];
 }
 
 function getResend() {
@@ -71,6 +99,186 @@ function generateNumericOtp() {
   return randomInt(0, 1_000_000).toString().padStart(6, "0");
 }
 
+export class AuthEmailDeliveryError extends Error {
+  code: string;
+  providerStatus?: number;
+  providerCode?: string;
+
+  constructor(
+    code: string,
+    message: string,
+    options: { providerStatus?: number; providerCode?: string; cause?: unknown } = {}
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "AuthEmailDeliveryError";
+    this.code = code;
+    this.providerStatus = options.providerStatus;
+    this.providerCode = options.providerCode;
+  }
+}
+
+function authEmailSendTimeoutMs() {
+  return envPositiveInteger("REND_AUTH_EMAIL_SEND_TIMEOUT_MS", 10_000, 1_000, 30_000);
+}
+
+function authEmailSendRetries() {
+  return envPositiveInteger("REND_AUTH_EMAIL_SEND_RETRIES", 1, 0, 3);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            new AuthEmailDeliveryError(
+              "auth_email_provider_timeout",
+              "Email provider timed out before accepting the sign-in code"
+            )
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function resendSignal(timeoutMs: number) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  return undefined;
+}
+
+function isRetryableResendFailure(error: AuthEmailDeliveryError) {
+  return (
+    error.code === "auth_email_provider_timeout" ||
+    error.providerStatus === undefined ||
+    error.providerStatus === 429 ||
+    error.providerStatus >= 500
+  );
+}
+
+function authEmailErrorFromResend(error: {
+  name?: unknown;
+  message?: unknown;
+  statusCode?: unknown;
+}) {
+  const providerStatus = typeof error.statusCode === "number" ? error.statusCode : undefined;
+  const providerCode = typeof error.name === "string" ? error.name : "application_error";
+  const providerMessage = redactAuthText(error.message);
+  const message =
+    providerStatus === 429
+      ? "Email provider rate limit was reached while sending the sign-in code"
+      : providerStatus && providerStatus < 500
+        ? "Email provider rejected the sign-in code request"
+        : "Email provider could not accept the sign-in code request";
+  return new AuthEmailDeliveryError("auth_email_provider_rejected", message, {
+    providerStatus,
+    providerCode,
+    cause: providerMessage,
+  });
+}
+
+async function sendAuthOtpEmailWithResend(input: {
+  email: string;
+  from: string;
+  otp: string;
+  type: AuthOtpEmailType;
+}) {
+  const resend = getResend();
+  if (!resend) throw new AuthEmailDeliveryError("auth_email_not_configured", "Resend is not configured");
+
+  const timeoutMs = authEmailSendTimeoutMs();
+  const retries = authEmailSendRetries();
+  const idempotencyKey = `rend-auth-otp-${randomUUID()}`;
+  let lastError: AuthEmailDeliveryError | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const started = Date.now();
+    logAuthEvent("otp_send_attempted", {
+      ...authEmailSummary(input.email),
+      provider: "resend",
+      type: input.type,
+      attempt: attempt + 1,
+      timeout_ms: timeoutMs,
+    });
+
+    try {
+      const result = await withTimeout(
+        resend.emails.send(
+          {
+            from: input.from,
+            to: input.email,
+            subject: "Your Rend sign-in code",
+            text: `Your Rend sign-in code is ${input.otp}. It expires in 5 minutes.`,
+          },
+          {
+            idempotencyKey,
+            signal: resendSignal(timeoutMs),
+          } as Parameters<typeof resend.emails.send>[1] & { signal?: AbortSignal }
+        ),
+        timeoutMs
+      );
+
+      if (result.error) throw authEmailErrorFromResend(result.error);
+      if (!result.data?.id) {
+        throw new AuthEmailDeliveryError(
+          "auth_email_provider_invalid_response",
+          "Email provider accepted the request without a message id"
+        );
+      }
+
+      logAuthEvent("otp_send_accepted", {
+        ...authEmailSummary(input.email),
+        provider: "resend",
+        type: input.type,
+        attempt: attempt + 1,
+        duration_ms: Date.now() - started,
+        resend_message_id_hash: authSubjectId(result.data.id),
+      });
+      return;
+    } catch (error) {
+      lastError =
+        error instanceof AuthEmailDeliveryError
+          ? error
+          : new AuthEmailDeliveryError(
+              "auth_email_provider_failed",
+              "Email provider request failed",
+              { cause: error instanceof Error ? error.message : String(error) }
+            );
+
+      logAuthEvent(
+        "otp_send_failed",
+        {
+          ...authEmailSummary(input.email),
+          provider: "resend",
+          type: input.type,
+          attempt: attempt + 1,
+          duration_ms: Date.now() - started,
+          error: lastError.code,
+          provider_status: lastError.providerStatus,
+          provider_code: lastError.providerCode,
+          retrying: attempt < retries && isRetryableResendFailure(lastError),
+        },
+        attempt < retries && isRetryableResendFailure(lastError) ? "warn" : "error"
+      );
+
+      if (attempt >= retries || !isRetryableResendFailure(lastError)) break;
+      await sleep(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError ?? new AuthEmailDeliveryError("auth_email_send_failed", "Sign-in email could not be sent");
+}
+
 export async function sendAuthOtpEmail({
   email,
   otp,
@@ -78,30 +286,70 @@ export async function sendAuthOtpEmail({
 }: {
   email: string;
   otp: string;
-  type: "sign-in" | "email-verification" | "forget-password" | "change-email";
+  type: AuthOtpEmailType;
 }) {
+  const normalizedEmail = normalizeAuthEmail(email);
   const resend = getResend();
   const from = envString("REND_AUTH_EMAIL_FROM");
+  if (isProductionProfile() && envBoolean("REND_AUTH_EMAIL_DISABLED")) {
+    logAuthEvent(
+      "otp_send_failed",
+      {
+        ...authEmailSummary(normalizedEmail),
+        provider: "disabled",
+        type,
+        error: "auth_email_disabled",
+      },
+      "error"
+    );
+    throw new AuthEmailDeliveryError("auth_email_disabled", "Rend auth email is disabled");
+  }
+
   if (resend) {
-    if (!from) throw new Error("REND_AUTH_EMAIL_FROM is required when RESEND_API_KEY is set");
-    await resend.emails.send({
-      from,
-      to: email,
-      subject: "Your Rend sign-in code",
-      text: `Your Rend sign-in code is ${otp}. It expires in 5 minutes.`,
-    });
+    if (!from) {
+      logAuthEvent(
+        "otp_send_failed",
+        {
+          ...authEmailSummary(normalizedEmail),
+          provider: "resend",
+          type,
+          error: "auth_email_from_missing",
+        },
+        "error"
+      );
+      throw new AuthEmailDeliveryError(
+        "auth_email_from_missing",
+        "REND_AUTH_EMAIL_FROM is required when RESEND_API_KEY is set"
+      );
+    }
+    await sendAuthOtpEmailWithResend({ email: normalizedEmail, from, otp, type });
     return;
   }
 
   if (!isProductionProfile()) {
-    console.info("[rend-auth] local email OTP", { email, type, code: otp });
+    logAuthEvent("otp_send_attempted", {
+      ...authEmailSummary(normalizedEmail),
+      provider: "local-console",
+      type,
+    });
+    console.info("[rend-auth] local email OTP", { email: normalizedEmail, type, code: otp });
     return;
   }
 
-  if (envBoolean("REND_AUTH_EMAIL_DISABLED")) {
-    throw new Error("Rend auth email is disabled");
-  }
-  throw new Error("RESEND_API_KEY and REND_AUTH_EMAIL_FROM are required in production");
+  logAuthEvent(
+    "otp_send_failed",
+    {
+      ...authEmailSummary(normalizedEmail),
+      provider: "missing",
+      type,
+      error: "auth_email_not_configured",
+    },
+    "error"
+  );
+  throw new AuthEmailDeliveryError(
+    "auth_email_not_configured",
+    "RESEND_API_KEY and REND_AUTH_EMAIL_FROM are required in production"
+  );
 }
 
 export function getAuth(): AuthInstance {
