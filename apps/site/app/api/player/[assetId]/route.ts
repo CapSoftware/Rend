@@ -2,12 +2,20 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 import { and, eq, isNull } from "drizzle-orm";
+import { geolocation } from "@vercel/functions";
 import { assets, organization } from "../../../../lib/db/schema.ts";
 import {
   safePlaybackBootstrapResponse,
   type UpstreamPlaybackResponse,
 } from "../../../../lib/player-bootstrap.ts";
-import { playbackProxyCookieHeader } from "../../../../lib/player-artifact-proxy.ts";
+import {
+  playbackDirectCookieHeader,
+  playbackProxyCookieHeader,
+} from "../../../../lib/player-artifact-proxy.ts";
+import {
+  playbackBaseUrlDecisionForRequest,
+  type PlaybackBaseUrlDecision,
+} from "../../../../lib/player-edge-selection.ts";
 import { getSiteDb } from "../../../../lib/server-db.ts";
 
 type UpstreamAssetResponse = {
@@ -49,39 +57,108 @@ function safeString(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
 
-function normalizePlaybackBaseUrl(value: string) {
-  const parsed = new URL(value);
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("playback base URL must use http or https");
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("playback base URL must not include credentials, query, or fragment");
-  }
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
-  return parsed.toString().replace(/\/+$/, "");
+function safeHeaderLabel(value: string | null, maxLength = 96) {
+  if (!value) return undefined;
+  const normalized = value.trim().slice(0, maxLength);
+  return /^[a-zA-Z0-9._:,-]+$/.test(normalized) ? normalized : undefined;
 }
 
-function allowedPlaybackBaseUrls() {
-  return envString("REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map(normalizePlaybackBaseUrl);
+function safeGeoCode(value: string | null) {
+  if (!value) return undefined;
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z0-9-]{2,16}$/.test(normalized) ? normalized : undefined;
 }
 
-function playbackBaseOverride(request: Request) {
-  const requestUrl = new URL(request.url);
-  const requested = requestUrl.searchParams.get("playbackBaseUrl");
-  if (requested) {
-    const normalized = normalizePlaybackBaseUrl(requested);
-    if (!allowedPlaybackBaseUrls().includes(normalized)) {
-      throw new Error("playbackBaseUrl is not allowed");
+function validCoordinateHeader(value: string | null, min: number, max: number) {
+  if (!value) return false;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max;
+}
+
+function playbackHost(playbackBaseUrl: string | null) {
+  if (!playbackBaseUrl) return undefined;
+  try {
+    return safeHeaderLabel(new URL(playbackBaseUrl).host);
+  } catch {
+    return undefined;
+  }
+}
+
+function logPlaybackEdgeDecision(request: Request, decision: PlaybackBaseUrlDecision) {
+  const headers = request.headers;
+  const geo = geolocation(request);
+  const hasCoordinates =
+    validCoordinateHeader(geo.latitude || headers.get("x-vercel-ip-latitude"), -90, 90) &&
+    validCoordinateHeader(geo.longitude || headers.get("x-vercel-ip-longitude"), -180, 180);
+  const distanceKm =
+    decision.distanceKm !== undefined && Number.isFinite(decision.distanceKm)
+      ? Math.round(decision.distanceKm)
+      : undefined;
+
+  console.info(
+    JSON.stringify({
+      level: "info",
+      event: "rend_player_edge_selected",
+      route: "/api/player/[assetId]",
+      request_id: safeHeaderLabel(headers.get("x-vercel-id"), 128),
+      vercel_edge_region: safeHeaderLabel(geo.region || null, 24),
+      geo_country: safeGeoCode(geo.country || headers.get("x-vercel-ip-country")),
+      geo_country_region: safeGeoCode(geo.countryRegion || headers.get("x-vercel-ip-country-region")),
+      geo_continent: safeGeoCode(headers.get("x-vercel-ip-continent")),
+      geo_has_coordinates: hasCoordinates,
+      selection_source: decision.source,
+      selection_reason: safeHeaderLabel(decision.selectionReason || null, 32),
+      matched_code: safeGeoCode(decision.matchedCode || null),
+      metal_route_id: safeHeaderLabel(decision.routeId || null, 48),
+      metal_route_region: safeHeaderLabel(decision.routeRegion || null, 48),
+      playback_host: playbackHost(decision.playbackBaseUrl),
+      distance_km: distanceKm,
+    })
+  );
+}
+
+function normalizeCookieDomain(value: string) {
+  const domain = value.trim().toLowerCase().replace(/^\.+/, "");
+  if (
+    !domain ||
+    domain.length > 253 ||
+    domain.includes("..") ||
+    domain.startsWith("-") ||
+    domain.endsWith("-") ||
+    !/^[a-z0-9.-]+$/.test(domain)
+  ) {
+    return undefined;
+  }
+  return domain;
+}
+
+function hostMatchesCookieDomain(host: string, domain: string) {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+function isTrustedRendHost(host: string) {
+  return host === "rend.so" || host.endsWith(".rend.so");
+}
+
+function directPlaybackCookieDomain(request: Request, playbackBaseUrl: string | null) {
+  if (!playbackBaseUrl) return undefined;
+  const requestHost = new URL(request.url).hostname.toLowerCase();
+  const playbackHost = new URL(playbackBaseUrl).hostname.toLowerCase();
+  const configured = envString("REND_PLAYER_PLAYBACK_COOKIE_DOMAIN") || envString("REND_PLAYBACK_COOKIE_DOMAIN");
+
+  if (configured) {
+    const domain = normalizeCookieDomain(configured);
+    if (
+      domain &&
+      hostMatchesCookieDomain(requestHost, domain) &&
+      hostMatchesCookieDomain(playbackHost, domain)
+    ) {
+      return domain;
     }
-    return normalized;
+    return undefined;
   }
 
-  const configured = envString("REND_PLAYER_PLAYBACK_BASE_URL");
-  return configured ? normalizePlaybackBaseUrl(configured) : null;
+  return isTrustedRendHost(requestHost) && isTrustedRendHost(playbackHost) ? "rend.so" : undefined;
 }
 
 function normalizeAssetId(value: string) {
@@ -191,9 +268,9 @@ export async function GET(
     );
   }
 
-  let playbackBaseUrl: string | null;
+  let playbackDecision: PlaybackBaseUrlDecision;
   try {
-    playbackBaseUrl = playbackBaseOverride(request);
+    playbackDecision = playbackBaseUrlDecisionForRequest(request);
   } catch {
     return jsonResponse(
       {
@@ -204,6 +281,8 @@ export async function GET(
       { status: 400 }
     );
   }
+  const playbackBaseUrl = playbackDecision.playbackBaseUrl;
+  logPlaybackEdgeDecision(request, playbackDecision);
 
   const upstream = await fetchControlPlane(
     `/v1/assets/${encodeURIComponent(normalizedAssetId)}/playback`,
@@ -252,12 +331,21 @@ export async function GET(
   }
 
   const headers = new Headers();
-  const playbackCookie = playbackProxyCookieHeader(
-    request.url,
-    normalizedAssetId,
-    data?.playback_token,
-    safeResponse.ttl_seconds
-  );
+  const playbackCookie = playbackBaseUrl
+    ? playbackDirectCookieHeader(
+        request.url,
+        normalizedAssetId,
+        data?.playback_token,
+        safeResponse.ttl_seconds,
+        playbackBaseUrl,
+        directPlaybackCookieDomain(request, playbackBaseUrl)
+      )
+    : playbackProxyCookieHeader(
+        request.url,
+        normalizedAssetId,
+        data?.playback_token,
+        safeResponse.ttl_seconds
+      );
   if (playbackCookie) headers.append("set-cookie", playbackCookie);
 
   return jsonResponse(safeResponse, { headers });
