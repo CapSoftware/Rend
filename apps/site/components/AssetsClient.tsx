@@ -8,6 +8,7 @@ import type {
   AssetErrorResponse,
   AssetUploadResponse,
 } from "../lib/asset-types.ts";
+import type { DashboardUploadIntentResponse } from "../lib/dashboard-upload-token.ts";
 import { signOutOfDashboard } from "../lib/auth-client.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
 
@@ -16,6 +17,15 @@ type UploadState =
   | { status: "uploading"; progress: number | null }
   | { status: "error"; message: string }
   | { status: "done"; message: string };
+
+type DirectUploadResponse = {
+  asset_id?: unknown;
+  source_state?: unknown;
+  playable_state?: unknown;
+  byte_size?: unknown;
+  message?: unknown;
+  error?: unknown;
+};
 
 function formatBytes(value: number | undefined) {
   if (value === undefined) return "-";
@@ -37,27 +47,87 @@ function formatTimestamp(value: string) {
     : date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
-function uploadFile(file: File, onProgress: (progress: number | null) => void) {
+async function requestUploadIntent(file: File) {
+  const response = await fetch("/api/assets/upload-token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      contentLength: file.size,
+      contentType: file.type || "application/octet-stream",
+    }),
+  });
+  const body = (await response.json().catch(() => null)) as
+    | DashboardUploadIntentResponse
+    | AssetErrorResponse
+    | null;
+  if (!response.ok || !body || body.status !== "ok") {
+    throw new Error(body && "message" in body ? body.message : "Could not prepare upload");
+  }
+  return body;
+}
+
+function directUploadResponseToAssetUpload(body: DirectUploadResponse): AssetUploadResponse | null {
+  if (
+    typeof body.asset_id !== "string" ||
+    typeof body.source_state !== "string" ||
+    typeof body.playable_state !== "string"
+  ) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    status: "ok",
+    asset: {
+      asset_id: body.asset_id,
+      source_state: body.source_state,
+      playable_state: body.playable_state,
+      created_at: now,
+      updated_at: now,
+      source_byte_size: typeof body.byte_size === "number" && Number.isFinite(body.byte_size) ? body.byte_size : undefined,
+      artifact_count: 1,
+    },
+  };
+}
+
+function uploadErrorMessage(status: number, body: DirectUploadResponse | AssetErrorResponse | null) {
+  if (body) {
+    if ("message" in body && typeof body.message === "string") return body.message;
+    if ("error" in body && typeof body.error === "string") return body.error;
+  }
+  return `Upload failed with HTTP ${status}`;
+}
+
+async function uploadFile(file: File, onProgress: (progress: number | null) => void) {
+  const uploadIntent = await requestUploadIntent(file);
+
   return new Promise<AssetUploadResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/assets");
+    xhr.open("POST", uploadIntent.upload_url);
     xhr.responseType = "json";
-    xhr.withCredentials = true;
-    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.withCredentials = false;
+    xhr.setRequestHeader("authorization", `Bearer ${uploadIntent.token}`);
+    xhr.setRequestHeader("content-type", uploadIntent.content_type);
 
     xhr.upload.onprogress = (event) => {
       onProgress(event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : null);
     };
     xhr.onload = () => {
-      const body = xhr.response as AssetUploadResponse | { message?: string } | null;
-      if (xhr.status >= 200 && xhr.status < 300 && body && "asset" in body) {
-        resolve(body);
+      const body = xhr.response as DirectUploadResponse | AssetUploadResponse | AssetErrorResponse | null;
+      if (xhr.status >= 200 && xhr.status < 300 && body) {
+        if ("asset" in body) {
+          resolve(body as AssetUploadResponse);
+          return;
+        }
+        const uploadResponse = directUploadResponseToAssetUpload(body);
+        if (uploadResponse) {
+          resolve(uploadResponse);
+          return;
+        }
+        reject(new Error("Rend API returned an invalid upload response"));
       } else {
-        const message =
-          body && "message" in body && typeof body.message === "string"
-            ? body.message
-            : `Upload failed with HTTP ${xhr.status}`;
-        reject(new Error(message));
+        const errorBody = body && !("asset" in body) ? body : null;
+        reject(new Error(uploadErrorMessage(xhr.status, errorBody)));
       }
     };
     xhr.onerror = () => reject(new Error("Upload failed"));
