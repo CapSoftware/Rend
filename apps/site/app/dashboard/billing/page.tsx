@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Wallet } from "lucide-react";
 import Link from "next/link";
 import {
   billingFeatureIds,
@@ -9,6 +10,20 @@ import {
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
 import { LEGAL_ASSENT_VERSION } from "../../../lib/legal-assent-constants.ts";
+import { Button } from "@/components/ui/Button";
+import {
+  Callout,
+  DashboardContent,
+  Panel,
+  StatusBadge,
+  SubHeader,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+} from "@/components/dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -95,179 +110,183 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
   const returnUrl = "/dashboard/billing";
 
   return (
-    <div className="app-shell">
-      <header className="app-topbar">
-        <a href="/" aria-label="Rend home">
-          <img src="/rend-logo.svg" alt="Rend" className="app-logo" />
-        </a>
-        <nav>
-          <Link href="/dashboard/assets">Assets</Link>
-          <Link href="/dashboard/api-keys">API keys</Link>
-          <Link href="/dashboard/billing">Billing</Link>
-        </nav>
-      </header>
-
-      <main className="app-main">
-        <section className="app-page-head">
-          <div>
-            <p className="app-kicker">Rend app</p>
-            <h1>Billing</h1>
-          </div>
+    <>
+      <SubHeader
+        title="Billing"
+        docsHref="/docs#billing-usage"
+        actions={
           <form action="/api/billing/portal" method="post">
             <input name="return_url" type="hidden" value={returnUrl} />
-            <button disabled={!billing.manageBillingEnabled} type="submit">
-              Manage billing
-            </button>
+            <Button
+              type="submit"
+              variant="secondary"
+              size="sm"
+              className="rounded-md"
+              disabled={!billing.manageBillingEnabled}
+            >
+              <Wallet className="size-4" />
+              <span className="hidden sm:inline">Manage billing</span>
+              <span className="sm:hidden">Manage</span>
+            </Button>
           </form>
-        </section>
+        }
+      />
 
-        {billing.error ? (
-          <section className="app-callout app-callout-error">
-            <span>{billing.error}</span>
-          </section>
+      <DashboardContent>
+      <div className="mb-5 flex flex-col gap-3 empty:hidden">
+        {billing.error ? <Callout tone="danger">{billing.error}</Callout> : null}
+        {billingActionError ? <Callout tone="danger">{billingActionError}</Callout> : null}
+        {dashboardState.status !== "ready_to_upload" ? (
+          <Callout
+            tone={dashboardState.status === "billing_unavailable" ? "danger" : "warn"}
+            title={dashboardState.title}
+          >
+            {dashboardState.message}
+          </Callout>
         ) : null}
+      </div>
 
-        {billingActionError ? (
-          <section className="app-callout app-callout-error">
-            <span>{billingActionError}</span>
-          </section>
-        ) : null}
-
-        <section
-          className={`app-callout ${
-            dashboardState.status === "ready_to_upload" ? "app-callout-done" : "app-callout-error"
-          }`}
+      <div className="mb-5 grid gap-5 lg:grid-cols-2">
+        <Panel
+          title="Plan"
+          actions={
+            <StatusBadge tone={billing.status === "ok" ? "success" : "danger"}>
+              {billing.mode.charAt(0).toUpperCase() + billing.mode.slice(1)}
+            </StatusBadge>
+          }
         >
-          <div>
-            <strong>{dashboardState.title}</strong>
-            <span>{dashboardState.message}</span>
-          </div>
-        </section>
-
-        <section className="app-panel">
-          <div className="app-panel-title-row">
-            <div>
-              <h2>Plan</h2>
-              <p className="app-muted app-mono">{billing.customerId}</p>
-            </div>
-            <span className={`app-pill app-state-${billing.status === "ok" ? "ready" : "failed"}`}>
-              {billing.mode}
-            </span>
-          </div>
-
-          <dl className="app-stats">
-            <div>
-              <dt>Current plan</dt>
-              <dd>{billing.currentPlanLabel}</dd>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-4">
+            <div className="col-span-2">
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Customer</dt>
+              <dd className="mt-1.5 break-all font-mono text-[12.5px] text-ink-soft">{billing.customerId}</dd>
             </div>
             <div>
-              <dt>Billing sync</dt>
-              <dd>{billing.status}</dd>
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Current plan</dt>
+              <dd className="mt-1.5 text-[13.5px] font-medium text-ink">{billing.currentPlanLabel}</dd>
             </div>
             <div>
-              <dt>Last sync</dt>
-              <dd>{formatTimestamp(billing.syncedAt)}</dd>
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Billing sync</dt>
+              <dd className="mt-1.5 text-[13.5px] text-ink-soft">{billing.status}</dd>
+            </div>
+            <div className="col-span-2">
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Last sync</dt>
+              <dd className="mt-1.5 font-mono text-[12.5px] text-ink-soft">{formatTimestamp(billing.syncedAt)}</dd>
             </div>
           </dl>
-        </section>
+        </Panel>
 
-        <section className="app-panel">
-          <div className="app-panel-title-row">
-            <h2>Usage</h2>
-          </div>
+        <Panel title="Usage" flush={billing.balances.length > 0} bodyClassName={billing.balances.length > 0 ? undefined : "p-4 sm:p-5"}>
           {billing.balances.length === 0 ? (
-            <div className="app-empty">No billing balances are available.</div>
+            <p className="text-[13.5px] text-muted">No billing balances are available.</p>
           ) : (
-            <div className="app-table-wrap">
-              <table className="app-table">
-                <thead>
-                  <tr>
-                    <th>Feature</th>
-                    <th>Balance</th>
-                    <th>Usage</th>
-                    <th>Reset</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {billing.balances.map((balance) => (
-                    <tr key={balance.featureId}>
-                      <td>{balanceLabel(balance.featureId)}</td>
-                      <td>{displayBalanceValue(balance)}</td>
-                      <td>{formatNumber(balance.usage)}</td>
-                      <td>{formatTimestamp(balance.nextResetAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Feature</TH>
+                  <TH className="text-right">Balance</TH>
+                  <TH className="text-right">Usage</TH>
+                  <TH className="hidden text-right sm:table-cell">Reset</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {billing.balances.map((balance) => (
+                  <TR key={balance.featureId}>
+                    <TD className="text-ink">{balanceLabel(balance.featureId)}</TD>
+                    <TD className="text-right font-mono text-[12px] tabular-nums text-ink-soft">
+                      {displayBalanceValue(balance)}
+                    </TD>
+                    <TD className="text-right font-mono text-[12px] tabular-nums text-muted">
+                      {formatNumber(balance.usage)}
+                    </TD>
+                    <TD className="hidden text-right font-mono text-[12px] text-muted sm:table-cell">
+                      {formatTimestamp(balance.nextResetAt)}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
           )}
-        </section>
+        </Panel>
+      </div>
 
-        <section className="app-panel">
-          <div className="app-panel-title-row">
-            <h2>Plans</h2>
+      <Panel title="Plans">
+        {billing.plans.length === 0 ? (
+          <p className="text-[13.5px] text-muted">No plans are available.</p>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {billing.plans.map((plan) => {
+              const actionDisabled =
+                !billing.checkoutEnabled ||
+                plan.attachAction === "none" ||
+                plan.relationshipStatus === "active";
+              const assentId = `billing-assent-${plan.id}`;
+              const isCurrent = plan.relationshipStatus === "active";
+
+              return (
+                <article
+                  key={plan.id}
+                  className="flex flex-col gap-4 rounded-xl border border-line bg-card p-5"
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-head text-[17px] leading-tight text-ink">{plan.name}</h3>
+                      {isCurrent ? <StatusBadge tone="success">Current</StatusBadge> : null}
+                    </div>
+                    {plan.description ? (
+                      <p className="mt-1.5 text-[13px] leading-relaxed text-muted">{plan.description}</p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="font-mono text-[22px] font-medium text-ink">
+                      {plan.priceLabel ?? plan.id}
+                    </span>
+                    {plan.intervalLabel ? (
+                      <span className="text-[12px] text-muted">{plan.intervalLabel}</span>
+                    ) : null}
+                  </div>
+
+                  <form action="/api/billing/checkout" method="post" className="mt-auto flex flex-col gap-3">
+                    <input name="plan_id" type="hidden" value={plan.id} />
+                    <input name="return_url" type="hidden" value={returnUrl} />
+                    <input name="legal_assent_version" type="hidden" value={LEGAL_ASSENT_VERSION} />
+                    <label
+                      htmlFor={assentId}
+                      className="flex items-start gap-2.5 rounded-md border border-line bg-bg-sunken/50 p-2.5 text-[12px] leading-relaxed text-muted"
+                    >
+                      <input
+                        aria-describedby={`${assentId}-copy`}
+                        disabled={actionDisabled}
+                        id={assentId}
+                        name="legal_assent"
+                        required
+                        type="checkbox"
+                        value="accepted"
+                        className="mt-0.5 size-3.5 shrink-0 accent-ink"
+                      />
+                      <span id={`${assentId}-copy`}>
+                        I agree to the{" "}
+                        <Link href="/terms" target="_blank" rel="noopener noreferrer" className="font-medium text-ink underline underline-offset-2">
+                          Terms
+                        </Link>{" "}
+                        and{" "}
+                        <Link href="/privacy" target="_blank" rel="noopener noreferrer" className="font-medium text-ink underline underline-offset-2">
+                          Privacy Notice
+                        </Link>
+                        , including renewal, usage, and overage charges for this plan.
+                      </span>
+                    </label>
+                    <Button type="submit" className="w-full rounded-md" disabled={actionDisabled}>
+                      {isCurrent ? "Current plan" : plan.attachAction ?? "Choose plan"}
+                    </Button>
+                  </form>
+                </article>
+              );
+            })}
           </div>
-          {billing.plans.length === 0 ? (
-            <div className="app-empty">No plans are available.</div>
-          ) : (
-            <div className="app-plan-grid">
-              {billing.plans.map((plan) => {
-                const actionDisabled =
-                  !billing.checkoutEnabled ||
-                  plan.attachAction === "none" ||
-                  plan.relationshipStatus === "active";
-                const assentId = `billing-assent-${plan.id}`;
-
-                return (
-                  <article className="app-plan-card" key={plan.id}>
-                    <div>
-                      <h3>{plan.name}</h3>
-                      {plan.description ? <p className="app-muted">{plan.description}</p> : null}
-                    </div>
-                    <div className="app-plan-price">
-                      <strong>{plan.priceLabel ?? plan.id}</strong>
-                      {plan.intervalLabel ? <span>{plan.intervalLabel}</span> : null}
-                    </div>
-                    <form action="/api/billing/checkout" method="post">
-                      <input name="plan_id" type="hidden" value={plan.id} />
-                      <input name="return_url" type="hidden" value={returnUrl} />
-                      <input name="legal_assent_version" type="hidden" value={LEGAL_ASSENT_VERSION} />
-                      <div className="app-legal-check">
-                        <input
-                          aria-describedby={`${assentId}-copy`}
-                          disabled={actionDisabled}
-                          id={assentId}
-                          name="legal_assent"
-                          required
-                          type="checkbox"
-                          value="accepted"
-                        />
-                        <div>
-                          <label htmlFor={assentId}>I agree to Rend's legal terms for this plan.</label>
-                          <p id={`${assentId}-copy`}>
-                            This means the{" "}
-                            <Link href="/terms" target="_blank" rel="noopener noreferrer">
-                              Terms
-                            </Link>{" "}
-                            and{" "}
-                            <Link href="/privacy" target="_blank" rel="noopener noreferrer">
-                              Privacy Notice
-                            </Link>
-                            , including renewal, usage, and overage charges shown for this plan.
-                          </p>
-                        </div>
-                      </div>
-                      <button disabled={actionDisabled} type="submit">
-                        {plan.relationshipStatus === "active" ? "Current plan" : plan.attachAction ?? "Choose plan"}
-                      </button>
-                    </form>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      </main>
-    </div>
+        )}
+      </Panel>
+      </DashboardContent>
+    </>
   );
 }
