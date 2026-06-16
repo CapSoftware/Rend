@@ -5,6 +5,7 @@ import { FormEvent, useState } from "react";
 import { ArrowRight } from "@/components/marketing/Icons";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
+import { authFailureMessage, authRequestTimedOutMessage } from "@/lib/auth-errors";
 import { LEGAL_ASSENT_VERSION } from "@/lib/legal-assent-constants";
 
 /**
@@ -51,9 +52,14 @@ export default function LoginForm({
   const normalizedEmail = email.trim().toLowerCase();
   const normalizedCode = code.trim();
 
-  async function postAuth(path: string, body: Record<string, string>, fallbackMessage: string) {
+  async function postAuth(
+    path: string,
+    body: Record<string, string>,
+    fallbackMessage: string,
+    context: "otp_request" | "otp_verification"
+  ) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    const timeout = window.setTimeout(() => controller.abort(), 20_000);
     try {
       const response = await fetch(path, {
         method: "POST",
@@ -64,13 +70,18 @@ export default function LoginForm({
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
         throw new Error(
-          typeof payload?.message === "string" && payload.message ? payload.message : fallbackMessage
+          authFailureMessage({
+            status: response.status,
+            payload,
+            fallback: fallbackMessage,
+            context,
+          })
         );
       }
       return response;
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") {
-        throw new Error("Sign-in request timed out. Check the local dev server and try again.");
+        throw new Error(authRequestTimedOutMessage(context));
       }
       throw requestError;
     } finally {
@@ -87,7 +98,8 @@ export default function LoginForm({
         legal_assent_version: LEGAL_ASSENT_VERSION,
         type: "sign-in",
       },
-      "Unable to send sign-in code"
+      "Unable to send sign-in code",
+      "otp_request"
     );
     setCodeSent(true);
   }
@@ -96,7 +108,8 @@ export default function LoginForm({
     await postAuth(
       "/api/auth/sign-in/email-otp",
       { email: normalizedEmail, otp: normalizedCode },
-      "Invalid or expired sign-in code"
+      "Invalid or expired sign-in code",
+      "otp_verification"
     );
     window.location.assign(nextPath);
   }
