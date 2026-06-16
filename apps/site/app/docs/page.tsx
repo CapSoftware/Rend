@@ -180,9 +180,12 @@ export default function DocsPage() {
   return (
     <div className="overflow-x-clip">
       <Effects />
-      <SiteHeader>
-        <DocsCommandPalette items={docsCommandItems} />
-      </SiteHeader>
+      <SiteHeader />
+      <div className="border-b border-line bg-bg-sunken/60">
+        <Container size="wide" className="py-2.5">
+          <DocsCommandPalette items={docsCommandItems} />
+        </Container>
+      </div>
 
       <main>
         {/* ------------------------------- Hero ------------------------------- */}
