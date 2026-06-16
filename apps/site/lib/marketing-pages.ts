@@ -176,6 +176,37 @@ export const marketingPages: MarketingPage[] = [
     ],
   },
   {
+    path: "/benchmarks",
+    navLabel: "Benchmarks",
+    inHeaderNav: false,
+    footerGroup: "Product",
+    title: "Benchmarks",
+    description:
+      "An honest startup benchmark: time to first frame for Rend versus Mux on the same source video, measured from a clean browser with the raw results published.",
+    ogSubtitle: "Time to first frame, Rend versus Mux on the same source video, with raw results published.",
+    summary:
+      "A startup speed benchmark comparing Rend and Mux on the same source video: median time to first frame, stall counts and reliability across five randomized samples from a clean browser in Daytona US, with the full raw artifacts published. Rend served 1080p and Mux served 720p.",
+    priority: 0.8,
+    faqs: [
+      {
+        q: "What does this benchmark measure?",
+        a: "Time to first frame, the gap between opening the page and the first painted video frame, plus how often playback stalls. It is the part a viewer actually feels the moment they press play.",
+      },
+      {
+        q: "Is this a fair comparison?",
+        a: "We use the same source video, the same machine and browser, a clean cache for every sample, and we randomize provider order each round. We also publish the raw results and the caveats so you can check the methodology yourself.",
+      },
+      {
+        q: "Why did Rend serve 1080p and Mux serve 720p?",
+        a: "Each player selected its own rendition for the same source video. Rend served full 1920 by 1080 while Mux selected 1280 by 720, so Rend delivered more pixels and still reached the first frame sooner in this run.",
+      },
+      {
+        q: "Can I reproduce these numbers?",
+        a: "Yes. The full machine readable results and every raw sample are linked on the page, and you can upload your own video to both services and time the first frame yourself.",
+      },
+    ],
+  },
+  {
     path: "/about",
     navLabel: "About",
     inHeaderNav: false,
