@@ -5,6 +5,7 @@ export type AssetSummary = {
   created_at: string;
   updated_at: string;
   source_byte_size?: number;
+  duration_ms?: number;
   artifact_count: number;
   suspended_at?: string;
   suspension_reason?: string;
