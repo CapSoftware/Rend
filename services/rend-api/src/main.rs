@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::BTreeSet,
     convert::Infallible,
     net::SocketAddr,
@@ -38,7 +39,7 @@ use rend_config::{
 };
 use rend_playback_auth::{
     PlaybackAuthError, PlaybackTokenIssuer, SigningKey, current_unix_timestamp,
-    is_valid_hls_segment_name,
+    is_asset_playback_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,11 +60,13 @@ type HmacSha256 = Hmac<Sha256>;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
-const DEFAULT_EDGE_WARM_MAX_ARTIFACTS: usize = 4;
+const DEFAULT_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const HARD_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const EDGE_WARM_LOG_BODY_LIMIT_BYTES: usize = 1024;
 const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
+const HLS_STARTUP_SEGMENTS_PER_RENDITION: usize = 2;
+const HLS_RENDITION_ORDER: [&str; 4] = ["720p", "1080p", "2k", "4k"];
 const DEFAULT_ASSET_LIST_LIMIT: usize = 50;
 const MAX_ASSET_LIST_LIMIT: usize = 100;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
@@ -2878,7 +2881,9 @@ fn playback_artifacts(asset_id: &str, records: &[PlaybackArtifactRecord]) -> Vec
         .iter()
         .filter_map(|record| playback_artifact_from_record(asset_id, record))
         .collect::<Vec<_>>();
-    artifacts.sort_by(|left, right| left.artifact_path.cmp(&right.artifact_path));
+    artifacts.sort_by(|left, right| {
+        compare_hls_startup_paths(&left.artifact_path, &right.artifact_path)
+    });
     artifacts
 }
 
@@ -2891,10 +2896,8 @@ fn playback_artifact_from_record(
 
     let is_supported = match record.kind.as_str() {
         "opener" => artifact_path == "opener.mp4",
-        "manifest" => artifact_path == "hls/master.m3u8",
-        "segment" => artifact_path
-            .strip_prefix("hls/")
-            .is_some_and(is_valid_hls_segment_name),
+        "manifest" => is_hls_manifest_artifact_path(artifact_path),
+        "segment" => is_hls_segment_artifact_path(artifact_path),
         _ => false,
     };
 
@@ -2950,16 +2953,150 @@ fn first_segment_prefetch_hints(
     artifacts: &[PlaybackArtifact],
     limit: usize,
 ) -> Vec<PlaybackPrefetchHint> {
-    artifacts
+    hls_startup_prefetch_paths(artifacts, limit)
         .iter()
-        .filter(|artifact| is_hls_segment_artifact_path(&artifact.artifact_path))
-        .take(limit)
         .map(|artifact| PlaybackPrefetchHint {
             artifact_path: artifact.artifact_path.clone(),
             url: artifact_url(playback_base_url, asset_id, &artifact.artifact_path),
             content_type: artifact.content_type.clone(),
         })
         .collect()
+}
+
+fn hls_startup_prefetch_paths<'a>(
+    artifacts: &'a [PlaybackArtifact],
+    limit: usize,
+) -> Vec<&'a PlaybackArtifact> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut hints = Vec::new();
+    let tiers = hls_renditions_present(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_path.as_str()),
+    );
+    if !tiers.is_empty() {
+        for tier in tiers {
+            let playlist_path = format!("hls/{tier}/index.m3u8");
+            if let Some(playlist) = artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_path == playlist_path)
+            {
+                hints.push(playlist);
+                if hints.len() >= limit {
+                    return hints;
+                }
+            }
+
+            let mut segments = artifacts
+                .iter()
+                .filter(|artifact| hls_rendition_name(&artifact.artifact_path) == Some(tier))
+                .filter(|artifact| is_hls_segment_artifact_path(&artifact.artifact_path))
+                .collect::<Vec<_>>();
+            segments.sort_by(|left, right| {
+                compare_hls_startup_paths(&left.artifact_path, &right.artifact_path)
+            });
+            for segment in segments
+                .into_iter()
+                .take(HLS_STARTUP_SEGMENTS_PER_RENDITION)
+            {
+                hints.push(segment);
+                if hints.len() >= limit {
+                    return hints;
+                }
+            }
+        }
+        return hints;
+    }
+
+    let mut legacy_segments = artifacts
+        .iter()
+        .filter(|artifact| is_hls_segment_artifact_path(&artifact.artifact_path))
+        .collect::<Vec<_>>();
+    legacy_segments.sort_by(|left, right| {
+        compare_hls_startup_paths(&left.artifact_path, &right.artifact_path)
+    });
+    legacy_segments.truncate(limit);
+    legacy_segments
+}
+
+fn compare_hls_startup_paths(left: &str, right: &str) -> CmpOrdering {
+    hls_startup_sort_key(left)
+        .cmp(&hls_startup_sort_key(right))
+        .then_with(|| left.cmp(right))
+}
+
+fn hls_startup_sort_key(path: &str) -> (u8, u8, u32) {
+    if path == "hls/master.m3u8" {
+        return (0, 0, 0);
+    }
+    if path == "opener.mp4" {
+        return (4, 0, 0);
+    }
+    if is_hls_manifest_artifact_path(path) {
+        return (
+            1,
+            hls_rendition_rank(hls_rendition_name(path).unwrap_or_default()),
+            0,
+        );
+    }
+    if is_hls_segment_artifact_path(path) {
+        return (
+            2,
+            hls_rendition_rank(hls_rendition_name(path).unwrap_or("720p")),
+            hls_segment_index(path).unwrap_or(u32::MAX),
+        );
+    }
+    (5, u8::MAX, u32::MAX)
+}
+
+fn hls_renditions_present<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
+    let paths = paths.collect::<Vec<_>>();
+    HLS_RENDITION_ORDER
+        .iter()
+        .copied()
+        .filter(|tier| {
+            let prefix = format!("hls/{tier}/");
+            paths.iter().any(|path| path.starts_with(&prefix))
+        })
+        .collect()
+}
+
+fn hls_rendition_name(path: &str) -> Option<&str> {
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["hls", tier, _] if HLS_RENDITION_ORDER.contains(tier) => Some(tier),
+        _ => None,
+    }
+}
+
+fn hls_rendition_rank(tier: &str) -> u8 {
+    HLS_RENDITION_ORDER
+        .iter()
+        .position(|candidate| *candidate == tier)
+        .and_then(|index| u8::try_from(index).ok())
+        .unwrap_or(u8::MAX)
+}
+
+fn is_hls_manifest_artifact_path(path: &str) -> bool {
+    path == "hls/master.m3u8"
+        || (path.starts_with("hls/")
+            && path.ends_with("/index.m3u8")
+            && is_asset_playback_path(path))
+}
+
+fn is_hls_segment_artifact_path(path: &str) -> bool {
+    path.starts_with("hls/") && path.ends_with(".ts") && is_asset_playback_path(path)
+}
+
+fn hls_segment_index(path: &str) -> Option<u32> {
+    path.split('/')
+        .next_back()?
+        .strip_prefix("segment_")?
+        .strip_suffix(".ts")?
+        .parse::<u32>()
+        .ok()
 }
 
 fn issue_playback_token(
@@ -3964,23 +4101,79 @@ fn edge_warm_artifact_paths(
     let mut artifact_paths = Vec::new();
     match playable_state {
         "opener_ready" => {
-            push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
+            if contains_artifact_path(generated_artifact_paths, "opener.mp4") {
+                push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
+            }
         }
         "hls_ready" => {
-            push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
-            push_unique_artifact_path(&mut artifact_paths, "hls/master.m3u8");
+            if contains_artifact_path(generated_artifact_paths, "hls/master.m3u8") {
+                push_unique_artifact_path(&mut artifact_paths, "hls/master.m3u8");
+            }
 
-            let mut segments = generated_artifact_paths
+            let tiers = hls_renditions_present(generated_artifact_paths.iter().map(String::as_str));
+            if !tiers.is_empty() {
+                for tier in tiers {
+                    let playlist_path = format!("hls/{tier}/index.m3u8");
+                    if contains_artifact_path(generated_artifact_paths, &playlist_path) {
+                        push_unique_artifact_path(&mut artifact_paths, &playlist_path);
+                    }
+                    if artifact_paths.len() >= max_artifacts {
+                        break;
+                    }
+
+                    let mut segments = generated_artifact_paths
+                        .iter()
+                        .filter(|path| hls_rendition_name(path) == Some(tier))
+                        .filter(|path| is_hls_segment_artifact_path(path))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    segments.sort_by(|left, right| compare_hls_startup_paths(left, right));
+                    for segment in segments
+                        .into_iter()
+                        .take(HLS_STARTUP_SEGMENTS_PER_RENDITION)
+                    {
+                        push_unique_artifact_path(&mut artifact_paths, &segment);
+                        if artifact_paths.len() >= max_artifacts {
+                            break;
+                        }
+                    }
+                    if artifact_paths.len() >= max_artifacts {
+                        break;
+                    }
+                }
+            } else {
+                let mut segments = generated_artifact_paths
+                    .iter()
+                    .filter(|path| is_hls_segment_artifact_path(path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                segments.sort_by(|left, right| compare_hls_startup_paths(left, right));
+                for segment in segments {
+                    push_unique_artifact_path(&mut artifact_paths, &segment);
+                    if artifact_paths.len() >= max_artifacts {
+                        break;
+                    }
+                }
+            }
+
+            let mut remaining_hls_paths = generated_artifact_paths
                 .iter()
-                .filter(|path| is_hls_segment_artifact_path(path))
+                .filter(|path| path.starts_with("hls/"))
+                .filter(|path| path.as_str() != "hls/master.m3u8")
                 .cloned()
                 .collect::<Vec<_>>();
-            segments.sort();
-            for segment in segments {
-                push_unique_artifact_path(&mut artifact_paths, &segment);
+            remaining_hls_paths.sort_by(|left, right| compare_hls_startup_paths(left, right));
+            for path in remaining_hls_paths {
+                push_unique_artifact_path(&mut artifact_paths, &path);
                 if artifact_paths.len() >= max_artifacts {
                     break;
                 }
+            }
+
+            if artifact_paths.len() < max_artifacts
+                && contains_artifact_path(generated_artifact_paths, "opener.mp4")
+            {
+                push_unique_artifact_path(&mut artifact_paths, "opener.mp4");
             }
         }
         _ => {}
@@ -4007,9 +4200,8 @@ fn push_unique_artifact_path(paths: &mut Vec<String>, path: &str) {
     }
 }
 
-fn is_hls_segment_artifact_path(path: &str) -> bool {
-    path.strip_prefix("hls/")
-        .is_some_and(is_valid_hls_segment_name)
+fn contains_artifact_path(paths: &[String], path: &str) -> bool {
+    paths.iter().any(|candidate| candidate == path)
 }
 
 async fn send_edge_warm_request(
