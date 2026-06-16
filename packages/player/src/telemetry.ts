@@ -6,9 +6,15 @@ export type RendPlayerTelemetryPhase =
   | "player_load"
   | "bootstrap_complete"
   | "source_selected"
+  | "source_handoff"
+  | "hls_ready"
+  | "hls_level_switch"
+  | "hls_fragment_loaded"
   | "metadata_loaded"
   | "canplay"
   | "first_frame"
+  | "stall_start"
+  | "stall_end"
   | "bootstrap_failure"
   | "playback_failure";
 
@@ -23,6 +29,19 @@ export type RendPlayerTelemetryEvent = {
   bootstrap_http_status?: number;
   selected_playback_mode?: RendPlayerPlaybackMode;
   selected_artifact_path?: string;
+  previous_playback_mode?: RendPlayerPlaybackMode;
+  previous_artifact_path?: string;
+  selected_width?: number;
+  selected_height?: number;
+  selected_bitrate?: number;
+  hls_level_index?: number;
+  hls_fragment_index?: number;
+  hls_fragment_duration_ms?: number;
+  hls_fragment_load_ms?: number;
+  stall_reason?: string;
+  stall_start_ms?: number;
+  stall_end_ms?: number;
+  stall_duration_ms?: number;
   metadata_loaded_ms?: number;
   canplay_ms?: number;
   first_frame_ms?: number;
