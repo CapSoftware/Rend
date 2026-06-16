@@ -188,7 +188,7 @@ fetch_playback_bootstrap "$asset_id" "$bootstrap_response"
 
 artifact_list="$tmp_dir/bootstrap-artifacts.tsv"
 python3 - "$bootstrap_response" "$edge_base" "$asset_id" "$REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS" >"$artifact_list" <<'PY'
-import json, sys
+import json, re, sys
 
 path, edge_base, asset_id, cap = sys.argv[1], sys.argv[2].rstrip("/"), sys.argv[3], int(sys.argv[4])
 with open(path, "r", encoding="utf-8") as f:
@@ -202,8 +202,6 @@ required = [
     "playback_content_type",
     "playback_token_expires_at",
     "ttl_seconds",
-    "opener_url",
-    "opener_content_type",
     "manifest_url",
     "manifest_content_type",
     "prefetch_hints",
@@ -232,26 +230,29 @@ if response["playback_content_type"] != "application/vnd.apple.mpegurl":
     raise SystemExit(f"unexpected playback content type {response['playback_content_type']}")
 if response["manifest_content_type"] != "application/vnd.apple.mpegurl":
     raise SystemExit(f"unexpected manifest content type {response['manifest_content_type']}")
-if response["opener_url"] != f"{edge_base}/v/{asset_id}/opener.mp4":
-    raise SystemExit("opener_url did not use the tokenless rend-edge opener shape")
-if response["opener_content_type"] != "video/mp4":
-    raise SystemExit(f"unexpected opener content type {response['opener_content_type']}")
+if response.get("opener_url") is not None:
+    if response["opener_url"] != f"{edge_base}/v/{asset_id}/opener.mp4":
+        raise SystemExit("opener_url did not use the tokenless rend-edge opener shape")
+    if response.get("opener_content_type") != "video/mp4":
+        raise SystemExit(f"unexpected opener content type {response.get('opener_content_type')}")
 
 hints = response["prefetch_hints"]
 if not hints:
-    raise SystemExit("expected at least one first segment prefetch hint")
+    raise SystemExit("expected at least one HLS prefetch hint")
 if len(hints) > cap:
     raise SystemExit(f"expected at most {cap} prefetch hints, got {len(hints)}")
+valid_artifact = re.compile(r"^(hls/master\.m3u8|hls/segment_[0-9]+\.ts|hls/(720p|1080p|2k|4k)/(index\.m3u8|segment_[0-9]+\.ts))$")
 for hint in hints:
     for key in ["artifact_path", "url", "content_type"]:
         if key not in hint:
             raise SystemExit(f"prefetch hint missing {key}: {hint}")
-    if not hint["artifact_path"].startswith("hls/segment_") or not hint["artifact_path"].endswith(".ts"):
+    if not valid_artifact.match(hint["artifact_path"]):
         raise SystemExit(f"unexpected prefetch artifact path: {hint['artifact_path']}")
     expected_url = f"{edge_base}/v/{asset_id}/{hint['artifact_path']}"
     if hint["url"] != expected_url:
         raise SystemExit(f"prefetch hint did not use tokenless rend-edge shape: {hint['url']}")
-    if hint["content_type"] != "video/mp2t":
+    expected_content_type = "application/vnd.apple.mpegurl" if hint["artifact_path"].endswith(".m3u8") else "video/mp2t"
+    if hint["content_type"] != expected_content_type:
         raise SystemExit(f"unexpected prefetch content type: {hint['content_type']}")
 
 def emit(label, url, content_type):
@@ -259,7 +260,8 @@ def emit(label, url, content_type):
 
 emit("primary", response["playback_url"], response["playback_content_type"])
 emit("manifest", response["manifest_url"], response["manifest_content_type"])
-emit("opener", response["opener_url"], response["opener_content_type"])
+if response.get("opener_url") is not None:
+    emit("opener", response["opener_url"], response["opener_content_type"])
 for hint in hints:
     emit(hint["artifact_path"], hint["url"], hint["content_type"])
 PY
