@@ -103,11 +103,11 @@ export const features: Feature[] = [
     id: "agent-native",
     title: "Easy for you and your AI",
     body:
-      "The whole guide fits on one page, with an MCP server and llms.txt, so you or the model in your editor can wire up Rend right the first time.",
+      "The whole guide fits on one page, with llms.txt, OpenAPI and a generated SDK, so you or the model in your editor can wire up Rend right the first time.",
     detail: [
       "The full integration guide fits on a single page at /docs.",
-      "An MCP server lets agents call Rend directly from your editor.",
-      "An llms.txt index points models at the stable docs and reference they need.",
+      "A copyable prompt gives agents the exact sources, key rules and smoke test path.",
+      "An llms.txt index and OpenAPI contract point models at the stable reference they need.",
     ],
     icon: (
       <svg className="sketch block h-[78px] w-24 overflow-visible" viewBox="0 0 140 120" aria-hidden="true">

@@ -30,7 +30,8 @@ export function GET() {
     "- Use only the public paths documented at /docs and /openapi.json.",
     "- Authenticated API calls use Authorization: Bearer <Rend API key>.",
     "- Browser playback uses /api/player/{assetId} and same-origin artifact URLs.",
-    "- An MCP server is available for editor integrations; see /docs.",
+    "- A copyable integration prompt is available at /docs#agent-setup.",
+    "- Generate tools from /openapi.json and prefer the TypeScript SDK for app code.",
   ];
 
   return new Response(`${lines.join("\n")}\n`, {

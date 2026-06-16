@@ -51,7 +51,7 @@ const differences = [
   "Encoding included on every upload, not a separate charge.",
   "Warmed openers at a bare-metal edge by default, so the first frame shows fast even cold.",
   "Open source and free to self-host, the same code that runs Rend Cloud.",
-  "Agent-native, with an MCP server and an llms.txt index for the model in your editor.",
+  "Agent-ready, with llms.txt, OpenAPI, a generated SDK and a copyable setup prompt for the model in your editor.",
 ];
 
 export default function ComparePage() {

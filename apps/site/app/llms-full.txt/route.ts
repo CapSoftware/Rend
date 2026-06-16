@@ -20,7 +20,7 @@ export function GET() {
     "- Pricing has two axes, both by resolution: delivery (per second streamed) and storage (per second-month kept). There are no per-minute fees and no surprise egress charges.",
     "- Plans run from pay as you go at $0 up to Enterprise, with monthly credits included on paid tiers and no lock-in.",
     "- Rend is built by Cap Software, the team behind Cap, the open source screen recorder. Cap runs entirely on Rend.",
-    "- Rend is agent-native: an MCP server and an llms.txt index help AI editors integrate it correctly.",
+    "- Rend is agent-ready: an llms.txt index, OpenAPI contract, generated TypeScript SDK, and copyable agent prompt help AI editors integrate it correctly.",
     "",
   ];
 
@@ -43,6 +43,7 @@ export function GET() {
 
   lines.push("## Docs and reference");
   lines.push(`- Docs: ${siteOrigin}/docs`);
+  lines.push(`- Agent setup: ${siteOrigin}/docs#agent-setup`);
   lines.push(`- OpenAPI contract: ${siteOrigin}/openapi.json`);
   lines.push("- TypeScript SDK: https://github.com/CapSoftware/Rend/tree/main/packages/sdk");
   lines.push(`- llms.txt index: ${siteOrigin}/llms.txt`);

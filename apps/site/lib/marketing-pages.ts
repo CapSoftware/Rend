@@ -45,7 +45,7 @@ export const marketingPages: MarketingPage[] = [
       "What Rend does for developers: one API call to upload, encoding included, fast starts from the edge, and tooling your AI editor understands.",
     ogSubtitle: "One call to upload, one fast playback URL out. Encoding, storage and delivery handled.",
     summary:
-      "What Rend does: upload with one API call, encoding included, warmed openers for fast cold starts, pricing by resolution, fully open source, and an MCP server plus llms.txt for AI editors.",
+      "What Rend does: upload with one API call, encoding included, warmed openers for fast cold starts, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
     priority: 0.9,
     faqs: [
       {
@@ -66,7 +66,7 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "Is it easy to wire up with an AI coding assistant?",
-        a: "Yes. The whole guide fits on one page, and Rend ships an MCP server and an llms.txt index so the model in your editor can set it up correctly the first time.",
+        a: "Yes. The whole guide fits on one page, and Rend ships llms.txt, OpenAPI, a generated TypeScript SDK and a copyable agent prompt so the model in your editor can set it up correctly the first time.",
       },
     ],
   },

@@ -48,7 +48,7 @@ export const cmpRows: { feature: string; cells: CmpCell[] }[] = [
     cells: [{ kind: "yes" }, { kind: "no" }, { kind: "mid" }, { kind: "no" }],
   },
   {
-    feature: "Agent-native, MCP + llms.txt",
+    feature: "Agent-ready, OpenAPI + llms.txt",
     cells: [{ kind: "yes" }, { kind: "mid" }, { kind: "no" }, { kind: "no" }],
   },
 ];
