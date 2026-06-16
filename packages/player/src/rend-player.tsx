@@ -486,6 +486,7 @@ export function RendPlayer({
 
   const setObservedHlsStats = useCallback((nextStats: HlsStats) => {
     hlsStatsRef.current = nextStats;
+    setHlsStats(nextStats);
   }, []);
 
   const mergeObservedHlsStats = useCallback((nextStats: HlsStats) => {
