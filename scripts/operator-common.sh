@@ -271,6 +271,66 @@ operator_check_http_url() {
   fi
 }
 
+operator_check_http_origin_list() {
+  local file="$1"
+  local key="$2"
+  local value
+  value="$(operator_env_value "$file" "$key" 2>/dev/null || true)"
+  [[ -n "$value" ]] || return 0
+  if python3 - "$key" "$value" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+key, value = sys.argv[1], sys.argv[2]
+origins = [item.strip() for item in value.split(",") if item.strip()]
+if not origins:
+    print(f"{key} must include at least one origin", file=sys.stderr)
+    raise SystemExit(1)
+for origin in origins:
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        print(f"{key} entry must be an absolute http(s) origin: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        print(f"{key} entries must not include credentials, query, or fragment: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.path not in {"", "/"}:
+        print(f"{key} entries must be origins only: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.port is not None and not (1 <= parsed.port <= 65535):
+        print(f"{key} port must be 1-65535: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+  then
+    operator_ok "$key has valid HTTP origins"
+  else
+    operator_fail "$(python3 - "$key" "$value" <<'PY' 2>&1 >/dev/null
+import sys
+from urllib.parse import urlparse
+key, value = sys.argv[1], sys.argv[2]
+origins = [item.strip() for item in value.split(",") if item.strip()]
+if not origins:
+    print(f"{key} must include at least one origin", file=sys.stderr)
+    raise SystemExit(1)
+for origin in origins:
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        print(f"{key} entry must be an absolute http(s) origin: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        print(f"{key} entries must not include credentials, query, or fragment: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.path not in {"", "/"}:
+        print(f"{key} entries must be origins only: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+    if parsed.port is not None and not (1 <= parsed.port <= 65535):
+        print(f"{key} port must be 1-65535: {origin}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+)"
+  fi
+}
+
 operator_check_database_url() {
   local file="$1"
   local key="$2"
@@ -785,7 +845,7 @@ operator_validate_edge_env() {
     S3_ENDPOINT S3_REGION S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
     REND_EDGE_BIND_ADDR REND_EDGE_ID REND_EDGE_REGION REND_EDGE_BASE_URL
     REND_EXPECTED_EDGES REND_ALLOW_INSECURE_EDGE_URLS REND_CONTROL_PLANE_URL
-    REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_CACHE_DIR
+    REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_CORS_ALLOWED_ORIGINS REND_EDGE_CACHE_DIR
     REND_EDGE_ORIGIN_HEALTH_URL REND_EDGE_INTERNAL_TOKEN REND_EDGE_WARM_MAX_ARTIFACTS
     REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
     REND_EDGE_CACHE_MIN_FREE_BYTES REND_EDGE_TELEMETRY_ENABLED
@@ -824,6 +884,7 @@ operator_validate_edge_env() {
   operator_check_http_url "$file" REND_CONTROL_PLANE_URL
   operator_check_http_url "$file" REND_EDGE_ORIGIN_HEALTH_URL
   operator_check_http_url "$file" REND_EDGE_TELEMETRY_INGEST_URL "/internal/telemetry/playback"
+  operator_check_http_origin_list "$file" REND_EDGE_CORS_ALLOWED_ORIGINS
   operator_check_bind_addr "$file" REND_EDGE_BIND_ADDR 4100
   operator_check_bool "$file" REND_EDGE_TELEMETRY_ENABLED
   operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
