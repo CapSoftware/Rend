@@ -1024,10 +1024,15 @@ async function validateSelfServeReadiness(context) {
   }
 
   const artifactPath = path.join(context.outputDir, "self-serve-readiness.json");
+  const otpDiagnosticsArtifact = path.join(context.outputDir, "auth-otp-diagnostics.json");
   const commandArgs = [
     "scripts/self-serve-readiness.mjs",
     "--env-file",
     context.args.envFile || ".env.production.local",
+    "--otp-diagnostics-artifact",
+    otpDiagnosticsArtifact,
+    "--require-otp-health",
+    "--require-otp-probe",
     "--dry-run-artifact",
     path.join(".rend", "launch", "production-dry-run-latest.json"),
     "--launch-gate-artifact",
@@ -1055,6 +1060,50 @@ async function validateSelfServeReadiness(context) {
   }
   if (existsSync(latest)) {
     await copyFile(latest, artifactPath).catch(() => undefined);
+  }
+  return step;
+}
+
+async function validateAuthOtpDiagnostics(context) {
+  if (context.args.mode !== "production-check") {
+    return skipStep(
+      context,
+      "auth-otp-diagnostics",
+      "auth",
+      "production auth OTP diagnostics",
+      "skipped outside production-check",
+    );
+  }
+
+  const artifactPath = path.join(context.outputDir, "auth-otp-diagnostics.json");
+  const commandArgs = [
+    "scripts/auth-otp-diagnostics.mjs",
+    "--env-file",
+    context.args.envFile || ".env.production.local",
+    "--artifact",
+    artifactPath,
+    "--require-probe",
+    "--timeout-ms",
+    String(Math.min(context.args.timeoutMs, 60_000)),
+  ];
+  const step = await runCommandStep(
+    context,
+    command(
+      "auth-otp-diagnostics",
+      "auth",
+      "production auth OTP diagnostics",
+      "node",
+      commandArgs,
+      { timeoutMs: 120_000 },
+    ),
+  );
+  const recorded = context.steps.at(-1);
+  if (recorded?.id === "auth-otp-diagnostics") {
+    recorded.artifacts = [
+      ...(recorded.artifacts || []),
+      displayPath(artifactPath),
+      displayPath(path.join(launchDir, "auth-otp-diagnostics-latest.json")),
+    ];
   }
   return step;
 }
@@ -1542,6 +1591,7 @@ function buildSteps(context) {
     () => validateCurrentEnvPolicy(context),
     () => validateProductionEnvWhenProvided(context),
     () => validateLoadedLaunchEnv(context),
+    () => validateAuthOtpDiagnostics(context),
     () => validateAutumnCatalog(context),
     () => validateAutumnCatalogParity(context),
     () => validateSelfServeReadiness(context),
