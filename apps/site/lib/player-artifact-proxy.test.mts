@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isHlsManifestArtifactPath,
   playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
@@ -61,6 +62,9 @@ test("versioned public playback artifacts use private immutable browser caching"
   const segmentHeaders = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "hls/segment_00000.ts",
   });
+  const variantSegmentHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "hls/720p/segment_00000.ts",
+  });
   const failedHeaders = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "opener.mp4",
     cacheable: false,
@@ -68,29 +72,39 @@ test("versioned public playback artifacts use private immutable browser caching"
 
   assert.equal(openerHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(segmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(variantSegmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(failedHeaders.get("cache-control"), "no-store");
 });
 
 test("manifest fetches do not forward range requests because the body is rewritten", () => {
-  const headers = playbackArtifactFetchHeaders(
-    new Headers({ range: "bytes=0-99" }),
-    "cookie-value",
-    "hls/master.m3u8"
-  );
+  for (const artifactPath of ["hls/master.m3u8", "hls/720p/index.m3u8"]) {
+    const headers = playbackArtifactFetchHeaders(
+      new Headers({ range: "bytes=0-99" }),
+      "cookie-value",
+      artifactPath
+    );
 
-  assert.equal(headers.get("range"), null);
-  assert.equal(headers.get("cookie"), "__rend_playback=cookie-value");
+    assert.equal(headers.get("range"), null);
+    assert.equal(headers.get("cookie"), "__rend_playback=cookie-value");
+  }
 });
 
 test("binary artifact fetches preserve range requests", () => {
   const headers = playbackArtifactFetchHeaders(
     new Headers({ range: "bytes=0-99" }),
     "cookie-value",
-    "hls/segment_00000.ts"
+    "hls/720p/segment_00000.ts"
   );
 
   assert.equal(headers.get("range"), "bytes=0-99");
   assert.equal(headers.get("cookie"), "__rend_playback=cookie-value");
+});
+
+test("manifest path helper recognizes master and variant playlists only", () => {
+  assert.equal(isHlsManifestArtifactPath("hls/master.m3u8"), true);
+  assert.equal(isHlsManifestArtifactPath("hls/720p/index.m3u8"), true);
+  assert.equal(isHlsManifestArtifactPath("hls/720p/segment_00000.ts"), false);
+  assert.equal(isHlsManifestArtifactPath("hls/480p/index.m3u8"), false);
 });
 
 test("proxy playback cookie is scoped to one asset artifact path", () => {
