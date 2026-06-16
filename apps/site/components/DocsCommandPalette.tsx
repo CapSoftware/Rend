@@ -89,17 +89,17 @@ export default function DocsCommandPalette({ items }: DocsCommandPaletteProps) {
       <button
         aria-haspopup="dialog"
         aria-expanded={open}
-        className="hidden h-9 items-center gap-2.5 border border-line bg-card pl-3 pr-2.5 text-[13px] font-medium text-muted transition hover:border-ink/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30 sm:inline-flex"
+        className="flex h-11 w-full items-center gap-3 border border-line bg-card px-4 text-[14px] font-medium text-muted transition hover:border-ink/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
         onClick={() => setOpen(true)}
         ref={triggerRef}
         type="button"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
           <path d="M21 21l-4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
         </svg>
         <span>Search docs</span>
-        <kbd className="ml-1 border border-line bg-bg-sunken px-1.5 py-0.5 font-mono text-[10.5px] font-medium leading-none text-faint">
+        <kbd className="ml-auto border border-line bg-bg-sunken px-1.5 py-1 font-mono text-[11px] font-medium leading-none text-faint">
           ⌘K
         </kbd>
       </button>
