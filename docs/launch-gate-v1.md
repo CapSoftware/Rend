@@ -120,8 +120,13 @@ Common failures:
   `REND_ENV=local`, and avoid production provider URLs or production secrets.
 - `production-env-validation`: replace placeholders, remove `REND_DEV_API_KEY`,
   set `REND_SELF_SERVE_SIGNUP_ENABLED=true`, set secure Better Auth and Resend
-  config, require `REND_BILLING_MODE=autumn`, and set an operator email
-  allowlist.
+  config, set `REND_AUTH_OTP_PROBE_EMAIL` for the accepted OTP probe, require
+  `REND_BILLING_MODE=autumn`, and set an operator email allowlist.
+- `auth-otp-diagnostics`: run
+  `bun run launch:auth-otp-diagnostics -- --probe-email <test-inbox>` to check
+  the same OTP route directly. The default diagnostics mode is non-mutating;
+  the probe sends one real OTP request and redacts emails, keys, cookies,
+  headers, and OTP/code values from artifacts.
 - `autumn-catalog`: run the sandbox setup helper or fix the configured plan,
   usage-credit feature, and meter feature IDs before re-running the gate.
 - `autumn-catalog-parity`: make production match the verified sandbox catalog in
