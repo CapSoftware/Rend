@@ -688,10 +688,7 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
       providerOrderByRound,
     },
     source: {
-      urls: {
-        rend: providerCatalog.rend.url,
-        mux: providerCatalog.mux.url,
-      },
+      urls: Object.fromEntries(providers.map((provider) => [provider.id, provider.url])),
       verification: sourceVerification,
     },
     fairness: {
