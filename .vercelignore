@@ -1,0 +1,10 @@
+.git
+.rend
+node_modules
+target
+apps/site/.next
+apps/site/.scratch-*.mjs
+apps/site/node_modules
+packages/*/node_modules
+services/*/target
+*.log
