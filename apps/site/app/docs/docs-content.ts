@@ -1,3 +1,5 @@
+import { AGENT_PROMPT_CODE } from "../../lib/agent-readiness.ts";
+
 export type DocsNavItem = {
   href: string;
   title: string;
@@ -14,6 +16,11 @@ export const docsNavItems: DocsNavItem[] = [
     href: "#quickstart",
     title: "Quickstart",
     description: "Sign up, choose a plan, create a key, upload, embed, and delete.",
+  },
+  {
+    href: "#agent-setup",
+    title: "Agent setup",
+    description: "Give an agent the docs, API contract, safe key rules, and smoke test path.",
   },
   {
     href: "#sdk-guide",
@@ -90,10 +97,19 @@ export const docsCommandItems: DocsCommandItem[] = [
     group: "Reference",
     keywords: "llms agent index docs ai",
   },
+  {
+    href: "/llms-full.txt",
+    title: "llms-full.txt",
+    description: "Plain-text marketing content for larger model context windows.",
+    group: "Reference",
+    keywords: "llms full plain text marketing faqs context",
+  },
 ];
 
+export { AGENT_PROMPT_CODE };
+
 export const QUICKSTART_SDK_CODE = `import { readFile } from "node:fs/promises";
-import { RendClient } from "@rend/sdk";
+import { RendClient } from "@rend-sdk/client";
 
 // 1. Sign in at https://rend.so/login with an email code.
 // 2. Choose a plan in the dashboard.
@@ -134,7 +150,7 @@ console.log(embedHtml);
 
 await client.deleteAsset(asset.asset_id);`;
 
-export const SDK_GUIDE_CODE = `import { RendClient, RendApiError } from "@rend/sdk";
+export const SDK_GUIDE_CODE = `import { RendClient, RendApiError } from "@rend-sdk/client";
 
 const rend = new RendClient({
   apiKey: process.env.REND_API_KEY,
