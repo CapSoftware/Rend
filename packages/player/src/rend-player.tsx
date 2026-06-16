@@ -423,6 +423,7 @@ export function RendPlayer({
   const hlsPreparationRef = useRef<Promise<PreparedHlsSource | null> | null>(null);
   const hlsHandoffStartedRef = useRef(false);
   const selectionRef = useRef<SourceSelection | null>(null);
+  const hlsStatsRef = useRef<HlsStats>({});
   const activeStallRef = useRef<{ reason: string; startMs: number } | null>(null);
   const [state, setState] = useState<RendPlayerState>("idle");
   const [message, setMessage] = useState("Loading playback");
@@ -483,6 +484,19 @@ export function RendPlayer({
     setSelection(nextSelection);
   }, []);
 
+  const setObservedHlsStats = useCallback((nextStats: HlsStats) => {
+    hlsStatsRef.current = nextStats;
+  }, []);
+
+  const mergeObservedHlsStats = useCallback((nextStats: HlsStats) => {
+    const mergedStats = {
+      ...hlsStatsRef.current,
+      ...nextStats,
+    };
+    hlsStatsRef.current = mergedStats;
+    setHlsStats(mergedStats);
+  }, []);
+
   const recordTiming = useCallback(
     (key: keyof RendPlayerTimings) => {
       const startedAt = loadStartedAtRef.current;
@@ -533,7 +547,7 @@ export function RendPlayer({
 
       setActiveSelection(nextSelection);
       setPlayerState("ready");
-      setHlsStats({});
+      setObservedHlsStats({});
 
       emitTelemetry({
         phase: "source_selected",
@@ -543,7 +557,14 @@ export function RendPlayer({
       video.src = nextSelection.url;
       video.load();
     },
-    [destroyHls, emitTelemetry, revokeManifestObjectUrl, setActiveSelection, setPlayerState]
+    [
+      destroyHls,
+      emitTelemetry,
+      revokeManifestObjectUrl,
+      setActiveSelection,
+      setObservedHlsStats,
+      setPlayerState,
+    ]
   );
 
   const prepareHlsSource = useCallback(
@@ -592,7 +613,7 @@ export function RendPlayer({
           level: hls.currentLevel,
           width: firstLevel?.width,
         };
-        setHlsStats(nextStats);
+        setObservedHlsStats(nextStats);
         emitTelemetry({
           phase: "hls_ready",
           ...selectionTelemetryFields(nextSelection),
@@ -612,7 +633,7 @@ export function RendPlayer({
           level,
           width: nextLevel?.width,
         };
-        setHlsStats(nextStats);
+        setObservedHlsStats(nextStats);
         emitTelemetry({
           phase: "hls_level_switch",
           ...selectionTelemetryFields(nextSelection),
@@ -672,7 +693,7 @@ export function RendPlayer({
 
       return prepared;
     },
-    [emitTelemetry, loadProgressiveSource, setPlayerState]
+    [emitTelemetry, loadProgressiveSource, setObservedHlsStats, setPlayerState]
   );
 
   const attachPreparedHls = useCallback(
@@ -709,7 +730,7 @@ export function RendPlayer({
         previous_artifact_path: previousSelection?.artifactPath,
         previous_playback_mode: previousSelection?.label,
         ...selectionTelemetryFields(prepared.selection),
-        ...hlsStatsTelemetryFields(hlsStats),
+        ...hlsStatsTelemetryFields(hlsStatsRef.current),
         cache_headers: prepared.cacheHeaders,
         edge_label: prepared.edgeLabel,
         region_label: prepared.regionLabel,
@@ -749,7 +770,6 @@ export function RendPlayer({
     },
     [
       autoPlay,
-      hlsStats,
       emitTelemetry,
       revokeManifestObjectUrl,
       setActiveSelection,
@@ -818,7 +838,7 @@ export function RendPlayer({
     hlsPreparationRef.current = null;
     hlsHandoffStartedRef.current = false;
     setActiveSelection(null);
-    setHlsStats({});
+    setObservedHlsStats({});
     setBootstrap(null);
     timingsRef.current = {};
     setTimings({});
@@ -969,6 +989,7 @@ export function RendPlayer({
     revokeManifestObjectUrl,
     resolvedBootstrapUrl,
     setActiveSelection,
+    setObservedHlsStats,
     setPlayerState,
   ]);
 
@@ -986,11 +1007,8 @@ export function RendPlayer({
   const updateObservedVideoStats = useCallback(() => {
     const currentSelection = selectionRef.current;
     if (!currentSelection || currentSelection.artifactPath !== "hls/master.m3u8") return;
-    setHlsStats((current) => ({
-      ...current,
-      ...hlsStatsFromVideo(videoRef.current),
-    }));
-  }, []);
+    mergeObservedHlsStats(hlsStatsFromVideo(videoRef.current));
+  }, [mergeObservedHlsStats]);
 
   const startStall = useCallback(
     (reason: string) => {
@@ -1004,10 +1022,10 @@ export function RendPlayer({
         stall_reason: reason,
         stall_start_ms: roundedMs(startMs),
         ...selectionTelemetryFields(selectionRef.current),
-        ...hlsStatsTelemetryFields(hlsStats),
+        ...hlsStatsTelemetryFields(hlsStatsRef.current),
       });
     },
-    [emitTelemetry, hlsStats]
+    [emitTelemetry]
   );
 
   const endStall = useCallback(
@@ -1024,10 +1042,10 @@ export function RendPlayer({
         stall_end_ms: roundedMs(endMs),
         stall_duration_ms: roundedMs(endMs - active.startMs),
         ...selectionTelemetryFields(selectionRef.current),
-        ...hlsStatsTelemetryFields(hlsStats),
+        ...hlsStatsTelemetryFields(hlsStatsRef.current),
       });
     },
-    [emitTelemetry, hlsStats]
+    [emitTelemetry]
   );
 
   useEffect(() => {
@@ -1105,7 +1123,7 @@ export function RendPlayer({
                 phase: "metadata_loaded",
                 metadata_loaded_ms: metadataMs,
                 ...selectionTelemetryFields(selectionRef.current),
-                ...hlsStatsTelemetryFields(hlsStats),
+                ...hlsStatsTelemetryFields(hlsStatsRef.current),
               });
             }
             setPlayerState("metadata");
@@ -1119,7 +1137,7 @@ export function RendPlayer({
                 phase: "canplay",
                 canplay_ms: canplayMs,
                 ...selectionTelemetryFields(selectionRef.current),
-                ...hlsStatsTelemetryFields(hlsStats),
+                ...hlsStatsTelemetryFields(hlsStatsRef.current),
               });
             }
             setPlayerState("canplay");
@@ -1133,7 +1151,7 @@ export function RendPlayer({
                 phase: "first_frame",
                 first_frame_ms: firstFrameMs,
                 ...selectionTelemetryFields(selectionRef.current),
-                ...hlsStatsTelemetryFields(hlsStats),
+                ...hlsStatsTelemetryFields(hlsStatsRef.current),
               });
             }
             setPlayerState("playing");
