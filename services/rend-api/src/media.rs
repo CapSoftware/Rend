@@ -18,6 +18,53 @@ use crate::{
 };
 
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
+const HLS_X264_PRESET: &str = "superfast";
+const HLS_AUDIO_BITRATE: &str = "96k";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HlsRendition {
+    name: &'static str,
+    max_dimension: i32,
+    video_bitrate: &'static str,
+    maxrate: &'static str,
+    bufsize: &'static str,
+    resolution_tier: &'static str,
+}
+
+const HLS_RENDITIONS: [HlsRendition; 4] = [
+    HlsRendition {
+        name: "720p",
+        max_dimension: 1280,
+        video_bitrate: "2800k",
+        maxrate: "3200k",
+        bufsize: "5600k",
+        resolution_tier: "720p",
+    },
+    HlsRendition {
+        name: "1080p",
+        max_dimension: 1920,
+        video_bitrate: "5000k",
+        maxrate: "5800k",
+        bufsize: "10000k",
+        resolution_tier: "1080p",
+    },
+    HlsRendition {
+        name: "2k",
+        max_dimension: 2560,
+        video_bitrate: "8000k",
+        maxrate: "9200k",
+        bufsize: "16000k",
+        resolution_tier: "2k",
+    },
+    HlsRendition {
+        name: "4k",
+        max_dimension: 3840,
+        video_bitrate: "14000k",
+        maxrate: "16000k",
+        bufsize: "28000k",
+        resolution_tier: "4k",
+    },
+];
 
 #[derive(Clone)]
 pub struct MediaProcessingConfig {
@@ -60,6 +107,7 @@ struct SourceProbe {
     width: i32,
     height: i32,
     resolution_tier: &'static str,
+    has_audio: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,11 +173,6 @@ async fn process_in_dir(
     download_source_object(request, &source_path).await?;
     let source_probe = probe_video_stream(&request.config, &source_path).await?;
 
-    let opener_artifact =
-        generate_and_upload_opener(request, processing_dir, &source_path, &source_probe)
-            .await
-            .context("failed to generate opener artifact")?;
-
     let thumbnail_artifact =
         match generate_and_upload_thumbnail(request, processing_dir, &source_path).await {
             Ok(artifact) => Some(artifact),
@@ -144,20 +187,11 @@ async fn process_in_dir(
         };
 
     let hls_artifacts =
-        match generate_and_upload_hls(request, processing_dir, &source_path, &source_probe).await {
-            Ok(artifacts) => artifacts,
-            Err(error) => {
-                tracing::warn!(
-                    asset_id = %request.asset_id,
-                    error = %limit_error(&error),
-                    "HLS generation failed; keeping opener-only playback state",
-                );
-                Vec::new()
-            }
-        };
+        generate_and_upload_hls(request, processing_dir, &source_path, &source_probe)
+            .await
+            .context("failed to generate HLS artifacts")?;
 
-    let mut artifacts = Vec::with_capacity(2 + hls_artifacts.len());
-    artifacts.push(opener_artifact.clone());
+    let mut artifacts = Vec::with_capacity(1 + hls_artifacts.len());
     if let Some(thumbnail_artifact) = thumbnail_artifact {
         artifacts.push(thumbnail_artifact);
     }
@@ -168,18 +202,17 @@ async fn process_in_dir(
         .iter()
         .filter(|artifact| artifact.kind == "segment")
         .count();
-    let playable_state = if has_manifest && segment_count > 0 {
-        "hls_ready"
-    } else {
-        "opener_ready"
-    };
+    anyhow::ensure!(
+        has_manifest && segment_count > 0,
+        "HLS generation completed without playable manifest and segments"
+    );
+    let playable_state = "hls_ready";
 
     let promoted = persist_artifacts_and_state(
         &request.db,
         &request.asset_id,
         &artifacts,
         playable_state,
-        &opener_artifact.object_key,
         &source_probe,
     )
     .await?;
@@ -256,8 +289,6 @@ async fn probe_video_stream(
         vec![
             os("-v"),
             os("error"),
-            os("-select_streams"),
-            os("v:0"),
             os("-show_entries"),
             os("stream=codec_type,width,height,duration:format=duration"),
             os("-of"),
@@ -303,60 +334,11 @@ async fn probe_video_stream(
         width,
         height,
         resolution_tier: classify_resolution_tier(width, height),
+        has_audio: parsed
+            .streams
+            .iter()
+            .any(|stream| stream.codec_type.as_deref() == Some("audio")),
     })
-}
-
-async fn generate_and_upload_opener(
-    request: &ProcessMediaRequest,
-    processing_dir: &Path,
-    source_path: &Path,
-    source_probe: &SourceProbe,
-) -> Result<UploadedArtifact> {
-    let opener_path = processing_dir.join("opener.mp4");
-    run_media_command(
-        &request.config.ffmpeg_path,
-        vec![
-            os("-y"),
-            os("-i"),
-            source_path.as_os_str().to_owned(),
-            os("-t"),
-            os("5"),
-            os("-map"),
-            os("0:v:0"),
-            os("-map"),
-            os("0:a?"),
-            os("-c:v"),
-            os("libx264"),
-            os("-preset"),
-            os("veryfast"),
-            os("-profile:v"),
-            os("baseline"),
-            os("-pix_fmt"),
-            os("yuv420p"),
-            os("-movflags"),
-            os("+faststart"),
-            os("-c:a"),
-            os("aac"),
-            os("-b:a"),
-            os("96k"),
-            os("-f"),
-            os("mp4"),
-            opener_path.as_os_str().to_owned(),
-        ],
-        request.config.process_timeout,
-    )
-    .await?;
-
-    upload_generated_file(
-        request,
-        &opener_path,
-        opener_object_key(&request.asset_id),
-        "video/mp4",
-        "opener",
-        Some(source_probe.duration_ms.min(5_000)),
-        Some(source_probe.resolution_tier),
-    )
-    .await
 }
 
 async fn generate_and_upload_thumbnail(
@@ -401,8 +383,9 @@ async fn generate_and_upload_hls(
     source_path: &Path,
     source_probe: &SourceProbe,
 ) -> Result<Vec<UploadedArtifact>> {
-    // Current V1 HLS output is single-rendition. See docs/rend-abr-ladder-plan.md
-    // before changing this to a multi-variant ABR ladder.
+    let renditions = hls_renditions_for_source(source_probe);
+    anyhow::ensure!(!renditions.is_empty(), "no HLS renditions selected");
+
     let hls_dir = processing_dir.join("hls");
     fs::create_dir_all(&hls_dir).await.with_context(|| {
         format!(
@@ -411,52 +394,86 @@ async fn generate_and_upload_hls(
         )
     })?;
     let manifest_path = hls_dir.join("master.m3u8");
-    let segment_pattern = hls_dir.join("segment_%05d.ts");
+    let segment_pattern = hls_dir.join("%v").join("segment_%05d.ts");
+    let variant_playlist_pattern = hls_dir.join("%v").join("index.m3u8");
 
-    run_media_command(
-        &request.config.ffmpeg_path,
-        vec![
-            os("-y"),
-            os("-i"),
-            source_path.as_os_str().to_owned(),
-            os("-map"),
-            os("0:v:0"),
-            os("-map"),
-            os("0:a?"),
-            os("-c:v"),
-            os("libx264"),
-            os("-preset"),
-            os("veryfast"),
-            os("-profile:v"),
-            os("baseline"),
-            os("-pix_fmt"),
-            os("yuv420p"),
-            os("-g"),
-            os("48"),
-            os("-keyint_min"),
-            os("48"),
-            os("-sc_threshold"),
-            os("0"),
+    let mut args = vec![
+        os("-y"),
+        os("-i"),
+        source_path.as_os_str().to_owned(),
+        os("-filter_complex"),
+        os(&hls_filter_complex(&renditions)),
+    ];
+    for rendition in &renditions {
+        args.push(os("-map"));
+        args.push(os(&format!("[{}]", hls_video_label(rendition))));
+        if source_probe.has_audio {
+            args.push(os("-map"));
+            args.push(os("0:a:0"));
+        }
+    }
+    args.extend([
+        os("-c:v"),
+        os("libx264"),
+        os("-preset"),
+        os(HLS_X264_PRESET),
+        os("-profile:v"),
+        os("main"),
+        os("-pix_fmt"),
+        os("yuv420p"),
+        os("-g"),
+        os("48"),
+        os("-keyint_min"),
+        os("48"),
+        os("-sc_threshold"),
+        os("0"),
+    ]);
+    for (index, rendition) in renditions.iter().enumerate() {
+        args.extend([
+            os(&format!("-b:v:{index}")),
+            os(rendition.video_bitrate),
+            os(&format!("-maxrate:v:{index}")),
+            os(rendition.maxrate),
+            os(&format!("-bufsize:v:{index}")),
+            os(rendition.bufsize),
+        ]);
+    }
+    if source_probe.has_audio {
+        args.extend([
             os("-c:a"),
             os("aac"),
             os("-b:a"),
-            os("96k"),
-            os("-hls_time"),
+            os(HLS_AUDIO_BITRATE),
+            os("-ac"),
             os("2"),
-            os("-hls_playlist_type"),
-            os("vod"),
-            os("-hls_segment_filename"),
-            segment_pattern.as_os_str().to_owned(),
-            manifest_path.as_os_str().to_owned(),
-        ],
+        ]);
+    }
+    args.extend([
+        os("-f"),
+        os("hls"),
+        os("-hls_time"),
+        os("2"),
+        os("-hls_playlist_type"),
+        os("vod"),
+        os("-hls_flags"),
+        os("independent_segments"),
+        os("-hls_segment_filename"),
+        segment_pattern.as_os_str().to_owned(),
+        os("-master_pl_name"),
+        os("master.m3u8"),
+        os("-var_stream_map"),
+        os(&hls_variant_stream_map(&renditions, source_probe.has_audio)),
+        variant_playlist_pattern.as_os_str().to_owned(),
+    ]);
+
+    run_media_command(
+        &request.config.ffmpeg_path,
+        args,
         request.config.process_timeout,
     )
     .await?;
 
     let mut artifacts = Vec::new();
-    let segment_durations = hls_segment_durations(&manifest_path)
-        .await
-        .context("failed to read HLS segment durations")?;
     let manifest_artifact = upload_generated_file(
         request,
         &manifest_path,
@@ -469,45 +486,73 @@ async fn generate_and_upload_hls(
     .await?;
     artifacts.push(manifest_artifact);
 
-    let mut segment_paths = Vec::new();
-    let mut entries = fs::read_dir(&hls_dir)
-        .await
-        .with_context(|| format!("failed to read HLS output directory {}", hls_dir.display()))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .with_context(|| format!("failed to scan HLS output directory {}", hls_dir.display()))?
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "ts") {
-            segment_paths.push(path);
-        }
-    }
-    segment_paths.sort();
-
-    anyhow::ensure!(
-        !segment_paths.is_empty(),
-        "ffmpeg did not create any HLS segments"
-    );
-
-    for segment_path in segment_paths {
-        let file_name = segment_path
-            .file_name()
-            .context("HLS segment path has no file name")?
-            .to_string_lossy()
-            .into_owned();
-        let duration_ms = segment_durations.get(&file_name).copied().or(Some(2_000));
-        let artifact = upload_generated_file(
+    for rendition in &renditions {
+        let playlist_path = hls_dir.join(rendition.name).join("index.m3u8");
+        let segment_durations = hls_segment_durations(&playlist_path, rendition.name)
+            .await
+            .with_context(|| format!("failed to read {} HLS segment durations", rendition.name))?;
+        let playlist_artifact = upload_generated_file(
             request,
-            &segment_path,
-            hls_segment_object_key(&request.asset_id, &file_name),
-            "video/mp2t",
-            "segment",
-            duration_ms,
-            Some(source_probe.resolution_tier),
+            &playlist_path,
+            hls_variant_playlist_object_key(&request.asset_id, rendition.name),
+            "application/vnd.apple.mpegurl",
+            "manifest",
+            Some(0),
+            Some(rendition.resolution_tier),
         )
         .await?;
-        artifacts.push(artifact);
+        artifacts.push(playlist_artifact);
+
+        let variant_dir = hls_dir.join(rendition.name);
+        let mut segment_paths = Vec::new();
+        let mut entries = fs::read_dir(&variant_dir).await.with_context(|| {
+            format!(
+                "failed to read HLS variant directory {}",
+                variant_dir.display()
+            )
+        })?;
+        while let Some(entry) = entries.next_entry().await.with_context(|| {
+            format!(
+                "failed to scan HLS variant directory {}",
+                variant_dir.display()
+            )
+        })? {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "ts") {
+                segment_paths.push(path);
+            }
+        }
+        segment_paths.sort();
+
+        anyhow::ensure!(
+            !segment_paths.is_empty(),
+            "ffmpeg did not create any {} HLS segments",
+            rendition.name
+        );
+
+        for segment_path in segment_paths {
+            let file_name = segment_path
+                .file_name()
+                .context("HLS segment path has no file name")?
+                .to_string_lossy()
+                .into_owned();
+            let duration_key = format!("{}/{}", rendition.name, file_name);
+            let duration_ms = segment_durations
+                .get(&duration_key)
+                .copied()
+                .or(Some(2_000));
+            let artifact = upload_generated_file(
+                request,
+                &segment_path,
+                hls_segment_object_key(&request.asset_id, rendition.name, &file_name),
+                "video/mp2t",
+                "segment",
+                duration_ms,
+                Some(rendition.resolution_tier),
+            )
+            .await?;
+            artifacts.push(artifact);
+        }
     }
 
     Ok(artifacts)
@@ -560,7 +605,6 @@ async fn persist_artifacts_and_state(
     asset_id: &str,
     artifacts: &[UploadedArtifact],
     playable_state: &str,
-    opener_object_key: &str,
     source_probe: &SourceProbe,
 ) -> Result<bool> {
     let mut tx = db
@@ -603,7 +647,7 @@ async fn persist_artifacts_and_state(
         let artifact_id: String = insert_artifact(&mut tx, asset_id, artifact)
             .await
             .with_context(|| format!("failed to insert {} artifact", artifact.kind))?;
-        if artifact.object_key == opener_object_key {
+        if artifact.kind == "opener" {
             opener_artifact_id = Some(artifact_id);
         }
     }
@@ -900,14 +944,78 @@ fn classify_resolution_tier(width: i32, height: i32) -> &'static str {
     }
 }
 
-async fn hls_segment_durations(manifest_path: &Path) -> Result<HashMap<String, i64>> {
+fn hls_renditions_for_source(source_probe: &SourceProbe) -> Vec<HlsRendition> {
+    let source_tier_index = HLS_RENDITIONS
+        .iter()
+        .position(|rendition| rendition.resolution_tier == source_probe.resolution_tier)
+        .unwrap_or(0);
+    HLS_RENDITIONS[..=source_tier_index].to_vec()
+}
+
+fn hls_video_label(rendition: &HlsRendition) -> String {
+    format!(
+        "v{}",
+        rendition
+            .name
+            .chars()
+            .filter(|value| value.is_ascii_alphanumeric())
+            .collect::<String>()
+    )
+}
+
+fn hls_source_label(rendition: &HlsRendition) -> String {
+    format!("{}src", hls_video_label(rendition))
+}
+
+fn hls_filter_complex(renditions: &[HlsRendition]) -> String {
+    let split_outputs = renditions
+        .iter()
+        .map(|rendition| format!("[{}]", hls_source_label(rendition)))
+        .collect::<String>();
+    let mut filter = format!("[0:v]split={}{};", renditions.len(), split_outputs);
+    let scales = renditions
+        .iter()
+        .map(|rendition| {
+            format!(
+                "[{}]scale=w='if(gte(iw,ih),min({},iw),-2)':h='if(gte(iw,ih),-2,min({},ih))'[{}]",
+                hls_source_label(rendition),
+                rendition.max_dimension,
+                rendition.max_dimension,
+                hls_video_label(rendition)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    filter.push_str(&scales);
+    filter
+}
+
+fn hls_variant_stream_map(renditions: &[HlsRendition], has_audio: bool) -> String {
+    renditions
+        .iter()
+        .enumerate()
+        .map(|(index, rendition)| {
+            if has_audio {
+                format!("v:{index},a:{index},name:{}", rendition.name)
+            } else {
+                format!("v:{index},name:{}", rendition.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+async fn hls_segment_durations(
+    manifest_path: &Path,
+    path_prefix: &str,
+) -> Result<HashMap<String, i64>> {
     let manifest = fs::read_to_string(manifest_path)
         .await
         .with_context(|| format!("failed to read HLS manifest {}", manifest_path.display()))?;
-    Ok(parse_hls_segment_durations(&manifest))
+    Ok(parse_hls_segment_durations(&manifest, path_prefix))
 }
 
-fn parse_hls_segment_durations(manifest: &str) -> HashMap<String, i64> {
+fn parse_hls_segment_durations(manifest: &str, path_prefix: &str) -> HashMap<String, i64> {
     let mut durations = HashMap::new();
     let mut pending_duration_ms = None;
     for line in manifest.lines().map(str::trim) {
@@ -922,12 +1030,29 @@ fn parse_hls_segment_durations(manifest: &str) -> HashMap<String, i64> {
             continue;
         }
         if let Some(duration_ms) = pending_duration_ms.take()
-            && let Some(file_name) = Path::new(line).file_name().and_then(|value| value.to_str())
+            && let Some(segment_path) = hls_segment_duration_key(line, path_prefix)
         {
-            durations.insert(file_name.to_owned(), duration_ms);
+            durations.insert(segment_path, duration_ms);
         }
     }
     durations
+}
+
+fn hls_segment_duration_key(line: &str, path_prefix: &str) -> Option<String> {
+    let path = line.split('?').next()?.trim().trim_start_matches("./");
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains("..")
+        || path.contains("://")
+    {
+        return None;
+    }
+    if path.contains('/') || path_prefix.is_empty() {
+        Some(path.to_owned())
+    } else {
+        Some(format!("{path_prefix}/{path}"))
+    }
 }
 
 pub fn opener_object_key(asset_id: &str) -> String {
@@ -942,8 +1067,12 @@ pub fn hls_manifest_object_key(asset_id: &str) -> String {
     format!("videos/{asset_id}/hls/master.m3u8")
 }
 
-pub fn hls_segment_object_key(asset_id: &str, segment_name: &str) -> String {
-    format!("videos/{asset_id}/hls/{segment_name}")
+pub fn hls_variant_playlist_object_key(asset_id: &str, rendition_name: &str) -> String {
+    format!("videos/{asset_id}/hls/{rendition_name}/index.m3u8")
+}
+
+pub fn hls_segment_object_key(asset_id: &str, rendition_name: &str, segment_name: &str) -> String {
+    format!("videos/{asset_id}/hls/{rendition_name}/{segment_name}")
 }
 
 fn playback_artifact_paths(
@@ -953,11 +1082,11 @@ fn playback_artifact_paths(
 ) -> Vec<String> {
     let mut paths = Vec::new();
     let opener_key = opener_object_key(asset_id);
-    if matches!(playable_state, "opener_ready" | "hls_ready")
-        && artifacts
-            .iter()
-            .any(|artifact| artifact.object_key == opener_key)
-    {
+    let has_opener = artifacts
+        .iter()
+        .any(|artifact| artifact.object_key == opener_key);
+
+    if playable_state == "opener_ready" && has_opener {
         paths.push("opener.mp4".to_owned());
     }
 
@@ -965,15 +1094,23 @@ fn playback_artifact_paths(
         return paths;
     }
 
-    let manifest_key = hls_manifest_object_key(asset_id);
-    if artifacts
-        .iter()
-        .any(|artifact| artifact.object_key == manifest_key)
-    {
-        paths.push("hls/master.m3u8".to_owned());
-    }
-
     let object_prefix = format!("videos/{asset_id}/");
+    let mut manifest_paths = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "manifest")
+        .filter_map(|artifact| artifact.object_key.strip_prefix(&object_prefix))
+        .filter(|artifact_path| artifact_path.starts_with("hls/"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    manifest_paths.sort();
+    if let Some(master_index) = manifest_paths
+        .iter()
+        .position(|artifact_path| artifact_path == "hls/master.m3u8")
+    {
+        paths.push(manifest_paths.remove(master_index));
+    }
+    paths.extend(manifest_paths);
+
     let mut segment_paths = artifacts
         .iter()
         .filter(|artifact| artifact.kind == "segment")
@@ -983,6 +1120,9 @@ fn playback_artifact_paths(
         .collect::<Vec<_>>();
     segment_paths.sort();
     paths.extend(segment_paths);
+    if has_opener {
+        paths.push("opener.mp4".to_owned());
+    }
 
     paths
 }
@@ -1006,29 +1146,33 @@ mod tests {
             "videos/asset-123/hls/master.m3u8"
         );
         assert_eq!(
-            hls_segment_object_key("asset-123", "segment_00000.ts"),
-            "videos/asset-123/hls/segment_00000.ts"
+            hls_variant_playlist_object_key("asset-123", "720p"),
+            "videos/asset-123/hls/720p/index.m3u8"
+        );
+        assert_eq!(
+            hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
+            "videos/asset-123/hls/720p/segment_00000.ts"
         );
     }
 
     #[test]
-    fn playback_artifact_paths_include_opener_manifest_and_sorted_segments_when_hls_ready() {
+    fn playback_artifact_paths_include_manifest_playlists_and_sorted_segments_when_hls_ready() {
         let artifacts = vec![
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "segment_00001.ts"),
+                object_key: hls_segment_object_key("asset-123", "1080p", "segment_00001.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
                 duration_ms: Some(2_000),
                 resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
-                kind: "opener",
-                object_key: opener_object_key("asset-123"),
-                content_type: "video/mp4",
+                kind: "manifest",
+                object_key: hls_variant_playlist_object_key("asset-123", "720p"),
+                content_type: "application/vnd.apple.mpegurl",
                 byte_size: 1,
-                duration_ms: Some(5_000),
-                resolution_tier: Some("1080p".to_owned()),
+                duration_ms: Some(0),
+                resolution_tier: Some("720p".to_owned()),
             },
             UploadedArtifact {
                 kind: "manifest",
@@ -1040,11 +1184,11 @@ mod tests {
             },
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
+                object_key: hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
                 duration_ms: Some(2_000),
-                resolution_tier: Some("1080p".to_owned()),
+                resolution_tier: Some("720p".to_owned()),
             },
             UploadedArtifact {
                 kind: "thumbnail",
@@ -1059,10 +1203,10 @@ mod tests {
         assert_eq!(
             playback_artifact_paths("asset-123", &artifacts, "hls_ready"),
             vec![
-                "opener.mp4".to_owned(),
                 "hls/master.m3u8".to_owned(),
-                "hls/segment_00000.ts".to_owned(),
-                "hls/segment_00001.ts".to_owned(),
+                "hls/720p/index.m3u8".to_owned(),
+                "hls/1080p/segment_00001.ts".to_owned(),
+                "hls/720p/segment_00000.ts".to_owned(),
             ]
         );
     }
@@ -1080,7 +1224,7 @@ mod tests {
             },
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "segment_00000.ts"),
+                object_key: hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
                 content_type: "video/mp2t",
                 byte_size: 1,
                 duration_ms: Some(2_000),
@@ -1112,6 +1256,34 @@ mod tests {
     }
 
     #[test]
+    fn hls_ladder_selection_stays_with_supported_resolution_tiers() {
+        let source_probe = SourceProbe {
+            duration_ms: 12_000,
+            width: 1920,
+            height: 1080,
+            resolution_tier: "1080p",
+            has_audio: true,
+        };
+        let renditions = hls_renditions_for_source(&source_probe);
+
+        assert_eq!(
+            renditions
+                .iter()
+                .map(|rendition| rendition.name)
+                .collect::<Vec<_>>(),
+            vec!["720p", "1080p"]
+        );
+        assert_eq!(
+            hls_variant_stream_map(&renditions, true),
+            "v:0,a:0,name:720p v:1,a:1,name:1080p"
+        );
+        assert_eq!(
+            hls_variant_stream_map(&renditions, false),
+            "v:0,name:720p v:1,name:1080p"
+        );
+    }
+
+    #[test]
     fn hls_segment_duration_parser_maps_extinf_to_segment_names() {
         let durations = parse_hls_segment_durations(
             r#"#EXTM3U
@@ -1122,9 +1294,10 @@ segment_00000.ts
 hls/segment_00001.ts
 #EXT-X-ENDLIST
 "#,
+            "720p",
         );
 
-        assert_eq!(durations["segment_00000.ts"], 2_000);
-        assert_eq!(durations["segment_00001.ts"], 1_234);
+        assert_eq!(durations["720p/segment_00000.ts"], 2_000);
+        assert_eq!(durations["hls/segment_00001.ts"], 1_234);
     }
 }
