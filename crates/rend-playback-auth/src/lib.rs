@@ -210,9 +210,18 @@ pub fn is_asset_playback_path(artifact_path: &str) -> bool {
         return true;
     }
 
-    artifact_path
-        .strip_prefix("hls/")
-        .is_some_and(is_valid_hls_segment_name)
+    match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
+        ["hls", segment_name] => is_valid_hls_segment_name(segment_name),
+        ["hls", rendition_name, "index.m3u8"] => is_valid_hls_rendition_name(rendition_name),
+        ["hls", rendition_name, segment_name] => {
+            is_valid_hls_rendition_name(rendition_name) && is_valid_hls_segment_name(segment_name)
+        }
+        _ => false,
+    }
+}
+
+pub fn is_valid_hls_rendition_name(rendition_name: &str) -> bool {
+    matches!(rendition_name, "720p" | "1080p" | "2k" | "4k")
 }
 
 pub fn is_valid_hls_segment_name(segment_name: &str) -> bool {
@@ -480,6 +489,39 @@ mod tests {
             ),
             Err(PlaybackAuthError::PathNotAllowed)
         );
+    }
+
+    #[test]
+    fn playback_policy_allows_only_known_hls_ladder_paths() {
+        for artifact_path in [
+            "opener.mp4",
+            "hls/master.m3u8",
+            "hls/segment_00000.ts",
+            "hls/720p/index.m3u8",
+            "hls/720p/segment_00000.ts",
+            "hls/1080p/index.m3u8",
+            "hls/2k/segment_00001.ts",
+            "hls/4k/segment_00010.ts",
+        ] {
+            assert!(
+                is_asset_playback_path(artifact_path),
+                "{artifact_path} should be allowed"
+            );
+        }
+
+        for artifact_path in [
+            "hls/480p/index.m3u8",
+            "hls/720p/playlist.m3u8",
+            "hls/720p/nested/segment_00000.ts",
+            "hls/720p/segment_latest.ts",
+            "hls/../opener.mp4",
+            "videos/asset-123/hls/720p/segment_00000.ts",
+        ] {
+            assert!(
+                !is_asset_playback_path(artifact_path),
+                "{artifact_path} should be rejected"
+            );
+        }
     }
 
     #[test]
