@@ -1,4 +1,5 @@
 import { and, asc, eq } from "drizzle-orm";
+import { authEmailSummary, authSubjectId, logAuthEvent } from "./auth-events.ts";
 import { ensureLocalAuthSeed } from "./auth-seed.ts";
 import { getAuth } from "./auth.ts";
 import { ensureBillingCustomerSoft } from "./billing.ts";
@@ -240,8 +241,46 @@ export async function dashboardAccessFromHeaders(headers: Headers): Promise<Dash
     const legalAssent = legalAssentFromHeaders(headers, userEmail);
     if (!legalAssent) return { ok: false, reason: "unauthorized" };
 
-    const provisioned = await provisionDefaultOrganization(userId, userEmail, legalAssent);
-    if (!provisioned) return { ok: false, reason: "unauthorized" };
+    logAuthEvent("org_provisioning_started", {
+      ...authEmailSummary(userEmail),
+      user_id_hash: authSubjectId(userId),
+      source: "dashboard_access",
+    });
+
+    let provisioned: Awaited<ReturnType<typeof provisionDefaultOrganization>> = null;
+    try {
+      provisioned = await provisionDefaultOrganization(userId, userEmail, legalAssent);
+    } catch (error) {
+      logAuthEvent(
+        "org_provisioning_failed",
+        {
+          ...authEmailSummary(userEmail),
+          user_id_hash: authSubjectId(userId),
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "error"
+      );
+      throw error;
+    }
+    if (!provisioned) {
+      logAuthEvent(
+        "org_provisioning_failed",
+        {
+          ...authEmailSummary(userEmail),
+          user_id_hash: authSubjectId(userId),
+          error: "organization_not_returned",
+        },
+        "error"
+      );
+      return { ok: false, reason: "unauthorized" };
+    }
+
+    logAuthEvent("org_provisioning_completed", {
+      ...authEmailSummary(userEmail),
+      user_id_hash: authSubjectId(userId),
+      organization_id_hash: authSubjectId(provisioned.organizationId),
+      role: provisioned.role,
+    });
 
     const context: DashboardAccessContext = {
       userId,
