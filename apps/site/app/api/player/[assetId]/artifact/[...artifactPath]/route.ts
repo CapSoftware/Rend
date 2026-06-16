@@ -4,8 +4,11 @@ export const runtime = "nodejs";
 import { and, eq, isNull } from "drizzle-orm";
 import { assets, organization } from "../../../../../../lib/db/schema.ts";
 import {
+  PLAYBACK_COOKIE_NAME,
+  playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
+  playbackProxyCookieHeader,
 } from "../../../../../../lib/player-artifact-proxy.ts";
 import { getSiteDb } from "../../../../../../lib/server-db.ts";
 
@@ -14,11 +17,12 @@ type UpstreamPlaybackResponse = {
   opener_url?: unknown;
   manifest_url?: unknown;
   prefetch_hints?: unknown;
+  playback_token?: unknown;
+  ttl_seconds?: unknown;
 };
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
-const PLAYBACK_COOKIE_NAME = "__rend_playback";
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -141,6 +145,15 @@ function rewritePlaybackBase(value: URL, playbackBaseUrl: string | null) {
   return base.toString();
 }
 
+function directArtifactUrl(assetId: string, artifactPath: string, playbackBaseUrl: string) {
+  const base = new URL(playbackBaseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+  base.pathname = `${basePath}/v/${encodeURIComponent(assetId)}/${encodeArtifactPath(artifactPath)}`;
+  base.search = "";
+  base.hash = "";
+  return base.toString();
+}
+
 function targetUrlForArtifact(
   data: UpstreamPlaybackResponse,
   assetId: string,
@@ -229,6 +242,36 @@ function rewriteManifest(manifest: string, assetId: string, manifestUrl: string,
     .join("\n");
 }
 
+async function artifactResponseFromEdge(
+  edgeResponse: Response,
+  assetId: string,
+  artifactPath: string,
+  targetUrl: string,
+  playbackBaseUrl: string | null,
+  setCookie?: string
+) {
+  if (artifactPath === "hls/master.m3u8" && edgeResponse.ok) {
+    const manifest = await edgeResponse.text().catch(() => "");
+    const rewrittenManifest = rewriteManifest(manifest, assetId, targetUrl, playbackBaseUrl);
+    const headers = playbackArtifactResponseHeaders(edgeResponse.headers, {
+      contentType: "application/vnd.apple.mpegurl",
+      rewrittenBody: rewrittenManifest,
+    });
+    if (setCookie) headers.append("set-cookie", setCookie);
+    return new Response(rewrittenManifest, {
+      status: edgeResponse.status,
+      headers,
+    });
+  }
+
+  const headers = playbackArtifactResponseHeaders(edgeResponse.headers);
+  if (setCookie) headers.append("set-cookie", setCookie);
+  return new Response(edgeResponse.body, {
+    status: edgeResponse.status,
+    headers,
+  });
+}
+
 export async function GET(
   request: Request,
   context: { params: Promise<{ assetId: string; artifactPath?: string[] }> }
@@ -240,16 +283,35 @@ export async function GET(
     return jsonResponse({ status: "unavailable", message: "Artifact is unavailable" }, { status: 404 });
   }
 
-  const internalToken = siteInternalToken();
-  if (!internalToken) {
-    return jsonResponse({ status: "error", message: "Playback is not configured" }, { status: 500 });
-  }
-
   let playbackBaseUrl: string | null;
   try {
     playbackBaseUrl = playbackBaseOverride(request);
   } catch {
     return jsonResponse({ status: "error", message: "Playback edge is not configured" }, { status: 400 });
+  }
+
+  const playbackCookie = playbackCookieFromHeaders(request.headers);
+  if (playbackCookie && playbackBaseUrl) {
+    const targetUrl = directArtifactUrl(normalizedAssetId, normalizedArtifactPath, playbackBaseUrl);
+    const edgeResponse = await fetch(targetUrl, {
+      cache: "no-store",
+      headers: playbackArtifactFetchHeaders(request.headers, playbackCookie, normalizedArtifactPath),
+    }).catch(() => null);
+
+    if (edgeResponse && edgeResponse.status !== 401 && edgeResponse.status !== 403) {
+      return artifactResponseFromEdge(
+        edgeResponse,
+        normalizedAssetId,
+        normalizedArtifactPath,
+        targetUrl,
+        playbackBaseUrl
+      );
+    }
+  }
+
+  const internalToken = siteInternalToken();
+  if (!internalToken) {
+    return jsonResponse({ status: "error", message: "Playback is not configured" }, { status: 500 });
   }
 
   const organizationId = await assetOrganizationId(normalizedAssetId).catch(() => null);
@@ -273,20 +335,17 @@ export async function GET(
     return jsonResponse({ status: "error", message: "Artifact fetch failed" }, { status: 502 });
   }
 
-  if (normalizedArtifactPath === "hls/master.m3u8" && edgeResponse.ok) {
-    const manifest = await edgeResponse.text().catch(() => "");
-    const rewrittenManifest = rewriteManifest(manifest, normalizedAssetId, targetUrl, playbackBaseUrl);
-    return new Response(rewrittenManifest, {
-      status: edgeResponse.status,
-      headers: playbackArtifactResponseHeaders(edgeResponse.headers, {
-        contentType: "application/vnd.apple.mpegurl",
-        rewrittenBody: rewrittenManifest,
-      }),
-    });
-  }
-
-  return new Response(edgeResponse.body, {
-    status: edgeResponse.status,
-    headers: playbackArtifactResponseHeaders(edgeResponse.headers),
-  });
+  return artifactResponseFromEdge(
+    edgeResponse,
+    normalizedAssetId,
+    normalizedArtifactPath,
+    targetUrl,
+    playbackBaseUrl,
+    playbackProxyCookieHeader(
+      request.url,
+      normalizedAssetId,
+      bootstrap.data.playback_token,
+      bootstrap.data.ttl_seconds
+    )
+  );
 }
