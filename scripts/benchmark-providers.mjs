@@ -516,6 +516,10 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
       attributes: snapshot?.player?.attributes || {},
       rend: snapshot?.player?.rend || {},
     },
+    playback: {
+      stalls: snapshot?.stalls || [],
+      playErrors: snapshot?.playErrors || [],
+    },
     browser: {
       userAgent: browserUserAgent,
       viewport: options.viewport,
@@ -826,12 +830,14 @@ async function main() {
 
 const browserProbeSource = String.raw`
 (() => {
+  const HAVE_FUTURE_DATA = 3;
   const state = {
     installedAtMs: performance.now(),
     videoSeen: false,
     events: {},
     stalls: [],
     activeStall: null,
+    lastCurrentTime: null,
     video: {},
     player: {},
     page: {},
@@ -880,9 +886,10 @@ const browserProbeSource = String.raw`
     state.activeStall = null;
   }
 
-  function startStall(reason) {
+  function startStall(reason, video) {
     if (state.events.playingMs == null && state.events.firstFrameMs == null) return;
     if (state.activeStall) return;
+    if (reason === "stalled" && video && video.readyState >= HAVE_FUTURE_DATA) return;
     state.activeStall = { reason, startMs: now() };
   }
 
@@ -937,7 +944,9 @@ const browserProbeSource = String.raw`
     const candidate = nodes.find((node) => node.getAttribute && node.getAttribute("data-rend-player-state") != null);
     if (!candidate) return {};
     const numericAttribute = (name) => {
-      const value = Number(candidate.getAttribute(name));
+      const raw = candidate.getAttribute(name);
+      if (raw == null || raw === "") return null;
+      const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     };
     return {
@@ -958,13 +967,22 @@ const browserProbeSource = String.raw`
   function captureVideo(video) {
     if (!video) return;
     const rect = video.getBoundingClientRect();
+    const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    if (
+      state.activeStall &&
+      state.lastCurrentTime != null &&
+      currentTime > state.lastCurrentTime + 0.05
+    ) {
+      endStall("currenttime");
+    }
+    state.lastCurrentTime = currentTime;
     state.video = {
       duration: Number.isFinite(video.duration) ? video.duration : null,
       videoWidth: video.videoWidth || null,
       videoHeight: video.videoHeight || null,
       renderedWidth: rect.width || null,
       renderedHeight: rect.height || null,
-      currentTime: video.currentTime || 0,
+      currentTime,
       currentSrc: video.currentSrc || video.src || null,
       readyState: video.readyState,
       networkState: video.networkState,
@@ -1001,8 +1019,8 @@ const browserProbeSource = String.raw`
       endStall("playing");
       captureVideo(video);
     });
-    video.addEventListener("waiting", () => startStall("waiting"));
-    video.addEventListener("stalled", () => startStall("stalled"));
+    video.addEventListener("waiting", () => startStall("waiting", video));
+    video.addEventListener("stalled", () => startStall("stalled", video));
     video.addEventListener("canplaythrough", () => endStall("canplaythrough"));
     video.addEventListener("timeupdate", () => {
       if (video.readyState >= 3) endStall("timeupdate");
