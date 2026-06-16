@@ -172,7 +172,7 @@ if [[ "$role" == "control-plane" ]]; then
 else
   echo "Deploying edge on $target"
   remote_sudo \
-    "cd $remote_dir_q && scripts/preflight-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --skip-bind-port-check && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --dry-run && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") && curl -fsS http://127.0.0.1:4100/readyz && curl -fsS http://127.0.0.1:4100/healthz"
+    "cd $remote_dir_q && scripts/sync-edge-caddy-playback-routes.sh && scripts/preflight-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --skip-bind-port-check && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") --dry-run && scripts/deploy-edge-host.sh --manifest release-manifest.json --expected-platform $(shell_quote "$expected_platform") && curl -fsS http://127.0.0.1:4100/readyz && curl -fsS http://127.0.0.1:4100/healthz"
 fi
 
 echo "$role deploy completed on $target"

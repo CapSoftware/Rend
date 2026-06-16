@@ -607,22 +607,35 @@ function artifactPathFromUrl(urlValue, assetId) {
   return parts.slice(2).join("/");
 }
 
+function isHlsRenditionManifestPath(artifactPath) {
+  return /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/.test(artifactPath);
+}
+
+function isHlsSegmentPath(artifactPath) {
+  return /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/.test(artifactPath);
+}
+
 function extractBootstrapArtifacts(bootstrap, assetId) {
   const hints = Array.isArray(bootstrap.prefetch_hints) ? bootstrap.prefetch_hints : [];
-  const firstSegment = hints.find((hint) => typeof hint.artifact_path === "string" && hint.artifact_path.endsWith(".ts"));
-  if (!bootstrap.opener_url || !bootstrap.manifest_url || !firstSegment?.url) {
-    throw new SafeError("playback bootstrap did not include opener, manifest, and first segment hints");
+  const renditionManifest = hints.find((hint) =>
+    typeof hint.artifact_path === "string" && isHlsRenditionManifestPath(hint.artifact_path) && hint.url
+  );
+  const firstSegment = hints.find((hint) =>
+    typeof hint.artifact_path === "string" && isHlsSegmentPath(hint.artifact_path) && hint.url
+  );
+  if (!bootstrap.manifest_url || !renditionManifest?.url || !firstSegment?.url) {
+    throw new SafeError("playback bootstrap did not include HLS master, startup playlist, and first segment hints");
   }
   const artifacts = [
-    {
-      label: "opener",
-      artifact_path: artifactPathFromUrl(bootstrap.opener_url, assetId),
-      content_type: bootstrap.opener_content_type || "video/mp4",
-    },
     {
       label: "manifest",
       artifact_path: artifactPathFromUrl(bootstrap.manifest_url, assetId),
       content_type: bootstrap.manifest_content_type || "application/vnd.apple.mpegurl",
+    },
+    {
+      label: "variant_manifest",
+      artifact_path: artifactPathFromUrl(renditionManifest.url, assetId),
+      content_type: renditionManifest.content_type || "application/vnd.apple.mpegurl",
     },
     {
       label: "segment",
@@ -630,11 +643,21 @@ function extractBootstrapArtifacts(bootstrap, assetId) {
       content_type: firstSegment.content_type || "video/mp2t",
     },
   ];
-  if (artifacts[0].artifact_path !== "opener.mp4") {
-    throw new SafeError("playback bootstrap opener did not use opener.mp4");
+  if (bootstrap.opener_url) {
+    artifacts.push({
+      label: "opener",
+      artifact_path: artifactPathFromUrl(bootstrap.opener_url, assetId),
+      content_type: bootstrap.opener_content_type || "video/mp4",
+    });
   }
-  if (artifacts[1].artifact_path !== "hls/master.m3u8") {
+  if (artifacts[0].artifact_path !== "hls/master.m3u8") {
     throw new SafeError("playback bootstrap manifest did not use hls/master.m3u8");
+  }
+  if (!isHlsRenditionManifestPath(artifacts[1].artifact_path)) {
+    throw new SafeError("playback bootstrap startup playlist did not use a supported HLS rendition path");
+  }
+  if (!isHlsSegmentPath(artifacts[2].artifact_path)) {
+    throw new SafeError("playback bootstrap first segment did not use a supported HLS segment path");
   }
   return artifacts;
 }
@@ -1176,6 +1199,7 @@ async function runFixture(config, fixtureName, thresholds, warnings, failures, c
         timings: {
           opener: summarizeArtifactTimings(edgeResults, "opener"),
           manifest: summarizeArtifactTimings(edgeResults, "manifest"),
+          variant_manifest: summarizeArtifactTimings(edgeResults, "variant_manifest"),
           segment: summarizeArtifactTimings(edgeResults, "segment"),
         },
         cache_mix: aggregateCacheMix(edgeResults),
