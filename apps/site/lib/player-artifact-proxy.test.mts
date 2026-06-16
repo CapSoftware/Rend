@@ -18,11 +18,13 @@ test("rewritten manifest headers use transformed body length and drop range meta
   const body = "#EXTM3U\n/api/player/asset/artifact/hls/segment_00000.ts\n";
 
   const headers = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "hls/master.m3u8",
     contentType: "application/vnd.apple.mpegurl",
     rewrittenBody: body,
   });
 
   assert.equal(headers.get("content-length"), String(new TextEncoder().encode(body).byteLength));
+  assert.equal(headers.get("cache-control"), "private, max-age=60, stale-while-revalidate=300");
   assert.equal(headers.get("content-type"), "application/vnd.apple.mpegurl");
   assert.equal(headers.get("x-rend-cache"), "HIT");
   assert.equal(headers.get("accept-ranges"), null);
@@ -40,10 +42,33 @@ test("streamed artifact headers preserve upstream length and range metadata", ()
 
   const headers = playbackArtifactResponseHeaders(upstream);
 
+  assert.equal(headers.get("cache-control"), "no-store");
   assert.equal(headers.get("content-length"), "1234");
   assert.equal(headers.get("content-range"), "bytes 0-1233/1234");
   assert.equal(headers.get("content-type"), "video/mp2t");
   assert.equal(headers.get("x-rend-cache"), "MISS");
+});
+
+test("versioned public playback artifacts use private immutable browser caching", () => {
+  const upstream = new Headers({
+    "content-length": "1234",
+    "content-type": "video/mp4",
+  });
+
+  const openerHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "opener.mp4",
+  });
+  const segmentHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "hls/segment_00000.ts",
+  });
+  const failedHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "opener.mp4",
+    cacheable: false,
+  });
+
+  assert.equal(openerHeaders.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(segmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(failedHeaders.get("cache-control"), "no-store");
 });
 
 test("manifest fetches do not forward range requests because the body is rewritten", () => {
