@@ -32,6 +32,13 @@ function telemetryAppVersion() {
   );
 }
 
+function telemetryEnabled(value: string | string[] | undefined) {
+  const requested = Array.isArray(value) ? value[0] : value;
+  if (requested === "0") return false;
+  if (requested === "1") return true;
+  return process.env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY === "1";
+}
+
 export default async function EmbedPage({ params, searchParams }: EmbedPageProps) {
   const [{ assetId }, query] = await Promise.all([params, searchParams]);
 
@@ -48,7 +55,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
           bootstrapUrl={playerBootstrapUrl(assetId, query.playbackBaseUrl)}
           maxPrefetchHints={2}
           telemetryAppVersion={telemetryAppVersion()}
-          telemetryEnabled={query.telemetry !== "0"}
+          telemetryEnabled={telemetryEnabled(query.telemetry)}
           telemetryUrl="/api/player/telemetry"
         />
       </section>
