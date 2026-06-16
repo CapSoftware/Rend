@@ -1,8 +1,14 @@
-# @rend/sdk
+# @rend-sdk/client
 
 Generated TypeScript client for the Rend public OpenAPI contract.
 
 Source contract: `docs/openapi/rend-public-api.openapi.json`
+
+Install:
+
+```bash
+npm install @rend-sdk/client
+```
 
 Generate and verify:
 

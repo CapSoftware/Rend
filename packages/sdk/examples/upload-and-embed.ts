@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { RendClient } from "@rend/sdk";
+import { RendClient } from "@rend-sdk/client";
 
 const apiKey = process.env.REND_API_KEY;
 if (!apiKey) throw new Error("Set REND_API_KEY");
