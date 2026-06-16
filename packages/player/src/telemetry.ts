@@ -60,6 +60,8 @@ export type RendPlayerTelemetryInput = Omit<
 >;
 
 export const REND_PLAYER_VERSION = "0.1.0";
+const TELEMETRY_SESSION_WINDOW_MS = 60_000;
+const TELEMETRY_MAX_EVENTS_PER_SESSION_WINDOW = 80;
 
 const TELEMETRY_HEADER_NAMES = [
   "age",
@@ -75,6 +77,10 @@ const TELEMETRY_HEADER_NAMES = [
 
 const EDGE_HEADER_NAMES = ["x-rend-edge-id"];
 const REGION_HEADER_NAMES = ["x-rend-region"];
+const telemetrySessionWindows = new Map<
+  string,
+  { count: number; windowStartedAtMs: number }
+>();
 
 export function generatePlaybackSessionId() {
   const cryptoApi = globalThis.crypto;
@@ -126,10 +132,37 @@ export function telemetryLabelsFromHeaders(headers: Headers) {
   };
 }
 
+function telemetryWithinSessionLimit(event: RendPlayerTelemetryEvent) {
+  const now = Date.now();
+  const current = telemetrySessionWindows.get(event.playback_session_id);
+  if (!current || now - current.windowStartedAtMs > TELEMETRY_SESSION_WINDOW_MS) {
+    telemetrySessionWindows.set(event.playback_session_id, {
+      count: 1,
+      windowStartedAtMs: now,
+    });
+    return true;
+  }
+
+  if (current.count >= TELEMETRY_MAX_EVENTS_PER_SESSION_WINDOW) return false;
+  current.count += 1;
+
+  if (telemetrySessionWindows.size > 256) {
+    for (const [sessionId, window] of telemetrySessionWindows) {
+      if (now - window.windowStartedAtMs > TELEMETRY_SESSION_WINDOW_MS) {
+        telemetrySessionWindows.delete(sessionId);
+      }
+    }
+  }
+
+  return true;
+}
+
 export function sendPlayerTelemetryEvent(
   telemetryUrl: string,
   event: RendPlayerTelemetryEvent
 ) {
+  if (!telemetryWithinSessionLimit(event)) return;
+
   const payload = JSON.stringify({ events: [event] });
 
   try {
