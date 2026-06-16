@@ -1,0 +1,316 @@
+{
+  "schemaVersion": "rend.provider-benchmark.v1",
+  "generatedAt": "2026-06-16T11:17:47.113Z",
+  "run": {
+    "id": "20260616T111207Z",
+    "status": "completed",
+    "startedAt": "2026-06-16T11:12:07.952Z",
+    "finishedAt": "2026-06-16T11:17:47.112Z",
+    "region": "daytona-us",
+    "regionLabel": "Daytona us (us requested)",
+    "runnerKind": "daytona",
+    "runnerLabel": "043106f6-c7ef-4504-9ad9-e59018be6bfd",
+    "sampleCountTarget": 5,
+    "watchWindowMs": 30000,
+    "delayMs": 3000,
+    "providerOrderRandomized": true,
+    "providerOrderByRound": [
+      [
+        "rend",
+        "mux"
+      ],
+      [
+        "mux",
+        "rend"
+      ],
+      [
+        "mux",
+        "rend"
+      ],
+      [
+        "mux",
+        "rend"
+      ],
+      [
+        "rend",
+        "mux"
+      ]
+    ]
+  },
+  "source": {
+    "urls": {
+      "rend": "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+      "mux": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk"
+    },
+    "verification": {
+      "status": "not_independently_verified",
+      "metadataLooksConsistent": false,
+      "statement": "The harness can observe public player metadata such as duration and resolution, but neither public player exposes an original source checksum or object identity. Source-file identity was not independently verified.",
+      "observed": {
+        "rend": {
+          "durationMedianSeconds": 75.2,
+          "naturalResolution": "1920x1080",
+          "playbackMode": "hls-via-mse"
+        },
+        "mux": {
+          "durationMedianSeconds": 75.2,
+          "naturalResolution": "1280x720",
+          "playbackMode": "hls-via-mse"
+        }
+      }
+    }
+  },
+  "fairness": {
+    "rules": [
+      "The same Playwright-controlled Chromium/Chrome browser, viewport, device profile, host network, and runner are used for every provider in a comparison.",
+      "Every sample uses a clean browser context with no stored cookies, storage, or cache state.",
+      "Browser cache is disabled per sample by enabling Playwright request routing and sending no-store request headers.",
+      "Provider order is randomized inside each round before samples run.",
+      "Runs are rate-limited by default and are not load tests.",
+      "Raw samples are redacted before disk and public copies are written."
+    ],
+    "caveats": [
+      "CDN state cannot be fully controlled from this harness.",
+      "Provider encoders, packaging, and player implementations differ.",
+      "One video does not represent every workload, codec ladder, region, or viewer device.",
+      "The harness does not purge or manipulate Mux CDN caches.",
+      "The harness does not warm only Rend during direct comparisons.",
+      "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals."
+    ]
+  },
+  "environment": {
+    "browser": {
+      "automation": "Playwright Chromium",
+      "requestedChannel": "chrome",
+      "version": "149.0.7827.55"
+    },
+    "device": {
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "deviceScaleFactor": 1,
+      "isMobile": false,
+      "hasTouch": false
+    },
+    "network": {
+      "environment": "host network",
+      "throttling": "none",
+      "cache": "disabled per sample with clean browser contexts"
+    },
+    "runner": {
+      "platform": "linux",
+      "arch": "x64",
+      "osRelease": "6.8.0-90-generic",
+      "node": "v24.16.0",
+      "bun": null
+    }
+  },
+  "providers": [
+    {
+      "id": "rend",
+      "name": "Rend",
+      "url": "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+      "playerHost": "www.rend.so"
+    },
+    {
+      "id": "mux",
+      "name": "Mux",
+      "url": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
+      "playerHost": "player.mux.com"
+    }
+  ],
+  "regions": [
+    {
+      "id": "daytona-us",
+      "label": "Daytona us (us requested)",
+      "runnerKind": "daytona"
+    }
+  ],
+  "summary": {
+    "result": "benchmark_samples_available_no_universal_claim",
+    "minSamplesPerProvider": 5,
+    "minSuccessfulSamplesPerProvider": 5,
+    "sufficientForPublication": true,
+    "requiredSamplesPerProvider": 5,
+    "metricLabels": {
+      "timeToPlayerReadyMs": "Navigation to player ready",
+      "timeToMetadataMs": "Time to metadata",
+      "timeToCanplayMs": "Time to canplay",
+      "timeToFirstFrameMs": "Time to first frame",
+      "totalDurationMs": "Total test duration",
+      "stallCount": "Stall count",
+      "stallDurationMs": "Stall duration"
+    },
+    "providers": {
+      "rend": {
+        "sampleCount": 5,
+        "successfulSamples": 5,
+        "failedSamples": 0,
+        "startupFailureRate": 0,
+        "metrics": {
+          "timeToPlayerReadyMs": {
+            "count": 5,
+            "min": 677.4,
+            "median": 823.3,
+            "p75": 1168.2,
+            "p95": 1710.4,
+            "max": 1846
+          },
+          "timeToMetadataMs": {
+            "count": 5,
+            "min": 662.5,
+            "median": 802.5,
+            "p75": 1122.5,
+            "p95": 1679.7,
+            "max": 1819
+          },
+          "timeToCanplayMs": {
+            "count": 5,
+            "min": 673.2,
+            "median": 824.2,
+            "p75": 1163.5,
+            "p95": 1699.7,
+            "max": 1833.7
+          },
+          "timeToFirstFrameMs": {
+            "count": 5,
+            "min": 677.4,
+            "median": 823.3,
+            "p75": 1168.2,
+            "p95": 1710.4,
+            "max": 1846
+          },
+          "totalDurationMs": {
+            "count": 5,
+            "min": 30687.7,
+            "median": 30836,
+            "p75": 31186.3,
+            "p95": 31725.8,
+            "max": 31860.7
+          },
+          "stallCount": {
+            "count": 5,
+            "min": 1,
+            "median": 1,
+            "p75": 1,
+            "p95": 1,
+            "max": 1
+          },
+          "stallDurationMs": {
+            "count": 5,
+            "min": 24739.5,
+            "median": 26157.8,
+            "p75": 26176.9,
+            "p95": 26247,
+            "max": 26264.5
+          }
+        },
+        "observed": {
+          "durationSeconds": {
+            "count": 5,
+            "min": 75.2,
+            "median": 75.2,
+            "p75": 75.2,
+            "p95": 75.2,
+            "max": 75.2
+          },
+          "naturalResolution": "1920x1080",
+          "renderedResolution": "1078x606",
+          "playbackMode": "hls-via-mse",
+          "selectedRendition": "1920x1080"
+        },
+        "browserNetworkErrors": 0
+      },
+      "mux": {
+        "sampleCount": 5,
+        "successfulSamples": 5,
+        "failedSamples": 0,
+        "startupFailureRate": 0,
+        "metrics": {
+          "timeToPlayerReadyMs": {
+            "count": 5,
+            "min": 520.4,
+            "median": 551.9,
+            "p75": 573,
+            "p95": 629.4,
+            "max": 643.5
+          },
+          "timeToMetadataMs": {
+            "count": 5,
+            "min": 485.8,
+            "median": 509.7,
+            "p75": 544.1,
+            "p95": 601.9,
+            "max": 616.3
+          },
+          "timeToCanplayMs": {
+            "count": 5,
+            "min": 519.8,
+            "median": 527.3,
+            "p75": 555.6,
+            "p95": 611.4,
+            "max": 625.3
+          },
+          "timeToFirstFrameMs": {
+            "count": 5,
+            "min": 520.4,
+            "median": 551.9,
+            "p75": 573,
+            "p95": 629.4,
+            "max": 643.5
+          },
+          "totalDurationMs": {
+            "count": 5,
+            "min": 30561.1,
+            "median": 30573.6,
+            "p75": 30609.6,
+            "p95": 30709.7,
+            "max": 30734.7
+          },
+          "stallCount": {
+            "count": 5,
+            "min": 0,
+            "median": 0,
+            "p75": 0,
+            "p95": 0,
+            "max": 0
+          },
+          "stallDurationMs": {
+            "count": 5,
+            "min": 0,
+            "median": 0,
+            "p75": 0,
+            "p95": 0,
+            "max": 0
+          }
+        },
+        "observed": {
+          "durationSeconds": {
+            "count": 5,
+            "min": 75.2,
+            "median": 75.2,
+            "p75": 75.2,
+            "p95": 75.2,
+            "max": 75.2
+          },
+          "naturalResolution": "1280x720",
+          "renderedResolution": "1008x521",
+          "playbackMode": "hls-via-mse",
+          "selectedRendition": "1280x720"
+        },
+        "browserNetworkErrors": 20
+      }
+    }
+  },
+  "artifacts": {
+    "machineReadableUrl": "/benchmarks/providers/latest.json",
+    "rawSamplesUrl": "/benchmarks/providers/latest.samples.json"
+  },
+  "redaction": {
+    "status": "passed",
+    "checkedAt": "2026-06-16T11:17:47.114Z",
+    "patternsVersion": 1,
+    "findings": []
+  }
+}
