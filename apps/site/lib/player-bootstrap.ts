@@ -63,6 +63,21 @@ function proxiedArtifactUrl(assetId: string, artifactPath: string, playbackBaseU
   return playbackBaseUrl ? `${path}?playbackBaseUrl=${encodeURIComponent(playbackBaseUrl)}` : path;
 }
 
+function directArtifactUrl(assetId: string, artifactPath: string, playbackBaseUrl: string) {
+  const base = new URL(playbackBaseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+  base.pathname = `${basePath}/v/${encodeURIComponent(assetId)}/${encodeArtifactPath(artifactPath)}`;
+  base.search = "";
+  base.hash = "";
+  return base.toString();
+}
+
+function playbackArtifactUrl(assetId: string, artifactPath: string, playbackBaseUrl: string | null) {
+  return playbackBaseUrl
+    ? directArtifactUrl(assetId, artifactPath, playbackBaseUrl)
+    : proxiedArtifactUrl(assetId, artifactPath, null);
+}
+
 export function safePlaybackBootstrapResponse(
   assetId: string,
   data: UpstreamPlaybackResponse,
@@ -71,9 +86,9 @@ export function safePlaybackBootstrapResponse(
   const playbackPath = artifactPathFromPlaybackUrl(data.playback_url, assetId);
   const openerPath = artifactPathFromPlaybackUrl(data.opener_url, assetId);
   const manifestPath = artifactPathFromPlaybackUrl(data.manifest_url, assetId);
-  const playbackUrl = playbackPath ? proxiedArtifactUrl(assetId, playbackPath, playbackBaseUrl) : undefined;
-  const openerUrl = openerPath ? proxiedArtifactUrl(assetId, openerPath, playbackBaseUrl) : undefined;
-  const manifestUrl = manifestPath ? proxiedArtifactUrl(assetId, manifestPath, playbackBaseUrl) : undefined;
+  const playbackUrl = playbackPath ? playbackArtifactUrl(assetId, playbackPath, playbackBaseUrl) : undefined;
+  const openerUrl = openerPath ? playbackArtifactUrl(assetId, openerPath, playbackBaseUrl) : undefined;
+  const manifestUrl = manifestPath ? playbackArtifactUrl(assetId, manifestPath, playbackBaseUrl) : undefined;
   const expiresAt = safeNumber(data.playback_token_expires_at);
   const ttlSeconds = safeNumber(data.ttl_seconds);
 
@@ -91,7 +106,7 @@ export function safePlaybackBootstrapResponse(
         return [
           {
             artifact_path: artifactPath,
-            url: proxiedArtifactUrl(assetId, artifactPath, playbackBaseUrl),
+            url: playbackArtifactUrl(assetId, artifactPath, playbackBaseUrl),
             content_type: contentType,
           },
         ];
