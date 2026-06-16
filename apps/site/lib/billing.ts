@@ -6,6 +6,7 @@ import type { DashboardAccessContext } from "./dashboard-auth.ts";
 
 const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
+const DEFAULT_INTERNAL_DRY_RUN_PLAN_ID = "internal_production_dry_run";
 const AUTUMN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 // Hosted billing redirects leave a POST route; 303 makes the browser load Stripe with GET.
 export const BILLING_EXTERNAL_REDIRECT_STATUS = 303;
@@ -470,6 +471,7 @@ function planPriceLabels(raw: JsonRecord) {
 
 function normalizePlan(raw: unknown): BillingPlan | null {
   if (!isRecord(raw)) return null;
+  if (!isCustomerFacingPlan(raw)) return null;
   const id = safeString(raw.id);
   const name = safeString(raw.name);
   if (!id || !name) return null;
@@ -486,7 +488,25 @@ function normalizePlan(raw: unknown): BillingPlan | null {
   };
 }
 
-function normalizePlans(value: unknown) {
+function hiddenPlanIds() {
+  return new Set(
+    [
+      envString("REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID", DEFAULT_INTERNAL_DRY_RUN_PLAN_ID),
+      ...envString("REND_AUTUMN_HIDDEN_PLAN_IDS").split(","),
+    ]
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
+
+function isCustomerFacingPlan(raw: JsonRecord) {
+  const id = safeString(raw.id);
+  if (!id) return false;
+  if (raw.archived === true || raw.add_on === true || raw.addOn === true) return false;
+  return !hiddenPlanIds().has(id);
+}
+
+export function normalizeBillingPlans(value: unknown) {
   const list = isRecord(value) && Array.isArray(value.list) ? value.list : Array.isArray(value) ? value : [];
   return list.flatMap((item) => {
     const plan = normalizePlan(item);
@@ -612,7 +632,7 @@ async function autumnBillingOverview(context: DashboardAccessContext): Promise<B
     currentPlanLabel: currentPlanLabel(subscriptions),
     subscriptions,
     balances: normalizeBalances(isRecord(customer) ? customer.balances : undefined),
-    plans: normalizePlans(plans),
+    plans: normalizeBillingPlans(plans),
     manageBillingEnabled: true,
     checkoutEnabled: true,
     syncedAt: new Date().toISOString(),
@@ -652,7 +672,7 @@ async function fallbackBillingOverview(context: DashboardAccessContext, error: u
         return balance ? [balance] : [];
       })
     : [];
-  const plans = normalizePlans(Array.isArray(state.plans) ? state.plans : []);
+  const plans = normalizeBillingPlans(Array.isArray(state.plans) ? state.plans : []);
   return {
     mode: billingMode(),
     customerId: customerId(context),

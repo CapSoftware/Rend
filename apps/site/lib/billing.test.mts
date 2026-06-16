@@ -6,6 +6,7 @@ import {
   billingReadinessFromOverview,
   checkoutAttachBody,
   checkoutRedirectUrlFromAutumnResponse,
+  normalizeBillingPlans,
   type BillingOverview,
 } from "./billing.ts";
 
@@ -16,6 +17,8 @@ const ENV_KEYS = [
   "REND_BILLING_MODE",
   "REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT",
   "REND_ALLOW_LIVE_CHECKOUT_REDIRECT",
+  "REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID",
+  "REND_AUTUMN_HIDDEN_PLAN_IDS",
 ];
 
 async function withEnv<T>(values: Record<string, string | undefined>, run: () => T | Promise<T>) {
@@ -137,6 +140,56 @@ test("production Autumn attach can redirect when Checkout is required", async ()
 
 test("hosted billing redirects use See Other so Stripe receives GET after form POST", () => {
   assert.equal(BILLING_EXTERNAL_REDIRECT_STATUS, 303);
+});
+
+test("billing plan normalization hides internal and non-customer-facing plans", async () => {
+  await withEnv({ REND_AUTUMN_HIDDEN_PLAN_IDS: "beta_private" }, () => {
+    assert.deepEqual(
+      normalizeBillingPlans({
+        list: [
+          {
+            id: "internal_production_dry_run",
+            name: "Internal Production Dry Run",
+            description: "Internal-only plan for controlled production checks.",
+          },
+          {
+            id: "beta_private",
+            name: "Private Beta",
+          },
+          {
+            id: "archived_public",
+            name: "Archived Public",
+            archived: true,
+          },
+          {
+            id: "builder",
+            name: "Builder",
+            description: "$19/mo with $100 included usage credit.",
+            price: {
+              display: {
+                primary_text: "$19",
+                secondary_text: "per month",
+              },
+            },
+            customer_eligibility: {
+              attach_action: "activate",
+            },
+          },
+        ],
+      }),
+      [
+        {
+          id: "builder",
+          name: "Builder",
+          description: "$19/mo with $100 included usage credit.",
+          priceLabel: "$19",
+          intervalLabel: "per month",
+          attachAction: "activate",
+          relationshipStatus: undefined,
+        },
+      ]
+    );
+  });
 });
 
 test("checkout redirect guard rejects local test checkout URLs by default", async () => {
