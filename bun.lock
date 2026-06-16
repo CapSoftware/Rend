@@ -51,7 +51,7 @@
       },
     },
     "packages/sdk": {
-      "name": "@rend/sdk",
+      "name": "@rend-sdk/client",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "^5",
@@ -168,9 +168,9 @@
 
     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.41.1", "", {}, "sha512-/UhIkaZgPutTFmQ7RnIJGgDXZmtEJ7Dvi86xNTFWcnRxVRNk/aotsqDJYeEvDP+FSMB2SdW+pQzNMcWP0rwuNA=="],
 
-    "@rend/player": ["@rend/player@workspace:packages/player"],
+    "@rend-sdk/client": ["@rend-sdk/client@workspace:packages/sdk"],
 
-    "@rend/sdk": ["@rend/sdk@workspace:packages/sdk"],
+    "@rend/player": ["@rend/player@workspace:packages/player"],
 
     "@rend/site": ["@rend/site@workspace:apps/site"],
 
