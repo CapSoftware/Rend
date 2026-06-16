@@ -177,7 +177,7 @@ type ManifestObjectUrlResult = {
   sourceUrl: string;
   cacheHeaders?: Record<string, string>;
   edgeLabel?: string;
-  httpStatus: number;
+  httpStatus?: number;
   regionLabel?: string;
 };
 
@@ -577,6 +577,17 @@ export function RendPlayer({
     ): Promise<PreparedHlsSource | null> => {
       if (nextSelection.artifactPath !== "hls/master.m3u8") return null;
 
+      if (nextSelection.label !== "hls_js" || !Hls) {
+        emitTelemetry({
+          phase: "hls_ready",
+          ...selectionTelemetryFields(nextSelection),
+        });
+        return {
+          sourceUrl: nextSelection.url,
+          selection: nextSelection,
+        };
+      }
+
       const manifest = await signedHlsManifestObjectUrl(nextSelection.url, signal);
       if (signal.aborted) return null;
 
@@ -585,20 +596,6 @@ export function RendPlayer({
         objectUrl: manifest.sourceUrl,
         selection: nextSelection,
       };
-
-      if (nextSelection.label !== "hls_js" || !Hls) {
-        URL.revokeObjectURL(manifest.sourceUrl);
-        prepared.objectUrl = undefined;
-        prepared.sourceUrl = nextSelection.url;
-        emitTelemetry({
-          phase: "hls_ready",
-          ...selectionTelemetryFields(nextSelection),
-          cache_headers: manifest.cacheHeaders,
-          edge_label: manifest.edgeLabel,
-          region_label: manifest.regionLabel,
-        });
-        return prepared;
-      }
 
       const hls = new Hls(HLS_STARTUP_CONFIG);
       prepared.hls = hls;
