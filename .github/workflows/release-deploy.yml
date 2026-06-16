@@ -243,6 +243,11 @@ jobs:
               return 1
             fi
 
+            scripts/sync-edge-deploy-env-over-ssh.sh \
+              --host "$host" \
+              --user "$user" \
+              --port "${port:-22}"
+
             scripts/deploy-release-over-ssh.sh \
               --role edge \
               --host "$host" \
