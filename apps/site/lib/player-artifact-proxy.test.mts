@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   isHlsManifestArtifactPath,
   playbackCookieFromHeaders,
+  playbackCookieFromSetCookieHeader,
+  playbackCookieFromSetCookieHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
   playbackDirectCookieHeader,
@@ -153,6 +155,27 @@ test("direct playback cookie is scoped to the edge asset path and optional rend 
   assert.match(header ?? "", /HttpOnly/);
   assert.match(header ?? "", /SameSite=None/);
   assert.match(header ?? "", /Secure/);
+});
+
+test("playback cookie can be extracted from upstream set-cookie headers", () => {
+  assert.equal(
+    playbackCookieFromSetCookieHeader(
+      "__rend_playback=v1.claims.signature; Path=/v/; Max-Age=900; HttpOnly; SameSite=Lax"
+    ),
+    "v1.claims.signature"
+  );
+  assert.equal(
+    playbackCookieFromSetCookieHeader(
+      "session=ignored; Path=/, __rend_playback=v1.claims.signature; Path=/v/; Max-Age=900"
+    ),
+    "v1.claims.signature"
+  );
+  assert.equal(playbackCookieFromSetCookieHeader("__rend_playback=bad$value; Path=/v/"), undefined);
+
+  const headers = new Headers({
+    "set-cookie": "__rend_playback=v1.claims.signature; Path=/v/",
+  });
+  assert.equal(playbackCookieFromSetCookieHeaders(headers), "v1.claims.signature");
 });
 
 test("playback cookie parser returns only safe cookie values", () => {
