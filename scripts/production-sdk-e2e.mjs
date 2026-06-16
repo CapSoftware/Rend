@@ -1739,6 +1739,24 @@ function playbackSource(bootstrap: PlaybackBootstrapResponse) {
   return bootstrap.manifest_url || bootstrap.playback_url || bootstrap.opener_url || "";
 }
 
+function isPlaybackArtifactUrl(value: string, assetId: string, siteBaseUrl: string) {
+  let url: URL;
+  try {
+    url = new URL(value, siteBaseUrl);
+  } catch {
+    return false;
+  }
+  const site = new URL(siteBaseUrl);
+  if (url.origin === site.origin && url.pathname.startsWith("/api/player/" + assetId + "/artifact/")) {
+    return true;
+  }
+  const host = url.hostname.toLowerCase();
+  return (
+    (host === "rend.so" || host.endsWith(".rend.so") || host === "localhost" || host === "127.0.0.1") &&
+    url.pathname.startsWith("/v/" + assetId + "/")
+  );
+}
+
 function safePath(value: string) {
   try {
     const parsed = new URL(value, "https://rend.example");
@@ -1812,14 +1830,13 @@ async function exercise(client: RendClient) {
   assertNoPlaybackLeaks(bootstrap);
   const source = playbackSource(bootstrap);
   if (!source) fail("playback bootstrap did not return a source");
-  const expectedPrefix = "/api/player/" + assetId + "/artifact/";
-  if (!source.startsWith(expectedPrefix)) {
-    fail("playback source is not a same-origin artifact path: " + safePath(source));
+  if (!isPlaybackArtifactUrl(source, assetId, siteBaseUrl)) {
+    fail("playback source is not a safe artifact URL: " + safePath(source));
   }
 
   const artifactResponse = await expectOk(new URL(source, siteBaseUrl), "playback artifact");
-  const billablePath = "/api/player/" + assetId + "/artifact/opener.mp4";
-  const billableResponse = await expectOk(new URL(billablePath, siteBaseUrl), "billable opener artifact");
+  const billablePath = source;
+  const billableResponse = artifactResponse;
   const embedResponse = await expectOk(new URL("/embed/" + assetId, siteBaseUrl), "embed page");
   const watchResponse = await expectOk(new URL("/watch/" + assetId, siteBaseUrl), "watch page");
   const embedHtml = await embedResponse.text();
@@ -1834,7 +1851,7 @@ async function exercise(client: RendClient) {
         event_time_ms: Date.now(),
         bootstrap_http_status: 200,
         selected_playback_mode: "primary",
-        selected_artifact_path: "opener.mp4",
+        selected_artifact_path: safePath(source),
         app_version: "production-sdk-e2e",
       },
     ],
@@ -2003,6 +2020,14 @@ function safeResponse(response) {
   };
 }
 
+function isPlaybackArtifactResponseUrl(value, assetId) {
+  const url = new URL(value);
+  return (
+    url.pathname.includes("/api/player/" + assetId + "/artifact/") ||
+    url.pathname.startsWith("/v/" + assetId + "/")
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const target = new URL("/embed/" + encodeURIComponent(args.assetId) + "?autoplay=1", args.siteBaseUrl).toString();
@@ -2012,8 +2037,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     page.on("response", (response) => {
       try {
-        const url = new URL(response.url());
-        if (url.pathname.includes("/api/player/" + args.assetId + "/artifact/")) {
+        if (isPlaybackArtifactResponseUrl(response.url(), args.assetId)) {
           artifactResponses.push(safeResponse(response));
         }
       } catch {
@@ -2024,8 +2048,7 @@ async function main() {
       .waitForResponse(
         (response) => {
           try {
-            const url = new URL(response.url());
-            return url.pathname.includes("/api/player/" + args.assetId + "/artifact/") && response.status() < 500;
+            return isPlaybackArtifactResponseUrl(response.url(), args.assetId) && response.status() < 500;
           } catch {
             return false;
           }
@@ -2059,64 +2082,7 @@ async function main() {
       first_frame_ms: root.getAttribute("data-rend-first-frame-ms"),
       video_ready_state: root.querySelector("video")?.readyState ?? 0,
     }));
-    let openerResponse = null;
-    if (state.video_ready_state < 1) {
-      const openerPath = "/api/player/" + args.assetId + "/artifact/opener.mp4";
-      const openerResponsePromise = page
-        .waitForResponse(
-          (response) => {
-            try {
-              const url = new URL(response.url());
-              return url.pathname === openerPath && response.status() < 500;
-            } catch {
-              return false;
-            }
-          },
-          { timeout: args.timeoutMs },
-        )
-        .catch(() => null);
-      await page.locator("video").evaluate(
-        (video, input) =>
-          new Promise((resolve, reject) => {
-            const timeout = window.setTimeout(() => {
-              cleanup();
-              reject(new Error("timed out waiting for opener metadata"));
-            }, input.timeoutMs);
-            const cleanup = () => {
-              window.clearTimeout(timeout);
-              video.removeEventListener("loadedmetadata", onLoadedMetadata);
-              video.removeEventListener("error", onError);
-            };
-            const onLoadedMetadata = () => {
-              cleanup();
-              resolve(true);
-            };
-            const onError = () => {
-              cleanup();
-              reject(new Error("opener video failed to load"));
-            };
-            video.addEventListener("loadedmetadata", onLoadedMetadata, { once: true });
-            video.addEventListener("error", onError, { once: true });
-            video.src = input.src;
-            video.load();
-            video.play().catch(() => undefined);
-          }),
-        { src: openerPath, timeoutMs: args.timeoutMs },
-      );
-      const response = await openerResponsePromise;
-      if (!response) throw new Error("browser did not fetch opener playback artifact");
-      openerResponse = safeResponse(response);
-      state = await page.locator('[data-rend-asset-id="' + args.assetId + '"]').evaluate((root) => ({
-        player_state: root.getAttribute("data-rend-player-state"),
-        selected: root.getAttribute("data-rend-player-selected"),
-        artifact: root.getAttribute("data-rend-player-artifact"),
-        bootstrap_ms: root.getAttribute("data-rend-bootstrap-ms"),
-        metadata_ms: root.getAttribute("data-rend-metadata-ms"),
-        canplay_ms: root.getAttribute("data-rend-canplay-ms"),
-        first_frame_ms: root.getAttribute("data-rend-first-frame-ms"),
-        video_ready_state: root.querySelector("video")?.readyState ?? 0,
-      }));
-    }
+    const openerResponse = null;
     if (state.video_ready_state < 1) throw new Error("browser video element did not load playback metadata");
     process.stdout.write(
       JSON.stringify(
