@@ -21,12 +21,14 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path as AxumPath, Query, State},
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use http_body::{Body as HttpBody, Frame};
 use rend_config::{
     ExpectedEdges, RendEnv, env_bool, env_duration_secs, env_socket_addr, env_string, env_u64,
@@ -43,6 +45,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
 use tokio::{net::TcpListener, sync::mpsc};
+use tower_http::cors::CorsLayer;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +54,8 @@ mod events;
 mod jobs;
 mod media;
 mod telemetry;
+
+type HmacSha256 = Hmac<Sha256>;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -73,6 +78,7 @@ const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
 const INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: u64 = 120;
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const DASHBOARD_UPLOAD_TOKEN_PREFIX: &str = "rend_upload_";
 const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
 const LOCAL_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
 const LOCAL_SITE_INTERNAL_TOKEN: &str = "local-site-internal-token";
@@ -107,6 +113,7 @@ struct ApiConfig {
     auto_migrate: bool,
     request_timeout: Duration,
     max_upload_bytes: u64,
+    cors_allowed_origins: Vec<HeaderValue>,
 }
 
 #[derive(Clone)]
@@ -174,6 +181,7 @@ impl ApiConfig {
             max_upload_bytes > 0,
             "REND_MAX_UPLOAD_BYTES must be greater than 0"
         );
+        let cors_allowed_origins = cors_allowed_origins_from_env(rend_env)?;
         let inline_media_processing = env_bool("REND_API_INLINE_MEDIA_PROCESSING", false)?;
         let media_job_max_attempts = env_usize(
             "REND_MEDIA_JOB_MAX_ATTEMPTS",
@@ -341,8 +349,40 @@ impl ApiConfig {
             auto_migrate: env_bool("REND_API_AUTO_MIGRATE", true)?,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
             max_upload_bytes,
+            cors_allowed_origins,
         })
     }
+}
+
+fn cors_allowed_origins_from_env(rend_env: RendEnv) -> Result<Vec<HeaderValue>> {
+    let configured = env_string("REND_API_CORS_ALLOWED_ORIGINS", "");
+    let origins = if configured.trim().is_empty() {
+        if rend_env.is_strict() {
+            "https://rend.so,https://www.rend.so".to_owned()
+        } else {
+            "http://localhost:3000,http://127.0.0.1:3000".to_owned()
+        }
+    } else {
+        configured
+    };
+
+    origins
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            HeaderValue::from_str(origin).with_context(|| {
+                format!("REND_API_CORS_ALLOWED_ORIGINS contains invalid origin {origin}")
+            })
+        })
+        .collect()
+}
+
+fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(allowed_origins.to_vec())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
 #[derive(Clone)]
@@ -366,6 +406,7 @@ enum ApiScope {
 enum RequestCredential {
     ApiKey,
     DevKey,
+    DashboardUploadToken,
     SiteInternal,
 }
 
@@ -374,6 +415,15 @@ struct RequestAuth {
     organization_id: String,
     scopes: BTreeSet<ApiScope>,
     credential: RequestCredential,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DashboardUploadTokenClaims {
+    v: u8,
+    org_id: String,
+    exp: u64,
+    content_type: String,
+    content_length: Option<u64>,
 }
 
 impl RequestAuth {
@@ -990,6 +1040,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             request_timeout,
         ))
+        .layer(cors_layer(&state.config.cors_allowed_origins))
         .with_state(state)
 }
 
@@ -4269,11 +4320,88 @@ async fn authenticate_request(
         )));
     }
 
+    if token.starts_with(DASHBOARD_UPLOAD_TOKEN_PREFIX) {
+        return dashboard_upload_token_auth(state, token, headers);
+    }
+
     if !looks_like_api_key(token) {
         return Ok(None);
     }
 
     lookup_api_key_auth(&state.db, token).await
+}
+
+fn dashboard_upload_token_auth(
+    state: &AppState,
+    token: &str,
+    headers: &HeaderMap,
+) -> Result<Option<RequestAuth>, AppError> {
+    let Some(claims) = verify_dashboard_upload_token(&state.config.site_internal_token, token)
+    else {
+        return Ok(None);
+    };
+
+    if claims.v != 1 {
+        return Ok(None);
+    }
+    if claims.exp < current_unix_timestamp().map_err(AppError::internal)? {
+        return Ok(None);
+    }
+
+    let organization_id = normalize_org_id(&claims.org_id)?;
+    let content_type = request_content_type(headers);
+    if content_type != claims.content_type {
+        return Err(AppError::forbidden(
+            "upload token does not match content-type",
+        ));
+    }
+
+    let content_length = request_content_length(headers, state.config.max_upload_bytes)?;
+    match (claims.content_length, content_length) {
+        (Some(expected), Some(actual)) if i64::try_from(expected).ok() == Some(actual) => {}
+        (Some(_), _) => {
+            return Err(AppError::forbidden(
+                "upload token does not match content-length",
+            ));
+        }
+        (None, _) => {}
+    }
+
+    Ok(Some(RequestAuth {
+        organization_id,
+        scopes: [ApiScope::Upload].into_iter().collect(),
+        credential: RequestCredential::DashboardUploadToken,
+    }))
+}
+
+fn verify_dashboard_upload_token(secret: &str, token: &str) -> Option<DashboardUploadTokenClaims> {
+    if secret.trim().is_empty() {
+        return None;
+    }
+
+    let token = token.strip_prefix(DASHBOARD_UPLOAD_TOKEN_PREFIX)?;
+    let (payload, signature) = token.split_once('.')?;
+    if payload.is_empty() || signature.is_empty() {
+        return None;
+    }
+
+    let signature = URL_SAFE_NO_PAD.decode(signature.as_bytes()).ok()?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature).ok()?;
+
+    let payload = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    serde_json::from_slice(&payload).ok()
+}
+
+#[cfg(test)]
+fn encode_dashboard_upload_token(secret: &str, claims: &DashboardUploadTokenClaims) -> String {
+    let payload = serde_json::to_vec(claims).unwrap();
+    let payload = URL_SAFE_NO_PAD.encode(payload);
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(payload.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{DASHBOARD_UPLOAD_TOKEN_PREFIX}{payload}.{signature}")
 }
 
 async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestAuth>, AppError> {

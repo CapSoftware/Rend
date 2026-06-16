@@ -136,6 +136,10 @@ fn test_config() -> ApiConfig {
         auto_migrate: false,
         request_timeout: Duration::from_secs(10),
         max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        cors_allowed_origins: vec![
+            HeaderValue::from_static("http://localhost:3000"),
+            HeaderValue::from_static("https://www.rend.so"),
+        ],
     }
 }
 
@@ -419,6 +423,121 @@ async fn site_internal_token_auth_sets_request_org_and_all_scopes() {
     assert!(auth.has_scope(ApiScope::Read));
     assert!(auth.has_scope(ApiScope::Delete));
     assert!(auth.has_scope(ApiScope::Analytics));
+}
+
+#[tokio::test]
+async fn dashboard_upload_token_auth_is_upload_only_and_bound_to_file_metadata() {
+    let state = test_state();
+    let token = encode_dashboard_upload_token(
+        "site-internal",
+        &DashboardUploadTokenClaims {
+            v: 1,
+            org_id: "00000000-0000-0000-0000-0000000000ab".to_owned(),
+            exp: NOW,
+            content_type: "video/mp4".to_owned(),
+            content_length: Some(3),
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("3"));
+
+    let auth = authenticate_request(&state, &headers)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(auth.organization_id, "00000000-0000-0000-0000-0000000000ab");
+    assert!(auth.has_scope(ApiScope::Upload));
+    assert!(!auth.has_scope(ApiScope::Read));
+    assert!(!auth.allows_suspended_reads());
+
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("4"));
+    let error = authenticate_request(&state, &headers).await.unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn dashboard_upload_token_rejects_expired_or_tampered_tokens() {
+    let state = test_state();
+    let expired = encode_dashboard_upload_token(
+        "site-internal",
+        &DashboardUploadTokenClaims {
+            v: 1,
+            org_id: LOCAL_ORG_ID.to_owned(),
+            exp: 1,
+            content_type: "video/mp4".to_owned(),
+            content_length: Some(3),
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {expired}")).unwrap(),
+    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("3"));
+
+    assert!(
+        authenticate_request(&state, &headers)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let valid = encode_dashboard_upload_token(
+        "site-internal",
+        &DashboardUploadTokenClaims {
+            v: 1,
+            org_id: LOCAL_ORG_ID.to_owned(),
+            exp: NOW,
+            content_type: "video/mp4".to_owned(),
+            content_length: Some(3),
+        },
+    );
+    let tampered = format!("{valid}x");
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {tampered}")).unwrap(),
+    );
+
+    assert!(
+        authenticate_request(&state, &headers)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn cors_preflight_allows_dashboard_origin_for_direct_uploads() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/videos")
+                .header(header::ORIGIN, "https://www.rend.so")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization, content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("https://www.rend.so"))
+    );
 }
 
 #[tokio::test]
