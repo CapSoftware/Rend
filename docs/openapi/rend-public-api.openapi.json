@@ -360,14 +360,17 @@
                       "playback_content_type": "application/vnd.apple.mpegurl",
                       "playback_token_expires_at": 1781432100,
                       "ttl_seconds": 900,
-                      "opener_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/opener.mp4",
-                      "opener_content_type": "video/mp4",
                       "manifest_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
                       "manifest_content_type": "application/vnd.apple.mpegurl",
                       "prefetch_hints": [
                         {
-                          "artifact_path": "hls/segment_00000.ts",
-                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/segment_00000.ts",
+                          "artifact_path": "hls/720p/index.m3u8",
+                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/720p/index.m3u8",
+                          "content_type": "application/vnd.apple.mpegurl"
+                        },
+                        {
+                          "artifact_path": "hls/720p/segment_00000.ts",
+                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/720p/segment_00000.ts",
                           "content_type": "video/mp2t"
                         }
                       ]
@@ -761,7 +764,7 @@
       },
       "PlaybackArtifactPath": {
         "type": "string",
-        "pattern": "^(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts)$"
+        "pattern": "^(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts|hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts))$"
       },
       "PlaybackPrefetchHint": {
         "type": "object",
@@ -771,7 +774,7 @@
           "artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
           "url": {
             "type": "string",
-            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts)(\\?playbackBaseUrl=[^\\s]+)?$"
+            "pattern": "^/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts|hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts))(\\?playbackBaseUrl=[^\\s]+)?$"
           },
           "content_type": { "type": "string", "minLength": 1, "maxLength": 128 }
         }
