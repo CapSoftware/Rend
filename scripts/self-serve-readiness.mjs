@@ -44,8 +44,14 @@ Options:
       Production env file. Defaults to .env.production.local when present.
   --dry-run-artifact FILE
       Production dry-run artifact. Defaults to .rend/launch/production-dry-run-latest.json.
+  --otp-diagnostics-artifact FILE
+      Auth OTP diagnostics artifact. Defaults to .rend/launch/auth-otp-diagnostics-latest.json.
   --launch-gate-artifact FILE
       Launch gate artifact. Defaults to .rend/launch/launch-readiness-latest.json.
+  --require-otp-health
+      Fail if the auth OTP diagnostics artifact is missing or not passing.
+  --require-otp-probe
+      Fail if the auth OTP diagnostics artifact does not include an accepted probe.
   --require-dry-run
       Fail if the dry-run artifact is missing or not passing.
   --require-launch-gate
@@ -63,9 +69,14 @@ function parseArgs(argv) {
     dryRunArtifact:
       process.env.REND_SELF_SERVE_DRY_RUN_ARTIFACT ||
       path.join(".rend", "launch", "production-dry-run-latest.json"),
+    otpDiagnosticsArtifact:
+      process.env.REND_SELF_SERVE_OTP_DIAGNOSTICS_ARTIFACT ||
+      path.join(".rend", "launch", "auth-otp-diagnostics-latest.json"),
     launchGateArtifact:
       process.env.REND_SELF_SERVE_LAUNCH_GATE_ARTIFACT ||
       path.join(".rend", "launch", "launch-readiness-latest.json"),
+    requireOtpHealth: truthy(process.env.REND_SELF_SERVE_REQUIRE_OTP_HEALTH),
+    requireOtpProbe: truthy(process.env.REND_SELF_SERVE_REQUIRE_OTP_PROBE),
     requireDryRun: truthy(process.env.REND_SELF_SERVE_REQUIRE_DRY_RUN),
     requireLaunchGate: truthy(process.env.REND_SELF_SERVE_REQUIRE_LAUNCH_GATE),
     allowPlaceholders: false,
@@ -82,8 +93,12 @@ function parseArgs(argv) {
     else if (arg.startsWith("--env-file=")) args.envFile = arg.slice("--env-file=".length);
     else if (arg === "--dry-run-artifact") args.dryRunArtifact = next();
     else if (arg.startsWith("--dry-run-artifact=")) args.dryRunArtifact = arg.slice("--dry-run-artifact=".length);
+    else if (arg === "--otp-diagnostics-artifact") args.otpDiagnosticsArtifact = next();
+    else if (arg.startsWith("--otp-diagnostics-artifact=")) args.otpDiagnosticsArtifact = arg.slice("--otp-diagnostics-artifact=".length);
     else if (arg === "--launch-gate-artifact") args.launchGateArtifact = next();
     else if (arg.startsWith("--launch-gate-artifact=")) args.launchGateArtifact = arg.slice("--launch-gate-artifact=".length);
+    else if (arg === "--require-otp-health") args.requireOtpHealth = true;
+    else if (arg === "--require-otp-probe") args.requireOtpProbe = true;
     else if (arg === "--require-dry-run") args.requireDryRun = true;
     else if (arg === "--require-launch-gate") args.requireLaunchGate = true;
     else if (arg === "--allow-placeholders") args.allowPlaceholders = true;
@@ -236,11 +251,26 @@ function validateDryRunArtifact(artifact) {
   return failures;
 }
 
-function validateLaunchGateArtifact(artifact) {
+function validateOtpDiagnosticsArtifact(artifact, requireProbe) {
+  const failures = [];
+  if (artifact.status !== "pass") failures.push("auth OTP diagnostics status is not pass");
+  const stepIds = new Set(Array.isArray(artifact.steps) ? artifact.steps.map((entry) => entry.id) : []);
+  for (const requiredStep of ["otp-config", "otp-db", "otp-send-probe"]) {
+    if (!stepIds.has(requiredStep)) failures.push(`missing auth OTP diagnostics step ${requiredStep}`);
+  }
+  if (requireProbe && artifact.otp_probe?.accepted !== true) {
+    failures.push("auth OTP diagnostics did not confirm an accepted OTP send probe");
+  }
+  return failures;
+}
+
+function validateLaunchGateArtifact(artifact, requireOtpHealth) {
   const failures = [];
   if (artifact.status !== "pass") failures.push("launch gate status is not pass");
   const stepIds = new Set(Array.isArray(artifact.steps) ? artifact.steps.map((entry) => entry.id) : []);
-  for (const requiredStep of ["launch-mode-policy", "production-env-validation", "autumn-catalog-parity"]) {
+  const requiredSteps = ["launch-mode-policy", "production-env-validation", "autumn-catalog-parity"];
+  if (requireOtpHealth) requiredSteps.push("auth-otp-diagnostics");
+  for (const requiredStep of requiredSteps) {
     if (!stepIds.has(requiredStep)) failures.push(`missing launch gate step ${requiredStep}`);
   }
   return failures;
@@ -276,6 +306,13 @@ async function main() {
     await productionEnvStep(args),
     await publicCopyStep(),
     await artifactStep(
+      "auth-otp-diagnostics-artifact",
+      "auth OTP diagnostics artifact",
+      args.otpDiagnosticsArtifact,
+      args.requireOtpHealth,
+      (artifact) => validateOtpDiagnosticsArtifact(artifact, args.requireOtpProbe),
+    ),
+    await artifactStep(
       "production-dry-run-artifact",
       "self-serve production dry-run artifact",
       args.dryRunArtifact,
@@ -287,7 +324,7 @@ async function main() {
       "launch gate artifact",
       args.launchGateArtifact,
       args.requireLaunchGate,
-      validateLaunchGateArtifact,
+      (artifact) => validateLaunchGateArtifact(artifact, args.requireOtpHealth),
     ),
   ];
   const status = overallStatus(steps);
