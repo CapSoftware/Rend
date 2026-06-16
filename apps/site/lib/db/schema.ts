@@ -117,7 +117,7 @@ export const verification = rendAuth.table(
     updated_at: updatedAt(),
   },
   (table) => [
-    index("verification_identifier_idx").on(table.identifier),
+    uniqueIndex("verification_identifier_idx").on(table.identifier),
     index("verification_expires_at_idx").on(table.expires_at),
   ]
 );
