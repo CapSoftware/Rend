@@ -5,7 +5,11 @@ type EmbedPageProps = {
   params: Promise<{ assetId: string }>;
   searchParams: Promise<{
     autoplay?: string | string[];
+    engine?: string | string[];
     playbackBaseUrl?: string | string[];
+    playbackEngine?: string | string[];
+    startup?: string | string[];
+    startupMode?: string | string[];
     telemetry?: string | string[];
   }>;
 };
@@ -39,6 +43,26 @@ function telemetryEnabled(value: string | string[] | undefined) {
   return process.env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY === "1";
 }
 
+function playerStartupMode(
+  startupMode: string | string[] | undefined,
+  startup: string | string[] | undefined
+) {
+  const requested = Array.isArray(startupMode)
+    ? startupMode[0]
+    : startupMode ?? (Array.isArray(startup) ? startup[0] : startup);
+  return requested === "opener" ? "opener" : "hls";
+}
+
+function playerPlaybackEngine(
+  playbackEngine: string | string[] | undefined,
+  engine: string | string[] | undefined
+) {
+  const requested = Array.isArray(playbackEngine)
+    ? playbackEngine[0]
+    : playbackEngine ?? (Array.isArray(engine) ? engine[0] : engine);
+  return requested === "mse" || requested === "native" ? requested : "auto";
+}
+
 export default async function EmbedPage({ params, searchParams }: EmbedPageProps) {
   const [{ assetId }, query] = await Promise.all([params, searchParams]);
 
@@ -54,6 +78,8 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
           autoPlay={query.autoplay === "1"}
           bootstrapUrl={playerBootstrapUrl(assetId, query.playbackBaseUrl)}
           maxPrefetchHints={2}
+          playbackEngine={playerPlaybackEngine(query.playbackEngine, query.engine)}
+          startupMode={playerStartupMode(query.startupMode, query.startup)}
           telemetryAppVersion={telemetryAppVersion()}
           telemetryEnabled={telemetryEnabled(query.telemetry)}
           telemetryUrl="/api/player/telemetry"
