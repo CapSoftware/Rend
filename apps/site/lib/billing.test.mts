@@ -120,6 +120,7 @@ test("local Autumn attach activates plans without external Checkout by default",
     assert.equal(body.customer_id, dashboardContext.organizationId);
     assert.equal(body.plan_id, "builder");
     assert.equal(body.redirect_mode, "never");
+    assert.equal(body.success_url, returnUrl);
     assert.equal(body.no_billing_changes, true);
     assert.equal(body.enable_plan_immediately, true);
     assert.deepEqual(body.checkout_session_params, { cancel_url: returnUrl });
@@ -132,6 +133,7 @@ test("production Autumn attach can redirect when Checkout is required", async ()
     const body = checkoutAttachBody(dashboardContext, "builder", returnUrl);
 
     assert.equal(body.redirect_mode, "if_required");
+    assert.equal(body.success_url, returnUrl);
     assert.equal("no_billing_changes" in body, false);
     assert.equal("enable_plan_immediately" in body, false);
     assert.deepEqual(body.checkout_session_params, { cancel_url: returnUrl });
