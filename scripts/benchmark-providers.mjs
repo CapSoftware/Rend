@@ -431,13 +431,24 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
 
   await page.addInitScript(browserProbeSource);
 
-  const sampleStarted = performance.now();
+  let sampleStarted = performance.now();
   let responseStatus = null;
   let failure = null;
   let snapshot = null;
   let browserUserAgent = null;
 
   try {
+    if (provider.preflightUrl) {
+      const preflight = await page.goto(provider.preflightUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: options.navigationTimeoutMs,
+      });
+      if (!preflight?.ok()) {
+        throw new Error(`preflight failed with HTTP ${preflight?.status() ?? "unknown"}`);
+      }
+    }
+
+    sampleStarted = performance.now();
     const response = await page.goto(provider.url, {
       waitUntil: "domcontentloaded",
       timeout: options.navigationTimeoutMs,
