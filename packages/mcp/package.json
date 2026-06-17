@@ -42,7 +42,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun run --cwd ../sdk build && npm run clean && tsc -p tsconfig.build.json",
+    "build": "bun run --cwd ../sdk build && npm run clean && tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/bin/rend-mcp.js', 0o755)\"",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "pack:dry-run": "npm pack --dry-run",
     "prepack": "npm run build",
