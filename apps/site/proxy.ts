@@ -39,8 +39,31 @@ function forwardedBootstrapHeaders(request: NextRequest) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
+  for (const name of FORWARDED_CONTEXT_HEADER_NAMES) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
 
   return headers;
+}
+
+function envString(name: string) {
+  return (process.env[name] || "").trim();
+}
+
+function internalBootstrapOrigin(request: NextRequest) {
+  const configured = envString("REND_WATCH_BOOTSTRAP_ORIGIN");
+  if (!configured) return request.url;
+
+  try {
+    const parsed = new URL(configured);
+    if (!["http:", "https:"].includes(parsed.protocol)) return request.url;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return request.url;
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString();
+  } catch {
+    return request.url;
+  }
 }
 
 function setCookieHeaders(headers: Headers) {
