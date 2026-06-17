@@ -55,6 +55,7 @@ const DEFAULT_CONTROL_PLANE_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_CACHE_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 const PLAYBACK_COOKIE_NAME: &str = "__rend_playback";
+const PLAYBACK_TIMING_ALLOW_ORIGIN: &str = "https://www.rend.so";
 const CACHE_METADATA_DIR_NAME: &str = ".rend-edge-cache-meta";
 const CACHE_METADATA_VERSION: u8 = 1;
 const FIRST_SEGMENT_KEEP_COUNT: u32 = 2;
@@ -2323,6 +2324,16 @@ fn is_trusted_rend_cors_origin(origin: &str) -> bool {
     host == "rend.so" || host.ends_with(".rend.so")
 }
 
+fn playback_timing_allow_origin(
+    cors_origin: Option<&str>,
+    content_type: &str,
+) -> Option<&'static str> {
+    let is_hls_timing_resource =
+        matches!(content_type, "application/vnd.apple.mpegurl" | "video/mp2t");
+    (is_hls_timing_resource && cors_origin == Some(PLAYBACK_TIMING_ALLOW_ORIGIN))
+        .then_some(PLAYBACK_TIMING_ALLOW_ORIGIN)
+}
+
 fn artifact_response(
     config: &EdgeConfig,
     content_type: &'static str,
@@ -2348,6 +2359,9 @@ fn artifact_response(
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
             .header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
             .header(header::VARY, "Origin");
+    }
+    if let Some(origin) = playback_timing_allow_origin(cors_origin, content_type) {
+        builder = builder.header("timing-allow-origin", origin);
     }
 
     if let Some(content_length) = content_length {
