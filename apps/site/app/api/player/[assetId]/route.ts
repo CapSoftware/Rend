@@ -9,6 +9,11 @@ import {
   type UpstreamPlaybackResponse,
 } from "../../../../lib/player-bootstrap.ts";
 import {
+  cachedBootstrapResponse,
+  cacheKeyForPlaybackBootstrap,
+  rememberBootstrapResponse,
+} from "../../../../lib/player-bootstrap-cache.ts";
+import {
   playbackCookieFromSetCookieHeaders,
   playbackDirectCookieHeader,
   playbackProxyCookieHeader,
@@ -175,6 +180,29 @@ function canUseDirectPlaybackCookie(
   return requestHost === playbackHost;
 }
 
+function setPlaybackCookieHeader(
+  headers: Headers,
+  request: Request,
+  assetId: string,
+  playbackToken: unknown,
+  ttlSeconds: unknown,
+  playbackBaseUrl: string | null,
+  directPlaybackEnabled: boolean,
+  directCookieDomain: string | undefined
+) {
+  const playbackCookie = directPlaybackEnabled && playbackBaseUrl
+    ? playbackDirectCookieHeader(
+        request.url,
+        assetId,
+        playbackToken,
+        ttlSeconds,
+        playbackBaseUrl,
+        directCookieDomain
+      )
+    : playbackProxyCookieHeader(request.url, assetId, playbackToken, ttlSeconds);
+  if (playbackCookie) headers.append("set-cookie", playbackCookie);
+}
+
 function normalizeAssetId(value: string) {
   const assetId = value.trim().toLowerCase();
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(assetId)
@@ -297,6 +325,30 @@ export async function GET(
   }
   const playbackBaseUrl = playbackDecision.playbackBaseUrl;
   logPlaybackEdgeDecision(request, playbackDecision);
+  const directCookieDomain = directPlaybackCookieDomain(request, playbackBaseUrl);
+  const directPlaybackEnabled = canUseDirectPlaybackCookie(request, playbackBaseUrl, directCookieDomain);
+  const cacheKey = cacheKeyForPlaybackBootstrap(
+    normalizedAssetId,
+    playbackBaseUrl,
+    directPlaybackEnabled,
+    directCookieDomain,
+    request
+  );
+  const cached = cachedBootstrapResponse(cacheKey);
+  if (cached) {
+    const headers = new Headers();
+    setPlaybackCookieHeader(
+      headers,
+      request,
+      normalizedAssetId,
+      cached.playbackToken,
+      cached.safeResponse.ttl_seconds,
+      cached.playbackBaseUrl,
+      cached.directPlaybackEnabled,
+      cached.directCookieDomain
+    );
+    return jsonResponse(cached.safeResponse, { headers });
+  }
 
   const upstream = await fetchControlPlane(
     `/v1/assets/${encodeURIComponent(normalizedAssetId)}/playback`,
@@ -331,8 +383,6 @@ export async function GET(
   }
 
   const data = (await upstream.json().catch(() => null)) as UpstreamPlaybackResponse | null;
-  const directCookieDomain = directPlaybackCookieDomain(request, playbackBaseUrl);
-  const directPlaybackEnabled = canUseDirectPlaybackCookie(request, playbackBaseUrl, directCookieDomain);
   const responsePlaybackBaseUrl = directPlaybackEnabled ? playbackBaseUrl : null;
   const safeResponse = data
     ? safePlaybackBootstrapResponse(normalizedAssetId, data, responsePlaybackBaseUrl)
@@ -352,22 +402,26 @@ export async function GET(
   const headers = new Headers();
   const upstreamPlaybackCookie = playbackCookieFromSetCookieHeaders(upstream.headers);
   const playbackToken = upstreamPlaybackCookie ?? data?.playback_token;
-  const playbackCookie = directPlaybackEnabled && playbackBaseUrl
-    ? playbackDirectCookieHeader(
-        request.url,
-        normalizedAssetId,
-        playbackToken,
-        safeResponse.ttl_seconds,
-        playbackBaseUrl,
-        directCookieDomain
-      )
-    : playbackProxyCookieHeader(
-        request.url,
-        normalizedAssetId,
-        playbackToken,
-        safeResponse.ttl_seconds
-      );
-  if (playbackCookie) headers.append("set-cookie", playbackCookie);
+  setPlaybackCookieHeader(
+    headers,
+    request,
+    normalizedAssetId,
+    playbackToken,
+    safeResponse.ttl_seconds,
+    playbackBaseUrl,
+    directPlaybackEnabled,
+    directCookieDomain
+  );
+  if (typeof playbackToken === "string") {
+    rememberBootstrapResponse(cacheKey, {
+      cachedAtMs: Date.now(),
+      directCookieDomain,
+      directPlaybackEnabled,
+      playbackBaseUrl,
+      playbackToken,
+      safeResponse,
+    });
+  }
 
   return jsonResponse(safeResponse, { headers });
 }
