@@ -8,7 +8,7 @@ import { Container } from "@/components/ui/Container";
 import { getMarketingPage, START_HREF } from "@/lib/marketing-pages";
 import { pageMetadata } from "@/lib/seo";
 import { breadcrumbLd, webPageLd } from "@/lib/structured-data";
-import europeLocal from "@/public/benchmarks/providers/europe-local.json";
+import europe from "@/public/benchmarks/providers/europe.json";
 import latest from "@/public/benchmarks/providers/latest.json";
 
 const page = getMarketingPage("/benchmarks");
@@ -27,15 +27,15 @@ const breadcrumbs = [
 // Pulled straight from the published artifact so the page never drifts from the run.
 const rend = latest.summary.providers.rend;
 const mux = latest.summary.providers.mux;
-const europeRend = europeLocal.summary.providers.rend;
-const europeMux = europeLocal.summary.providers.mux;
+const europeRend = europe.summary.providers.rend;
+const europeMux = europe.summary.providers.mux;
 
 const runDate = new Date(latest.generatedAt).toLocaleDateString("en-GB", {
   day: "numeric",
   month: "long",
   year: "numeric",
 });
-const europeRunDate = new Date(europeLocal.generatedAt).toLocaleDateString("en-GB", {
+const europeRunDate = new Date(europe.generatedAt).toLocaleDateString("en-GB", {
   day: "numeric",
   month: "long",
   year: "numeric",
@@ -49,7 +49,7 @@ const europePctSooner = Math.round(
   (1 - europeRend.metrics.timeToFirstFrameMs.median / europeMux.metrics.timeToFirstFrameMs.median) * 100,
 );
 const browserLabel = `${latest.environment.browser.automation} ${latest.environment.browser.version}`;
-const europeBrowserLabel = `${europeLocal.environment.browser.automation} ${europeLocal.environment.browser.version}`;
+const europeBrowserLabel = `${europe.environment.browser.automation} ${europe.environment.browser.version}`;
 
 const results = [
   {
@@ -113,7 +113,7 @@ const method = [
   "A fresh browser context for every sample: no cookies, no stored state, and the cache disabled.",
   `A ${Math.round(latest.run.watchWindowMs / 1000)} second watch window per sample, timing the first painted frame and counting any stalls.`,
   `${browserLabel}, run on a Daytona sandbox with the region set to US for the US results.`,
-  `${europeBrowserLabel}, run on a local Europe machine for the Europe results.`,
+  `${europeBrowserLabel}, run on a Daytona sandbox with the region set to Europe for the Europe results.`,
   "Rend is measured on its fastest production setup for this asset: the native-HLS /watch path with playback assigned from the initial page.",
 ];
 
@@ -122,7 +122,7 @@ const caveats = [
   "We did not purge or warm any CDN. Mux serves from its own network and Rend from ours, each in whatever cache state it happened to be in.",
   "Encoders, packaging and player implementations differ between the two providers.",
   "This is the fastest real Rend playback path, not a forced-resolution run. Rend selected 1080p and Mux selected 720p in the benchmark viewport.",
-  "The Europe run used a local machine rather than a Daytona Europe sandbox because Europe containers were not available to this Daytona organization.",
+  "The Europe run used a Daytona sandbox requested in Europe; Daytona reported the sandbox target as eu.",
   "Source file identity is not independently verified beyond matching duration and observable metadata.",
 ];
 
@@ -176,8 +176,8 @@ export default function BenchmarksPage() {
           <h2 className="mt-16 font-head text-[22px] leading-snug">Regional results</h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
             Time to first frame, median of {latest.run.sampleCountTarget} samples per provider. The US run
-            was on {runDate} in a Daytona sandbox. The Europe run was on {europeRunDate} from a local
-            machine in Europe. Both use Rend&apos;s fastest production playback path.
+            was on {runDate} in a Daytona sandbox. The Europe run was on {europeRunDate} in a Daytona
+            Europe sandbox. Both use Rend&apos;s fastest production playback path.
           </p>
 
           <div className="mt-6 max-w-[860px] overflow-x-auto">
@@ -221,7 +221,7 @@ export default function BenchmarksPage() {
           {/* Sample spread */}
           <h2 className="mt-16 font-head text-[22px] leading-snug">How the samples spread</h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
-            Time to first frame across every sample, fastest to slowest.
+            Time to first frame for the fastest sample and median in each region.
           </p>
 
           <div className="mt-6 max-w-[680px] overflow-x-auto">
@@ -290,7 +290,7 @@ export default function BenchmarksPage() {
               US raw samples
             </a>
             <a
-              href={europeLocal.artifacts.machineReadableUrl}
+              href={europe.artifacts.machineReadableUrl}
               target="_blank"
               rel="noopener noreferrer"
               className={linkClass}
@@ -298,7 +298,7 @@ export default function BenchmarksPage() {
               Europe summary JSON
             </a>
             <a
-              href={europeLocal.artifacts.rawSamplesUrl}
+              href={europe.artifacts.rawSamplesUrl}
               target="_blank"
               rel="noopener noreferrer"
               className={linkClass}
