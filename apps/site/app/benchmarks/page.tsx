@@ -204,8 +204,9 @@ export default function BenchmarksPage() {
             </p>
             <p>
               We built a small harness to run these in a standardized, repeatable way, and we publish the
-              raw results so anyone can check them. Here is how Rend and Mux compared on the latest run.
-              We will keep adding providers and regions over time.
+              raw results so anyone can check them. We publish the provider comparison and the current
+              /watch startup guardrail separately, because native HLS and hls.js/MSE numbers should not
+              be mixed. We will keep adding providers and regions over time.
             </p>
             <p>
               If you spot a mistake in the methodology, tell us at{" "}
@@ -216,12 +217,70 @@ export default function BenchmarksPage() {
             </p>
           </div>
 
+          {/* Watch startup guardrail */}
+          <h2 className="mt-16 font-head text-[22px] leading-snug">Latest /watch startup check</h2>
+          <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
+            Fresh production upload on {watchRunDate}, after restoring ABR-first HLS startup. This is the
+            native-HLS regression check for Rend&apos;s own /watch path, separate from the provider comparison
+            below.
+          </p>
+
+          <div className="mt-6 max-w-[860px] overflow-x-auto">
+            <table className="w-full min-w-[760px] border-collapse text-left text-[15px]">
+              <thead>
+                <tr>
+                  <th scope="col" className={headCell}>Run</th>
+                  <th scope="col" className={headCell}>First segment</th>
+                  <th scope="col" className={headCell}>First frame</th>
+                  <th scope="col" className={headCell}>Segment fetch</th>
+                  <th scope="col" className={headCell}>First byte to frame</th>
+                </tr>
+              </thead>
+              <tbody>
+                {watchRows.map((row) => (
+                  <tr key={row.id} className="border-b border-line-soft last:border-0">
+                    <th scope="row" className="py-4 pr-4 font-medium text-ink">
+                      {row.label}
+                    </th>
+                    <td className="py-4 pr-4 tabular-nums text-ink-soft">{row.segment}</td>
+                    <td className="py-4 pr-4 tabular-nums text-ink">{row.firstFrame}</td>
+                    <td className="py-4 pr-4 tabular-nums text-ink-soft">{row.segmentFetch}</td>
+                    <td className="py-4 tabular-nums text-ink-soft">{row.firstByteToFrame}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
+            Current native-HLS run: {currentNativeHls.successCount} / {currentNativeHls.sampleCount} samples
+            played, mode{" "}
+            <span className="font-mono text-ink">native_hls</span>, edge{" "}
+            {Object.keys(currentNativeHls.edgeHosts).join(", ")}. Median first frame was{" "}
+            {ms(currentNativeHls.firstFrame.medianMs)} with p75 {ms(currentNativeHls.firstFrame.p75Ms)};
+            median first-byte-to-frame was {msDecimal(currentNativeHls.firstByteToFrame.medianMs)}.
+          </p>
+
+          <ul className="mt-5 flex max-w-[680px] flex-col gap-3">
+            {playlistChecks.map((check) => (
+              <li key={check} className="flex gap-2.5 text-[15px] leading-[1.6] text-ink-soft">
+                <span aria-hidden="true" className="mt-[10px] h-1 w-1 shrink-0 rounded-full bg-accent" />
+                {check}
+              </li>
+            ))}
+          </ul>
+
+          <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
+            Daytona checks for this same asset used hls.js/MSE rather than native HLS, so they stay out of
+            the native-HLS comparison: {daytonaStartupRows.map((row) => `${row.region} ${row.played} at ${row.firstFrame}`).join("; ")}.
+          </p>
+
           {/* Regional results */}
           <h2 className="mt-16 font-head text-[22px] leading-snug">Regional results</h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
             Time to first frame, median of {latest.run.sampleCountTarget} samples per provider. The US run
-            was on {runDate} in a Daytona sandbox. The Europe run was on {europeRunDate} in a Daytona
-            Europe sandbox. Both use Rend&apos;s fastest production playback path.
+            was on {runDate} in a Daytona sandbox. The Europe run was on {europeRunDate}{" "}
+            in a Daytona Europe sandbox. Both use Rend&apos;s fastest production playback path.
           </p>
 
           <div className="mt-6 max-w-[860px] overflow-x-auto">
