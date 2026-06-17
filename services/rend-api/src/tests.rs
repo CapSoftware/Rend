@@ -1193,7 +1193,7 @@ fn playback_bootstrap_hls_ready_returns_manifest_and_ladder_prefetch_hints() {
     assert_eq!(response.prefetch_hints.len(), 2);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/1080p/index.m3u8"
+        "hls/720p/index.m3u8"
     );
     assert_eq!(
         response.prefetch_hints[0].content_type,
@@ -1201,7 +1201,34 @@ fn playback_bootstrap_hls_ready_returns_manifest_and_ladder_prefetch_hints() {
     );
     assert_eq!(
         response.prefetch_hints[1].artifact_path,
-        "hls/1080p/segment_00000.ts"
+        "hls/720p/segment_00000.ts"
+    );
+}
+
+#[test]
+fn playback_bootstrap_hls_prefetch_reaches_1080p_when_budget_allows() {
+    let response = playback_bootstrap_response(
+        Some(asset_record("hls_ready")),
+        &hls_artifact_records(),
+        "http://127.0.0.1:4100/",
+        &test_issuer(),
+        4,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(
+        response
+            .prefetch_hints
+            .iter()
+            .map(|hint| hint.artifact_path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "hls/720p/index.m3u8",
+            "hls/720p/segment_00000.ts",
+            "hls/1080p/index.m3u8",
+            "hls/1080p/segment_00000.ts",
+        ]
     );
 }
 
@@ -1282,7 +1309,7 @@ fn playback_bootstrap_prefetch_hints_are_bounded() {
     assert_eq!(response.prefetch_hints.len(), 1);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/1080p/index.m3u8"
+        "hls/720p/index.m3u8"
     );
 }
 
@@ -1342,7 +1369,7 @@ fn edge_warm_request_is_absent_when_no_artifacts_are_selected() {
 }
 
 #[test]
-fn edge_warm_artifact_paths_prioritize_manifest_high_playlist_and_first_segments() {
+fn edge_warm_artifact_paths_prioritize_abr_startup_playlist_and_first_segments() {
     let generated = vec![
         "hls/master.m3u8".to_owned(),
         "hls/1080p/index.m3u8".to_owned(),
@@ -1358,9 +1385,31 @@ fn edge_warm_artifact_paths_prioritize_manifest_high_playlist_and_first_segments
         edge_warm_artifact_paths("hls_ready", &generated, 4),
         vec![
             "hls/master.m3u8".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
+            "hls/1080p/index.m3u8".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn edge_warm_artifact_paths_reach_1080p_first_segment_when_budget_allows() {
+    let generated = vec![
+        "hls/master.m3u8".to_owned(),
+        "hls/1080p/index.m3u8".to_owned(),
+        "hls/720p/index.m3u8".to_owned(),
+        "hls/720p/segment_00000.ts".to_owned(),
+        "hls/1080p/segment_00000.ts".to_owned(),
+    ];
+
+    assert_eq!(
+        edge_warm_artifact_paths("hls_ready", &generated, 5),
+        vec![
+            "hls/master.m3u8".to_owned(),
+            "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
             "hls/1080p/index.m3u8".to_owned(),
             "hls/1080p/segment_00000.ts".to_owned(),
-            "hls/720p/index.m3u8".to_owned(),
         ]
     );
 }
@@ -1407,18 +1456,18 @@ fn edge_warm_artifact_paths_default_budget_covers_full_ladder_startup() {
         edge_warm_artifact_paths("hls_ready", &generated, DEFAULT_EDGE_WARM_MAX_ARTIFACTS),
         vec![
             "hls/master.m3u8".to_owned(),
-            "hls/4k/index.m3u8".to_owned(),
-            "hls/4k/segment_00000.ts".to_owned(),
-            "hls/4k/segment_00001.ts".to_owned(),
-            "hls/2k/index.m3u8".to_owned(),
-            "hls/2k/segment_00000.ts".to_owned(),
-            "hls/2k/segment_00001.ts".to_owned(),
-            "hls/1080p/index.m3u8".to_owned(),
-            "hls/1080p/segment_00000.ts".to_owned(),
-            "hls/1080p/segment_00001.ts".to_owned(),
             "hls/720p/index.m3u8".to_owned(),
             "hls/720p/segment_00000.ts".to_owned(),
+            "hls/1080p/index.m3u8".to_owned(),
+            "hls/1080p/segment_00000.ts".to_owned(),
+            "hls/2k/index.m3u8".to_owned(),
+            "hls/2k/segment_00000.ts".to_owned(),
+            "hls/4k/index.m3u8".to_owned(),
+            "hls/4k/segment_00000.ts".to_owned(),
             "hls/720p/segment_00001.ts".to_owned(),
+            "hls/1080p/segment_00001.ts".to_owned(),
+            "hls/2k/segment_00001.ts".to_owned(),
+            "hls/4k/segment_00001.ts".to_owned(),
         ]
     );
 }
@@ -1616,8 +1665,8 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
         request.artifact_paths,
         vec![
             "hls/master.m3u8".to_owned(),
-            "hls/1080p/index.m3u8".to_owned(),
             "hls/720p/index.m3u8".to_owned(),
+            "hls/720p/segment_00000.ts".to_owned(),
         ]
     );
 }

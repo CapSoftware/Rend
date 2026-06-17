@@ -1005,9 +1005,7 @@ fn hls_renditions_for_source(source_probe: &SourceProbe) -> Vec<HlsRendition> {
         .iter()
         .position(|rendition| rendition.resolution_tier == source_probe.resolution_tier)
         .unwrap_or(0);
-    let mut renditions = HLS_RENDITIONS[..=source_tier_index].to_vec();
-    renditions.reverse();
-    renditions
+    HLS_RENDITIONS[..=source_tier_index].to_vec()
 }
 
 fn hls_video_label(rendition: &HlsRendition) -> String {
@@ -1330,15 +1328,15 @@ mod tests {
                 .iter()
                 .map(|rendition| rendition.name)
                 .collect::<Vec<_>>(),
-            vec!["1080p", "720p"]
+            vec!["720p", "1080p"]
         );
         assert_eq!(
             hls_variant_stream_map(&renditions, true),
-            "v:0,a:0,name:1080p v:1,a:1,name:720p"
+            "v:0,a:0,name:720p v:1,a:1,name:1080p"
         );
         assert_eq!(
             hls_variant_stream_map(&renditions, false),
-            "v:0,name:1080p v:1,name:720p"
+            "v:0,name:720p v:1,name:1080p"
         );
     }
 
