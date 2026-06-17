@@ -23,6 +23,11 @@ export const docsNavItems: DocsNavItem[] = [
     description: "Give an agent the docs, API contract, safe key rules, and smoke test path.",
   },
   {
+    href: "#mcp-server",
+    title: "MCP server",
+    description: "Let MCP-compatible agents upload, inspect, play, analyze, and delete videos.",
+  },
+  {
     href: "#sdk-guide",
     title: "SDK guide",
     description: "Use the generated TypeScript SDK from packages/sdk.",
@@ -89,6 +94,13 @@ export const docsCommandItems: DocsCommandItem[] = [
     description: "Generated TypeScript SDK source.",
     group: "Reference",
     keywords: "sdk package generated typescript client github packages sdk",
+  },
+  {
+    href: "https://github.com/CapSoftware/Rend/tree/main/packages/mcp",
+    title: "MCP package",
+    description: "Rend MCP server for compatible agent clients.",
+    group: "Reference",
+    keywords: "mcp package agent tools claude codex model context protocol",
   },
   {
     href: "/llms.txt",
@@ -170,6 +182,37 @@ try {
   }
   throw error;
 }`;
+
+export const MCP_CLIENT_CONFIG_CODE = `{
+  "mcpServers": {
+    "rend": {
+      "command": "npx",
+      "args": ["-y", "@rend-sdk/mcp"],
+      "env": {
+        "REND_API_KEY": "rend_live_...",
+        "REND_API_BASE_URL": "https://api.rend.so",
+        "REND_SITE_BASE_URL": "https://rend.so"
+      }
+    }
+  }
+}`;
+
+export const MCP_LOCAL_CONFIG_CODE = `{
+  "mcpServers": {
+    "rend-local": {
+      "command": "node",
+      "args": ["packages/mcp/dist/bin/rend-mcp.js"],
+      "env": {
+        "REND_API_KEY": "rend_test_...",
+        "REND_API_BASE_URL": "http://127.0.0.1:4000",
+        "REND_SITE_BASE_URL": "http://127.0.0.1:3000"
+      }
+    }
+  }
+}`;
+
+export const MCP_SMOKE_CODE = `bun install
+bun run mcp:smoke`;
 
 export const CURL_UPLOAD_CODE = `export REND_API_KEY="rend_live_..."
 export REND_API_BASE_URL="https://api.rend.so"
