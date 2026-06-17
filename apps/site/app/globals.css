@@ -1320,6 +1320,13 @@
   backdrop-filter: blur(6px);
 }
 
+.rend-player[data-rend-player-state="ready"] .rend-player__overlay,
+.rend-player[data-rend-player-state="metadata"] .rend-player__overlay,
+.rend-player[data-rend-player-state="canplay"] .rend-player__overlay,
+.rend-player[data-rend-player-state="playing"] .rend-player__overlay {
+  display: none;
+}
+
 .rend-player__status {
   color: #f7f4ec;
   font-family: var(--font-head);
