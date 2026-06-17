@@ -1,15 +1,15 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-16T22:09:25.498Z",
+  "generatedAt": "2026-06-17T09:04:06.230Z",
   "run": {
-    "id": "20260616T220344Z",
+    "id": "20260617T085824Z",
     "status": "completed",
-    "startedAt": "2026-06-16T22:03:44.212Z",
-    "finishedAt": "2026-06-16T22:09:25.497Z",
-    "region": "europe-local",
-    "regionLabel": "Europe local machine",
-    "runnerKind": "local",
-    "runnerLabel": "MacBook-Pro-3.local",
+    "startedAt": "2026-06-17T08:58:24.811Z",
+    "finishedAt": "2026-06-17T09:04:06.229Z",
+    "region": "daytona-eu",
+    "regionLabel": "Daytona eu (eu requested)",
+    "runnerKind": "daytona",
+    "runnerLabel": "56a11abe-34ca-48c3-ac94-bd19b2d4d4f2",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
@@ -24,8 +24,8 @@
         "mux"
       ],
       [
-        "mux",
-        "rend"
+        "rend",
+        "mux"
       ],
       [
         "mux",
@@ -83,7 +83,7 @@
     "browser": {
       "automation": "Playwright Chromium",
       "requestedChannel": "chrome",
-      "version": "149.0.7827.103"
+      "version": "149.0.7827.55"
     },
     "device": {
       "viewport": {
@@ -100,10 +100,10 @@
       "cache": "disabled per sample with clean browser contexts"
     },
     "runner": {
-      "platform": "darwin",
-      "arch": "arm64",
-      "osRelease": "25.2.0",
-      "node": "v26.3.0",
+      "platform": "linux",
+      "arch": "x64",
+      "osRelease": "6.8.0-63-generic",
+      "node": "v24.16.0",
       "bun": null
     }
   },
@@ -123,9 +123,9 @@
   ],
   "regions": [
     {
-      "id": "europe-local",
-      "label": "Europe local machine",
-      "runnerKind": "local"
+      "id": "daytona-eu",
+      "label": "Daytona eu (eu requested)",
+      "runnerKind": "daytona"
     }
   ],
   "summary": {
@@ -152,43 +152,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 797.5,
-            "median": 869.7,
-            "p75": 920.1,
-            "p95": 934.1,
-            "max": 937.6
+            "min": 703.3,
+            "median": 737.2,
+            "p75": 774.8,
+            "p95": 1127.7,
+            "max": 1215.9
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 726,
-            "median": 819.9,
-            "p75": 858.7,
-            "p95": 883.4,
-            "max": 889.6
+            "min": 658.2,
+            "median": 692.6,
+            "p75": 727,
+            "p95": 1074.8,
+            "max": 1161.7
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 726.7,
-            "median": 821.1,
-            "p75": 859.4,
-            "p95": 884.8,
-            "max": 891.1
+            "min": 661,
+            "median": 694.9,
+            "p75": 729.1,
+            "p95": 1077,
+            "max": 1164
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 797.5,
-            "median": 869.7,
-            "p75": 920.1,
-            "p95": 934.1,
-            "max": 937.6
+            "min": 703.3,
+            "median": 737.2,
+            "p75": 774.8,
+            "p95": 1127.7,
+            "max": 1215.9
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30738.4,
-            "median": 30830.7,
-            "p75": 30867.7,
-            "p95": 30895.8,
-            "max": 30902.8
+            "min": 30676.2,
+            "median": 30710.9,
+            "p75": 30741.4,
+            "p95": 31093.3,
+            "max": 31181.3
           },
           "stallCount": {
             "count": 5,
@@ -231,43 +231,43 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 1020.6,
-            "median": 1130.5,
-            "p75": 1161.6,
-            "p95": 1232.3,
-            "max": 1250
+            "min": 764.8,
+            "median": 790.8,
+            "p75": 1891.8,
+            "p95": 1982.2,
+            "max": 2004.8
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 1008.4,
-            "median": 1054.4,
-            "p75": 1113.2,
-            "p95": 1126.9,
-            "max": 1130.3
+            "min": 742,
+            "median": 772.4,
+            "p75": 1882.6,
+            "p95": 1929.5,
+            "max": 1941.2
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 1015,
-            "median": 1121.5,
-            "p75": 1142,
-            "p95": 1216.7,
-            "max": 1235.4
+            "min": 773.5,
+            "median": 806.7,
+            "p75": 1895.7,
+            "p95": 1988.2,
+            "max": 2011.3
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 1020.6,
-            "median": 1130.5,
-            "p75": 1161.6,
-            "p95": 1232.3,
-            "max": 1250
+            "min": 764.8,
+            "median": 790.8,
+            "p75": 1891.8,
+            "p95": 1982.2,
+            "max": 2004.8
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 31039.9,
-            "median": 31149.5,
-            "p75": 31167,
-            "p95": 31236.4,
-            "max": 31253.7
+            "min": 30806.3,
+            "median": 30924.9,
+            "p75": 31997.6,
+            "p95": 32053.4,
+            "max": 32067.3
           },
           "stallCount": {
             "count": 5,
@@ -305,12 +305,12 @@
     }
   },
   "artifacts": {
-    "machineReadableUrl": "/benchmarks/providers/europe-local.json",
-    "rawSamplesUrl": "/benchmarks/providers/europe-local.samples.json"
+    "machineReadableUrl": "/benchmarks/providers/europe.json",
+    "rawSamplesUrl": "/benchmarks/providers/europe.samples.json"
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-16T22:09:25.498Z",
+    "checkedAt": "2026-06-17T09:04:06.231Z",
     "patternsVersion": 1,
     "findings": []
   }
