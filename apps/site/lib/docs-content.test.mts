@@ -7,6 +7,9 @@ import {
   AUTH_HEADER_CODE,
   CURL_UPLOAD_CODE,
   LOCAL_DOCKER_CODE,
+  MCP_CLIENT_CONFIG_CODE,
+  MCP_LOCAL_CONFIG_CODE,
+  MCP_SMOKE_CODE,
   PLAYBACK_BOOTSTRAP_CODE,
   QUICKSTART_SDK_CODE,
   SDK_GUIDE_CODE,
@@ -29,6 +32,7 @@ test("docs navigation uses stable unique anchors", () => {
 test("command palette targets docs and reference routes", () => {
   assert.ok(docsCommandItems.some((item) => item.href === "/docs#quickstart"));
   assert.ok(docsCommandItems.some((item) => item.href === "/docs#agent-setup"));
+  assert.ok(docsCommandItems.some((item) => item.href === "/docs#mcp-server"));
   assert.ok(docsCommandItems.some((item) => item.href === "/openapi.json"));
   assert.ok(docsCommandItems.some((item) => item.href === "/llms.txt"));
   assert.ok(docsCommandItems.some((item) => item.href === "/llms-full.txt"));
@@ -45,6 +49,10 @@ test("docs examples match the public API and SDK surface", () => {
   assert.match(QUICKSTART_SDK_CODE, /deleteAsset/);
 
   assert.match(SDK_GUIDE_CODE, /getPlaybackAnalytics/);
+  assert.match(MCP_CLIENT_CONFIG_CODE, /@rend-sdk\/mcp/);
+  assert.match(MCP_CLIENT_CONFIG_CODE, /REND_API_KEY/);
+  assert.match(MCP_LOCAL_CONFIG_CODE, /packages\/mcp\/dist\/bin\/rend-mcp\.js/);
+  assert.match(MCP_SMOKE_CODE, /bun run mcp:smoke/);
   assert.match(CURL_UPLOAD_CODE, /\/v1\/videos/);
   assert.match(CURL_UPLOAD_CODE, /\/v1\/assets\/\$ASSET_ID\/analytics\/playback/);
   assert.match(CURL_UPLOAD_CODE, /\/api\/player\/\$ASSET_ID/);
@@ -65,6 +73,9 @@ test("public docs-facing files do not expose internal or secret-bearing guidance
     QUICKSTART_SDK_CODE,
     AGENT_PROMPT_CODE,
     SDK_GUIDE_CODE,
+    MCP_CLIENT_CONFIG_CODE,
+    MCP_LOCAL_CONFIG_CODE,
+    MCP_SMOKE_CODE,
     CURL_UPLOAD_CODE,
     PLAYBACK_BOOTSTRAP_CODE,
     LOCAL_DOCKER_CODE,
