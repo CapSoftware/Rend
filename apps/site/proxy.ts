@@ -13,6 +13,11 @@ const GEO_HEADER_NAMES = [
   "x-vercel-ip-latitude",
   "x-vercel-ip-longitude",
 ];
+const FORWARDED_CONTEXT_HEADER_NAMES = [
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-forwarded-proto",
+];
 
 function watchAssetId(pathname: string) {
   const parts = pathname.split("/").filter(Boolean);
@@ -59,7 +64,7 @@ export async function proxy(request: NextRequest) {
   }
 
   const startedAt = Date.now();
-  const bootstrapUrl = new URL(`/api/player/${encodeURIComponent(assetId)}`, request.url);
+  const bootstrapUrl = new URL(`/api/player/${encodeURIComponent(assetId)}`, internalBootstrapOrigin(request));
   const playbackBaseUrl = request.nextUrl.searchParams.get("playbackBaseUrl");
   if (playbackBaseUrl) bootstrapUrl.searchParams.set("playbackBaseUrl", playbackBaseUrl);
 
