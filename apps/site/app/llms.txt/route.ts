@@ -24,6 +24,7 @@ export function GET() {
     "## Reference",
     `- [OpenAPI JSON](${url("/openapi.json")}): Canonical public API contract.`,
     "- [TypeScript SDK](https://github.com/CapSoftware/Rend/tree/main/packages/sdk): Generated TypeScript client.",
+    "- [MCP server](https://github.com/CapSoftware/Rend/tree/main/packages/mcp): MCP tools for upload, assets, playback, deletion, and analytics.",
     `- [Full content for LLMs](${url("/llms-full.txt")}): Plain-text content of every marketing page, including all FAQs.`,
     "",
     "## Notes for agents",
@@ -31,7 +32,7 @@ export function GET() {
     "- Authenticated API calls use Authorization: Bearer <Rend API key>.",
     "- Browser playback uses /api/player/{assetId} and same-origin artifact URLs.",
     "- A copyable integration prompt is available at /docs#agent-setup.",
-    "- Generate tools from /openapi.json and prefer the TypeScript SDK for app code.",
+    "- Generate tools from /openapi.json, use the MCP server for agent workflows, and prefer the TypeScript SDK for app code.",
   ];
 
   return new Response(`${lines.join("\n")}\n`, {
