@@ -69,6 +69,7 @@
     "openapi:contract": "bun run --cwd apps/site test:contract",
     "openapi:sdk-test": "bun run --cwd packages/sdk test",
     "sdk:integration-smoke": "node scripts/with-root-env.mjs --profile local bun scripts/sdk-integration-smoke.mjs",
+    "mcp:smoke": "bun run --cwd packages/sdk build && bun run --cwd packages/mcp build && node packages/mcp/scripts/local-smoke.mjs",
     "test": "turbo test",
     "typecheck": "turbo typecheck",
     "start": "turbo start --filter=@rend/site",
