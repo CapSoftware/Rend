@@ -24,6 +24,11 @@ type UpstreamPlaybackResponse = {
   ttl_seconds?: unknown;
 };
 
+type PlaybackBaseDecision = {
+  linkPlaybackBaseUrl: string | null;
+  playbackBaseUrl: string | null;
+};
+
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
 const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
@@ -98,7 +103,7 @@ function allowedPlaybackBaseUrls() {
     .map(normalizePlaybackBaseUrl);
 }
 
-function playbackBaseOverride(request: Request) {
+function playbackBaseDecision(request: Request): PlaybackBaseDecision {
   const requestUrl = new URL(request.url);
   const requested = requestUrl.searchParams.get("playbackBaseUrl");
   if (requested) {
@@ -106,11 +111,17 @@ function playbackBaseOverride(request: Request) {
     if (!allowedPlaybackBaseUrls().includes(normalized)) {
       throw new Error("playbackBaseUrl is not allowed");
     }
-    return normalized;
+    return {
+      linkPlaybackBaseUrl: normalized,
+      playbackBaseUrl: normalized,
+    };
   }
 
   const configured = envString("REND_PLAYER_PLAYBACK_BASE_URL");
-  return configured ? normalizePlaybackBaseUrl(configured) : null;
+  return {
+    linkPlaybackBaseUrl: null,
+    playbackBaseUrl: configured ? normalizePlaybackBaseUrl(configured) : null,
+  };
 }
 
 function encodeArtifactPath(artifactPath: string) {
@@ -304,9 +315,12 @@ export async function GET(
     return jsonResponse({ status: "unavailable", message: "Artifact is unavailable" }, { status: 404 });
   }
 
+  let linkPlaybackBaseUrl: string | null;
   let playbackBaseUrl: string | null;
   try {
-    playbackBaseUrl = playbackBaseOverride(request);
+    const decision = playbackBaseDecision(request);
+    linkPlaybackBaseUrl = decision.linkPlaybackBaseUrl;
+    playbackBaseUrl = decision.playbackBaseUrl;
   } catch {
     return jsonResponse({ status: "error", message: "Playback edge is not configured" }, { status: 400 });
   }
@@ -325,7 +339,7 @@ export async function GET(
         normalizedAssetId,
         normalizedArtifactPath,
         targetUrl,
-        playbackBaseUrl
+        linkPlaybackBaseUrl
       );
     }
   }
@@ -361,7 +375,7 @@ export async function GET(
     normalizedAssetId,
     normalizedArtifactPath,
     targetUrl,
-    playbackBaseUrl,
+    linkPlaybackBaseUrl,
     playbackProxyCookieHeader(
       request.url,
       normalizedAssetId,
