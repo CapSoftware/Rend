@@ -181,6 +181,25 @@ const errorStates: { state: string; where: ReactNode; meaning: string }[] = [
   },
 ];
 
+const mcpCapabilities = [
+  {
+    title: "Upload from local files",
+    description: "Agents can send a local MP4 or QuickTime file through the public upload API.",
+  },
+  {
+    title: "Inspect asset state",
+    description: "Agents can list assets, fetch lifecycle state, and wait until playback is ready.",
+  },
+  {
+    title: "Return playback links",
+    description: "Agents can fetch tokenless bootstrap output with hosted embed and watch URLs.",
+  },
+  {
+    title: "Clean up and measure",
+    description: "Agents can delete assets and read playback request analytics with scoped keys.",
+  },
+];
+
 export default function DocsPage() {
   return (
     <div className="overflow-x-clip">
@@ -203,11 +222,14 @@ export default function DocsPage() {
               </h1>
               <p className="animate-rise animate-rise-3 mt-5 max-w-[640px] text-[17px] leading-[1.62] text-muted">
                 This is the public integration path for Rend: API-key control-plane calls for assets,
-                and anonymous same-origin site routes for browser playback.
+                anonymous same-origin site routes for browser playback, and MCP tools for agents.
               </p>
               <div className="animate-rise animate-rise-4 mt-8 flex flex-col gap-3 sm:flex-row">
                 <Button href="#quickstart" size="md">
                   Start the quickstart <ArrowRight />
+                </Button>
+                <Button href={MCP_CURSOR_INSTALL_URL} external variant="secondary" size="md">
+                  Add MCP to Cursor
                 </Button>
                 <Button href={GITHUB_URL} external variant="secondary" size="md">
                   <GitHubMark />
