@@ -452,6 +452,7 @@ struct PlaybackTestResponse {
     access_control_allow_origin: Option<String>,
     access_control_allow_credentials: Option<String>,
     access_control_expose_headers: Option<String>,
+    timing_allow_origin: Option<String>,
     vary: Option<String>,
     edge_id: Option<String>,
     region: Option<String>,
@@ -532,6 +533,10 @@ async fn get_playback_with_cookie_and_origin(
             .map(str::to_owned),
         access_control_expose_headers: headers
             .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        timing_allow_origin: headers
+            .get("timing-allow-origin")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         vary: headers
@@ -1143,6 +1148,7 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
     assert_eq!(response.access_control_allow_origin.as_deref(), None);
     assert_eq!(response.access_control_allow_credentials.as_deref(), None);
+    assert_eq!(response.timing_allow_origin.as_deref(), None);
     assert_eq!(response.vary.as_deref(), None);
     assert_eq!(
         response.access_control_expose_headers.as_deref(),
@@ -1184,8 +1190,68 @@ async fn playback_serves_credentialed_cors_for_allowed_origin() {
         response.access_control_allow_credentials.as_deref(),
         Some("true")
     );
+    assert_eq!(response.timing_allow_origin.as_deref(), None);
     assert_eq!(response.vary.as_deref(), Some("Origin"));
     assert_eq!(response.body, b"#EXTM3U\n");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_allows_resource_timing_only_for_www_rend_origin() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-timing-allow-origin");
+    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"segment").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_origin(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        "https://www.rend.so",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.access_control_allow_origin.as_deref(),
+        Some("https://www.rend.so")
+    );
+    assert_eq!(
+        response.timing_allow_origin.as_deref(),
+        Some("https://www.rend.so")
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_does_not_add_resource_timing_to_opener() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-timing-no-opener");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"opener").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_origin(
+        app,
+        signed_playback_uri("asset-123", "opener.mp4"),
+        "https://www.rend.so",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.access_control_allow_origin.as_deref(),
+        Some("https://www.rend.so")
+    );
+    assert_eq!(response.timing_allow_origin.as_deref(), None);
     assert!(requests.lock().unwrap().is_empty());
 }
 
