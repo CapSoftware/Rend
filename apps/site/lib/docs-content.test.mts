@@ -8,6 +8,8 @@ import {
   CURL_UPLOAD_CODE,
   LOCAL_DOCKER_CODE,
   MCP_CLIENT_CONFIG_CODE,
+  MCP_CURSOR_INSTALL_URL,
+  MCP_INSTALL_COMMAND_CODE,
   MCP_LOCAL_CONFIG_CODE,
   MCP_SMOKE_CODE,
   PLAYBACK_BOOTSTRAP_CODE,
@@ -51,6 +53,8 @@ test("docs examples match the public API and SDK surface", () => {
   assert.match(SDK_GUIDE_CODE, /getPlaybackAnalytics/);
   assert.match(MCP_CLIENT_CONFIG_CODE, /@rend-sdk\/mcp/);
   assert.match(MCP_CLIENT_CONFIG_CODE, /REND_API_KEY/);
+  assert.equal(MCP_INSTALL_COMMAND_CODE, "npx -y @rend-sdk/mcp");
+  assert.match(MCP_CURSOR_INSTALL_URL, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=rend&config=/);
   assert.match(MCP_LOCAL_CONFIG_CODE, /packages\/mcp\/dist\/bin\/rend-mcp\.js/);
   assert.match(MCP_SMOKE_CODE, /bun run mcp:smoke/);
   assert.match(CURL_UPLOAD_CODE, /\/v1\/videos/);
@@ -74,6 +78,8 @@ test("public docs-facing files do not expose internal or secret-bearing guidance
     AGENT_PROMPT_CODE,
     SDK_GUIDE_CODE,
     MCP_CLIENT_CONFIG_CODE,
+    MCP_INSTALL_COMMAND_CODE,
+    MCP_CURSOR_INSTALL_URL,
     MCP_LOCAL_CONFIG_CODE,
     MCP_SMOKE_CODE,
     CURL_UPLOAD_CODE,
