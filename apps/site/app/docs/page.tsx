@@ -30,7 +30,7 @@ import {
 } from "./docs-content";
 
 const docsDescription =
-  "Rend public API docs for uploading video, waiting for playback, embedding the player, analytics, and deletion.";
+  "Rend public API docs for uploading video, waiting for playback, embedding the player, analytics, deletion, SDK use, and MCP tools.";
 
 export const metadata: Metadata = {
   title: "Docs",
