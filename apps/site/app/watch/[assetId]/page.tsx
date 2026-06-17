@@ -1,4 +1,3 @@
-import { RendPlayer } from "@rend/player";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import {
@@ -8,6 +7,7 @@ import {
   safeWatchBootstrapMs,
   type WatchPlaybackBootstrapResponse,
 } from "../../../lib/watch-bootstrap.ts";
+import { WatchInstantPlayer } from "./WatchInstantPlayer";
 
 type WatchPageProps = {
   params: Promise<{ assetId: string }>;
@@ -110,17 +110,12 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
         </>
       )}
       <section className="rend-embed-shell" aria-label="Rend video player">
-        <header className="rend-embed-header">
-          <img src="/rend-logo.svg" alt="Rend" className="rend-embed-logo" />
-          <span className="rend-embed-asset">{assetId}</span>
-        </header>
-        <RendPlayer
+        <WatchInstantPlayer
           assetId={assetId}
           autoPlay={autoplayEnabled(query.autoplay)}
           bootstrapUrl={playerBootstrapUrl(assetId, query.playbackBaseUrl)}
           initialBootstrap={initialBootstrap}
           initialBootstrapMs={initialBootstrapMs}
-          maxPrefetchHints={2}
           playbackEngine={playerPlaybackEngine(query.playbackEngine, query.engine)}
           startupMode={playerStartupMode(query.startupMode, query.startup)}
           telemetryAppVersion={telemetryAppVersion()}
