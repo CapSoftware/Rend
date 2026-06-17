@@ -10,6 +10,7 @@ import { pageMetadata } from "@/lib/seo";
 import { breadcrumbLd, webPageLd } from "@/lib/structured-data";
 import europe from "@/public/benchmarks/providers/europe.json";
 import latest from "@/public/benchmarks/providers/latest.json";
+import watchStartup from "@/public/benchmarks/watch-startup/latest.json";
 
 const page = getMarketingPage("/benchmarks");
 
@@ -43,6 +44,9 @@ const europeRunDate = new Date(europe.generatedAt).toLocaleDateString("en-GB", {
 const durationSeconds = Math.round(latest.source.verification.observed.rend.durationMedianSeconds);
 
 const ms = (n: number) => `${Math.round(n).toLocaleString("en-US")} ms`;
+const msDecimal = (n: number) => `${Math.round(n * 10) / 10} ms`;
+const kb = (n: number) => `${Math.round(n / 1024).toLocaleString("en-US")} KB`;
+const seconds = (n: number) => `${Number.isInteger(n) ? n.toFixed(0) : n.toFixed(2)}s`;
 const resOf = (rendition: string) => `${rendition.split("x")[1]}p (${rendition.replace("x", " × ")})`;
 const pctSooner = Math.round((1 - rend.metrics.timeToFirstFrameMs.median / mux.metrics.timeToFirstFrameMs.median) * 100);
 const europePctSooner = Math.round(
@@ -50,6 +54,12 @@ const europePctSooner = Math.round(
 );
 const browserLabel = `${latest.environment.browser.automation} ${latest.environment.browser.version}`;
 const europeBrowserLabel = `${europe.environment.browser.automation} ${europe.environment.browser.version}`;
+const currentNativeHls = watchStartup.localNativeHls;
+const watchRunDate = new Date(watchStartup.generatedAt).toLocaleDateString("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
 
 const results = [
   {
@@ -87,6 +97,40 @@ const results = [
     played: `${europeMux.successfulSamples} / ${europeMux.sampleCount}`,
     stalls: europeMux.metrics.stallCount.max,
     resolution: resOf(europeMux.observed.selectedRendition),
+  },
+];
+
+const watchRows = watchStartup.comparison.map((row) => ({
+  id: row.id,
+  label: row.label,
+  segment: `${seconds(row.firstSegmentDurationSeconds)} / ${kb(row.firstSegmentBytes)}`,
+  firstFrame: ms(row.firstFrameMedianMs),
+  segmentFetch: msDecimal(row.firstSegmentFetchMedianMs),
+  firstByteToFrame: msDecimal(row.firstByteToFrameMedianMs),
+}));
+
+const playlistChecks = [
+  `Master order is ${watchStartup.playlist.masterOrder.join(" -> ")}, so 1080p is available without being listed first.`,
+  `Startup hints warm ${watchStartup.playlist.prefetchHints.join(" and ")} before any 1080p segment.`,
+  `Both variants have ${seconds(watchStartup.playlist.variants[0].firstSegmentDurationSeconds)} first segments and #EXT-X-INDEPENDENT-SEGMENTS.`,
+  `Range requests returned HTTP ${watchStartup.playlist.variants[0].rangeStatus}; repeated 720p and 1080p segment fetches were cache HITs.`,
+  `Bootstrap leak scan ${watchStartup.playlist.leakScanPassed ? "passed" : "failed"}.`,
+];
+
+const daytonaStartupRows = [
+  {
+    region: "US",
+    mode: Object.keys(watchStartup.remoteDaytona.us.modes).join(", "),
+    played: watchStartup.remoteDaytona.us.success,
+    firstFrame: msDecimal(watchStartup.remoteDaytona.us.firstFrame.medianMs),
+    edge: Object.keys(watchStartup.remoteDaytona.us.edgeHosts).join(", "),
+  },
+  {
+    region: "Europe",
+    mode: Object.keys(watchStartup.remoteDaytona.eu.modes).join(", "),
+    played: watchStartup.remoteDaytona.eu.success,
+    firstFrame: msDecimal(watchStartup.remoteDaytona.eu.firstFrame.medianMs),
+    edge: Object.keys(watchStartup.remoteDaytona.eu.edgeHosts).join(", "),
   },
 ];
 
