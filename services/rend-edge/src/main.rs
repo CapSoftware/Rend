@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::SeekFrom,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -36,7 +37,7 @@ use rend_playback_auth::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::TcpListener,
     sync::{Notify, mpsc},
 };
@@ -434,6 +435,22 @@ struct PlaybackArtifact {
     object_key: String,
     cache_key: String,
     content_type: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRange {
+    fn len(self) -> u64 {
+        self.end.saturating_sub(self.start).saturating_add(1)
+    }
+
+    fn content_range(self, content_length: u64) -> String {
+        format!("bytes {}-{}/{}", self.start, self.end, content_length)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1171,7 +1188,18 @@ async fn playback(
     let cors_origin = playback_cors_origin(&state.config, &headers).map(str::to_owned);
     let cookie_token = playback_token_cookie(&headers);
     let token = query.token.as_deref().or(cookie_token.as_deref());
-    let result = playback_inner(state.clone(), path, token, cors_origin.as_deref()).await;
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_single_byte_range_header);
+    let result = playback_inner(
+        state.clone(),
+        path,
+        token,
+        cors_origin.as_deref(),
+        range_header.as_deref(),
+    )
+    .await;
     let (response, error_code) = match result {
         Ok(response) => (response, None),
         Err(error) => {
@@ -1249,6 +1277,7 @@ async fn playback_inner(
     path: PlaybackPath,
     token: Option<&str>,
     cors_origin: Option<&str>,
+    range_header: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
     let now = current_unix_timestamp().map_err(|error| PlaybackError::Io(error.to_string()))?;
     validate_playback_request(
@@ -1262,14 +1291,21 @@ async fn playback_inner(
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
-    if let Some(bytes) = read_cache_artifact(&state, &artifact, &cache_path).await? {
-        return Ok(artifact_bytes_response(
-            &state.config,
-            &artifact,
-            "HIT",
-            bytes,
-            cors_origin,
-        ));
+    if let Some(response) = cached_artifact_response(
+        &state,
+        &artifact,
+        &cache_path,
+        "HIT",
+        cors_origin,
+        range_header,
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+
+    if let Some(range_header) = range_header.filter(|_| is_hls_segment_content_type(&artifact)) {
+        return stream_origin_range_response(state, artifact, range_header, cors_origin).await;
     }
 
     match state
@@ -1288,16 +1324,278 @@ async fn playback_inner(
         }
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
-            let bytes = read_filled_cache_file(&state, &artifact, &cache_path).await?;
-            Ok(artifact_bytes_response(
-                &state.config,
+            cached_artifact_response(
+                &state,
                 &artifact,
+                &cache_path,
                 "COALESCED",
-                bytes,
                 cors_origin,
-            ))
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                PlaybackError::Io(format!(
+                    "filled cache artifact {} was missing before it could be served",
+                    cache_path.display()
+                ))
+            })
         }
     }
+}
+
+async fn cached_artifact_response(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    path: &FsPath,
+    cache_status: &'static str,
+    cors_origin: Option<&str>,
+    range_header: Option<&str>,
+) -> std::result::Result<Option<Response>, PlaybackError> {
+    let mut file = match fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(PlaybackError::Io(format!(
+                "failed to open cached artifact {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let metadata = file.metadata().await.map_err(|error| {
+        PlaybackError::Io(format!(
+            "failed to inspect cached artifact {}: {error}",
+            path.display()
+        ))
+    })?;
+    let content_length = metadata.len();
+
+    if let Err(error) = touch_cache_metadata(state, &artifact.cache_key, content_length).await {
+        tracing::warn!(
+            cache_key = %artifact.cache_key,
+            error = %error.log_message(),
+            "failed to update edge cache metadata after hit",
+        );
+    }
+
+    if let Some(range_header) = range_header.filter(|_| is_hls_segment_content_type(artifact)) {
+        return match parse_byte_range(range_header, content_length) {
+            Ok(Some(byte_range)) => {
+                file.seek(SeekFrom::Start(byte_range.start))
+                    .await
+                    .map_err(|error| {
+                        PlaybackError::Io(format!(
+                            "failed to seek cached artifact {}: {error}",
+                            path.display()
+                        ))
+                    })?;
+                Ok(Some(artifact_response_with_status(
+                    &state.config,
+                    artifact.content_type,
+                    cache_status,
+                    StatusCode::PARTIAL_CONTENT,
+                    file_body(file, byte_range.len()),
+                    Some(byte_range.len()),
+                    Some(&byte_range.content_range(content_length)),
+                    cors_origin,
+                )))
+            }
+            Ok(None) => Ok(Some(artifact_response(
+                &state.config,
+                artifact.content_type,
+                cache_status,
+                file_body(file, content_length),
+                Some(content_length),
+                cors_origin,
+            ))),
+            Err(()) => Ok(Some(range_not_satisfiable_response(
+                &state.config,
+                artifact.content_type,
+                cache_status,
+                content_length,
+                cors_origin,
+            ))),
+        };
+    }
+
+    Ok(Some(artifact_response(
+        &state.config,
+        artifact.content_type,
+        cache_status,
+        file_body(file, content_length),
+        Some(content_length),
+        cors_origin,
+    )))
+}
+
+fn file_body(file: fs::File, remaining: u64) -> Body {
+    let body_stream = stream::try_unfold((file, remaining), |(mut file, remaining)| async move {
+        if remaining == 0 {
+            return Ok(None);
+        }
+
+        let chunk_len = usize::try_from(remaining.min(64 * 1024)).unwrap_or(64 * 1024);
+        let mut buffer = vec![0; chunk_len];
+        let bytes_read = file.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "cached artifact ended before advertised content length",
+            ));
+        }
+        buffer.truncate(bytes_read);
+        let remaining = remaining.saturating_sub(u64::try_from(bytes_read).unwrap_or(0));
+
+        Ok(Some((Bytes::from(buffer), (file, remaining))))
+    });
+
+    Body::from_stream(body_stream)
+}
+
+fn is_hls_segment_content_type(artifact: &PlaybackArtifact) -> bool {
+    artifact.content_type == "video/mp2t"
+}
+
+fn normalize_single_byte_range_header(value: &str) -> Option<String> {
+    let value = value.trim();
+    let range_spec = value.strip_prefix("bytes=")?.trim();
+    if range_spec.is_empty() || range_spec.contains(',') {
+        return None;
+    }
+
+    let (start, end) = range_spec.split_once('-')?;
+    let start = start.trim();
+    let end = end.trim();
+    if start.is_empty() && end.is_empty() {
+        return None;
+    }
+    let parsed_start = if start.is_empty() {
+        None
+    } else {
+        Some(start.parse::<u64>().ok()?)
+    };
+    let parsed_end = if end.is_empty() {
+        None
+    } else {
+        Some(end.parse::<u64>().ok()?)
+    };
+    if let (Some(start), Some(end)) = (parsed_start, parsed_end)
+        && start > end
+    {
+        return None;
+    }
+    if parsed_start.is_none() && parsed_end == Some(0) {
+        return None;
+    }
+
+    Some(match (parsed_start, parsed_end) {
+        (Some(start), Some(end)) => format!("bytes={start}-{end}"),
+        (Some(start), None) => format!("bytes={start}-"),
+        (None, Some(suffix_length)) => format!("bytes=-{suffix_length}"),
+        (None, None) => return None,
+    })
+}
+
+fn parse_byte_range(
+    value: &str,
+    content_length: u64,
+) -> std::result::Result<Option<ByteRange>, ()> {
+    let Some(normalized) = normalize_single_byte_range_header(value) else {
+        return Ok(None);
+    };
+    let range_spec = normalized
+        .strip_prefix("bytes=")
+        .expect("normalized byte ranges include bytes= prefix");
+    let (start, end) = range_spec.split_once('-').ok_or(())?;
+    let parsed_start = if start.is_empty() {
+        None
+    } else {
+        Some(start.parse::<u64>().map_err(|_| ())?)
+    };
+    let parsed_end = if end.is_empty() {
+        None
+    } else {
+        Some(end.parse::<u64>().map_err(|_| ())?)
+    };
+
+    if content_length == 0 {
+        return Err(());
+    }
+
+    match (parsed_start, parsed_end) {
+        (Some(start), Some(end)) if start < content_length && start <= end => Ok(Some(ByteRange {
+            start,
+            end: end.min(content_length - 1),
+        })),
+        (Some(start), None) if start < content_length => Ok(Some(ByteRange {
+            start,
+            end: content_length - 1,
+        })),
+        (None, Some(suffix_length)) if suffix_length > 0 => {
+            let start = content_length.saturating_sub(suffix_length);
+            Ok(Some(ByteRange {
+                start,
+                end: content_length - 1,
+            }))
+        }
+        _ => Err(()),
+    }
+}
+
+async fn stream_origin_range_response(
+    state: Arc<AppState>,
+    artifact: PlaybackArtifact,
+    range_header: &str,
+    cors_origin: Option<&str>,
+) -> std::result::Result<Response, PlaybackError> {
+    let object = state
+        .s3
+        .get_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&artifact.object_key)
+        .range(range_header.to_owned())
+        .send()
+        .await
+        .map_err(|error| origin_get_error(&artifact, error))?;
+    let content_length = object
+        .content_length()
+        .map(|value| u64::try_from(value).unwrap_or(u64::MAX));
+    if let Some(content_length) = content_length {
+        ensure_origin_artifact_size_allowed(&state, &artifact.object_key, content_length)?;
+    }
+    let content_range = object.content_range().map(str::to_owned);
+    let status = if content_range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let object_key = artifact.object_key.clone();
+    let body_stream = byte_stream_body(object.body, object_key);
+
+    Ok(artifact_response_with_status(
+        &state.config,
+        artifact.content_type,
+        "MISS",
+        status,
+        Body::from_stream(body_stream),
+        content_length,
+        content_range.as_deref(),
+        cors_origin,
+    ))
+}
+
+fn byte_stream_body(
+    body: ByteStream,
+    object_key: String,
+) -> impl futures_util::Stream<Item = std::result::Result<Bytes, std::io::Error>> {
+    stream::try_unfold((body, object_key), |(mut body, object_key)| async move {
+        match body.try_next().await {
+            Ok(Some(chunk)) => Ok(Some((chunk, (body, object_key)))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(std::io::Error::other(format!(
+                "failed to read artifact {object_key} from origin: {error}"
+            ))),
+        }
+    })
 }
 
 fn record_playback_telemetry(
@@ -1342,47 +1640,6 @@ fn record_playback_telemetry(
         });
 }
 
-async fn read_cache_artifact(
-    state: &AppState,
-    artifact: &PlaybackArtifact,
-    path: &FsPath,
-) -> std::result::Result<Option<Vec<u8>>, PlaybackError> {
-    match fs::read(path).await {
-        Ok(bytes) => {
-            if let Err(error) =
-                touch_cache_metadata(state, &artifact.cache_key, bytes.len() as u64).await
-            {
-                tracing::warn!(
-                    cache_key = %artifact.cache_key,
-                    error = %error.log_message(),
-                    "failed to update edge cache metadata after hit",
-                );
-            }
-            Ok(Some(bytes))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(PlaybackError::Io(format!(
-            "failed to read cached artifact {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-async fn read_filled_cache_file(
-    state: &AppState,
-    artifact: &PlaybackArtifact,
-    path: &FsPath,
-) -> std::result::Result<Vec<u8>, PlaybackError> {
-    read_cache_artifact(state, artifact, path)
-        .await?
-        .ok_or_else(|| {
-            PlaybackError::Io(format!(
-                "filled cache artifact {} was missing before it could be served",
-                path.display()
-            ))
-        })
-}
-
 async fn wait_for_coalesced_fill(
     fill: Arc<InFlightFill>,
 ) -> std::result::Result<(), PlaybackError> {
@@ -1390,24 +1647,6 @@ async fn wait_for_coalesced_fill(
         FillOutcome::Succeeded => Ok(()),
         FillOutcome::Failed(error) => Err(error),
     }
-}
-
-fn artifact_bytes_response(
-    config: &EdgeConfig,
-    artifact: &PlaybackArtifact,
-    cache_status: &'static str,
-    bytes: Vec<u8>,
-    cors_origin: Option<&str>,
-) -> Response {
-    let content_length = u64::try_from(bytes.len()).ok();
-    artifact_response(
-        config,
-        artifact.content_type,
-        cache_status,
-        Body::from(bytes),
-        content_length,
-        cors_origin,
-    )
 }
 
 async fn stream_origin_artifact_response(
@@ -2342,17 +2581,49 @@ fn artifact_response(
     content_length: Option<u64>,
     cors_origin: Option<&str>,
 ) -> Response {
+    artifact_response_with_status(
+        config,
+        content_type,
+        cache_status,
+        StatusCode::OK,
+        body,
+        content_length,
+        None,
+        cors_origin,
+    )
+}
+
+fn artifact_response_with_status(
+    config: &EdgeConfig,
+    content_type: &'static str,
+    cache_status: &'static str,
+    status: StatusCode,
+    body: Body,
+    content_length: Option<u64>,
+    content_range: Option<&str>,
+    cors_origin: Option<&str>,
+) -> Response {
+    let is_hls_segment = content_type == "video/mp2t";
+    let expose_headers = if is_hls_segment {
+        "accept-ranges, cache-control, content-length, content-range, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
+    } else {
+        "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
+    };
     let mut builder = Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, playback_artifact_cache_control(content_type))
+        .header(
+            header::CACHE_CONTROL,
+            playback_artifact_cache_control(content_type),
+        )
         .header("x-rend-cache", cache_status)
         .header("x-rend-edge-id", &config.edge_id)
         .header("x-rend-region", &config.region)
-        .header(
-            header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region",
-        );
+        .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose_headers);
+
+    if is_hls_segment {
+        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
 
     if let Some(origin) = cors_origin {
         builder = builder
@@ -2367,10 +2638,32 @@ fn artifact_response(
     if let Some(content_length) = content_length {
         builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());
     }
+    if let Some(content_range) = content_range {
+        builder = builder.header(header::CONTENT_RANGE, content_range);
+    }
 
     builder
         .body(body)
         .expect("artifact response headers are static and valid")
+}
+
+fn range_not_satisfiable_response(
+    config: &EdgeConfig,
+    content_type: &'static str,
+    cache_status: &'static str,
+    content_length: u64,
+    cors_origin: Option<&str>,
+) -> Response {
+    artifact_response_with_status(
+        config,
+        content_type,
+        cache_status,
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        Body::empty(),
+        Some(0),
+        Some(&format!("bytes */{content_length}")),
+        cors_origin,
+    )
 }
 
 fn playback_artifact_cache_control(content_type: &str) -> &'static str {

@@ -67,6 +67,7 @@ fn test_auth() -> (SingleKeyring, PlaybackTokenIssuer) {
 async fn fake_s3_get(
     State(state): State<FakeOriginState>,
     AxumPath(path): AxumPath<FakeS3Path>,
+    headers: HeaderMap,
 ) -> Response {
     let _guard = track_fake_origin_request(&state);
 
@@ -85,9 +86,9 @@ async fn fake_s3_get(
     }
 
     match object {
-        Some(FakeOriginObject::Body(bytes)) => (StatusCode::OK, bytes).into_response(),
+        Some(FakeOriginObject::Body(bytes)) => fake_origin_bytes_response(bytes, &headers),
         Some(FakeOriginObject::DelayedBody { bytes, .. }) => {
-            (StatusCode::OK, bytes).into_response()
+            fake_origin_bytes_response(bytes, &headers)
         }
         Some(FakeOriginObject::ChunkedBody {
             chunks,
@@ -113,6 +114,38 @@ async fn fake_s3_get(
         Some(FakeOriginObject::DelayedNoSuchKey { .. }) => no_such_key_response(&path.key),
         None => no_such_key_response(&path.key),
     }
+}
+
+fn fake_origin_bytes_response(bytes: Vec<u8>, headers: &HeaderMap) -> Response {
+    let content_length = u64::try_from(bytes.len()).unwrap();
+    if let Some(range_header) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        return match parse_byte_range(range_header, content_length) {
+            Ok(Some(byte_range)) => {
+                let start = usize::try_from(byte_range.start).unwrap();
+                let end = usize::try_from(byte_range.end).unwrap();
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(
+                        header::CONTENT_RANGE,
+                        byte_range.content_range(content_length),
+                    )
+                    .header(header::CONTENT_LENGTH, byte_range.len().to_string())
+                    .body(Body::from(bytes[start..=end].to_vec()))
+                    .unwrap()
+            }
+            Ok(None) => (StatusCode::OK, bytes).into_response(),
+            Err(()) => Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{content_length}"))
+                .body(Body::empty())
+                .unwrap(),
+        };
+    }
+
+    (StatusCode::OK, bytes).into_response()
 }
 
 fn fake_chunk_stream(
@@ -449,6 +482,9 @@ struct PlaybackTestResponse {
     cache_control: Option<String>,
     cache_status: Option<String>,
     content_type: Option<String>,
+    content_length: Option<String>,
+    content_range: Option<String>,
+    accept_ranges: Option<String>,
     access_control_allow_origin: Option<String>,
     access_control_allow_credentials: Option<String>,
     access_control_expose_headers: Option<String>,
@@ -498,10 +534,33 @@ async fn get_playback_with_cookie_and_origin(
     if let Some(origin) = origin {
         request = request.header(header::ORIGIN, origin);
     }
+    get_playback_with_request(app, request).await
+}
+
+async fn get_playback_with_range(
+    app: Router,
+    uri: impl AsRef<str>,
+    range: impl AsRef<str>,
+) -> PlaybackTestResponse {
+    let request = Request::builder()
+        .method("GET")
+        .uri(uri.as_ref())
+        .header(header::RANGE, range.as_ref());
+    get_playback_with_request(app, request).await
+}
+
+async fn get_playback_with_request(
+    app: Router,
+    request: axum::http::request::Builder,
+) -> PlaybackTestResponse {
     let response = app
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
+    playback_test_response(response).await
+}
+
+async fn playback_test_response(response: Response) -> PlaybackTestResponse {
     let status = response.status();
     let headers = response.headers().clone();
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -521,6 +580,18 @@ async fn get_playback_with_cookie_and_origin(
             .map(str::to_owned),
         content_type: headers
             .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        content_length: headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        content_range: headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        accept_ranges: headers
+            .get(header::ACCEPT_RANGES)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         access_control_allow_origin: headers
@@ -1225,6 +1296,102 @@ async fn playback_allows_resource_timing_only_for_www_rend_origin() {
         Some("https://www.rend.so")
     );
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_serves_hls_segment_range_from_cache_hit() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-range-hit");
+    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"0123456789").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_range(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        "bytes=2-5",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(response.content_type.as_deref(), Some("video/mp2t"));
+    assert_eq!(response.content_length.as_deref(), Some("4"));
+    assert_eq!(response.content_range.as_deref(), Some("bytes 2-5/10"));
+    assert_eq!(response.accept_ranges.as_deref(), Some("bytes"));
+    assert_eq!(
+        response.access_control_expose_headers.as_deref(),
+        Some(
+            "accept-ranges, cache-control, content-length, content-range, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
+        )
+    );
+    assert_eq!(response.body, b"2345");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_rejects_unsatisfiable_hls_segment_range_from_cache_hit() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-range-unsatisfied");
+    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"0123456789").await.unwrap();
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_range(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        "bytes=99-100",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(response.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(response.content_length.as_deref(), Some("0"));
+    assert_eq!(response.content_range.as_deref(), Some("bytes */10"));
+    assert_eq!(response.accept_ranges.as_deref(), Some("bytes"));
+    assert!(response.body.is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_streams_hls_segment_range_from_origin_without_partial_cache_write() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/segment_00000.ts".to_owned(),
+        FakeOriginObject::Body(b"0123456789".to_vec()),
+    );
+    let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("playback-range-miss");
+    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback_with_range(
+        app,
+        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        "bytes=4-",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(response.content_length.as_deref(), Some("6"));
+    assert_eq!(response.content_range.as_deref(), Some("bytes 4-9/10"));
+    assert_eq!(response.accept_ranges.as_deref(), Some("bytes"));
+    assert_eq!(response.body, b"456789");
+    assert!(!cache_path.exists());
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["rend-local/videos/asset-123/hls/segment_00000.ts"]
+    );
 }
 
 #[tokio::test]

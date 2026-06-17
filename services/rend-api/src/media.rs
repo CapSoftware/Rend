@@ -20,6 +20,10 @@ use crate::{
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 const HLS_X264_PRESET: &str = "superfast";
 const HLS_AUDIO_BITRATE: &str = "96k";
+const HLS_TARGET_SEGMENT_SECONDS: u32 = 2;
+const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 48;
+const HLS_MIN_KEYFRAME_INTERVAL_FRAMES: u32 = 12;
+const HLS_MAX_KEYFRAME_INTERVAL_FRAMES: u32 = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HlsRendition {
@@ -101,13 +105,14 @@ struct CommandOutput {
     stdout: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SourceProbe {
     duration_ms: i64,
     width: i32,
     height: i32,
     resolution_tier: &'static str,
     has_audio: bool,
+    frame_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +128,8 @@ struct FfprobeStream {
     width: Option<i32>,
     height: Option<i32>,
     duration: Option<String>,
+    avg_frame_rate: Option<String>,
+    r_frame_rate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,7 +297,7 @@ async fn probe_video_stream(
             os("-v"),
             os("error"),
             os("-show_entries"),
-            os("stream=codec_type,width,height,duration:format=duration"),
+            os("stream=codec_type,width,height,duration,avg_frame_rate,r_frame_rate:format=duration"),
             os("-of"),
             os("json"),
             source_path.as_os_str().to_owned(),
@@ -338,6 +345,7 @@ async fn probe_video_stream(
             .streams
             .iter()
             .any(|stream| stream.codec_type.as_deref() == Some("audio")),
+        frame_rate: source_frame_rate(stream),
     })
 }
 
@@ -412,6 +420,8 @@ async fn generate_and_upload_hls(
             args.push(os("0:a:0"));
         }
     }
+    let keyframe_interval = hls_keyframe_interval_frames(source_probe).to_string();
+    let target_segment_seconds = HLS_TARGET_SEGMENT_SECONDS.to_string();
     args.extend([
         os("-c:v"),
         os("libx264"),
@@ -422,11 +432,16 @@ async fn generate_and_upload_hls(
         os("-pix_fmt"),
         os("yuv420p"),
         os("-g"),
-        os("48"),
+        os(&keyframe_interval),
         os("-keyint_min"),
-        os("48"),
+        os(&keyframe_interval),
         os("-sc_threshold"),
         os("0"),
+        os("-force_key_frames"),
+        os(&format!(
+            "expr:gte(t,n_forced*{})",
+            HLS_TARGET_SEGMENT_SECONDS
+        )),
     ]);
     for (index, rendition) in renditions.iter().enumerate() {
         args.extend([
@@ -452,7 +467,7 @@ async fn generate_and_upload_hls(
         os("-f"),
         os("hls"),
         os("-hls_time"),
-        os("2"),
+        os(&target_segment_seconds),
         os("-hls_playlist_type"),
         os("vod"),
         os("-hls_flags"),
@@ -931,6 +946,47 @@ fn parse_duration_ms(value: &str) -> Option<i64> {
     }
 }
 
+fn source_frame_rate(stream: &FfprobeStream) -> Option<f64> {
+    stream
+        .avg_frame_rate
+        .as_deref()
+        .and_then(parse_frame_rate)
+        .or_else(|| stream.r_frame_rate.as_deref().and_then(parse_frame_rate))
+}
+
+fn parse_frame_rate(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let frames_per_second = if let Some((numerator, denominator)) = value.split_once('/') {
+        let numerator = numerator.trim().parse::<f64>().ok()?;
+        let denominator = denominator.trim().parse::<f64>().ok()?;
+        if denominator == 0.0 {
+            return None;
+        }
+        numerator / denominator
+    } else {
+        value.parse::<f64>().ok()?
+    };
+    if frames_per_second.is_finite() && frames_per_second > 0.0 {
+        Some(frames_per_second)
+    } else {
+        None
+    }
+}
+
+fn hls_keyframe_interval_frames(source_probe: &SourceProbe) -> u32 {
+    source_probe
+        .frame_rate
+        .map(|frame_rate| (frame_rate * f64::from(HLS_TARGET_SEGMENT_SECONDS)).round())
+        .filter(|frames| frames.is_finite() && *frames > 0.0)
+        .map(|frames| {
+            (frames as u32).clamp(
+                HLS_MIN_KEYFRAME_INTERVAL_FRAMES,
+                HLS_MAX_KEYFRAME_INTERVAL_FRAMES,
+            )
+        })
+        .unwrap_or(HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES)
+}
+
 fn classify_resolution_tier(width: i32, height: i32) -> &'static str {
     let max_dimension = width.max(height);
     if max_dimension <= 1280 {
@@ -1263,6 +1319,7 @@ mod tests {
             height: 1080,
             resolution_tier: "1080p",
             has_audio: true,
+            frame_rate: Some(30.0),
         };
         let renditions = hls_renditions_for_source(&source_probe);
 
@@ -1280,6 +1337,37 @@ mod tests {
         assert_eq!(
             hls_variant_stream_map(&renditions, false),
             "v:0,name:720p v:1,name:1080p"
+        );
+    }
+
+    #[test]
+    fn frame_rate_parser_handles_ffprobe_ratios() {
+        assert_eq!(parse_frame_rate("30/1"), Some(30.0));
+        assert!((parse_frame_rate("30000/1001").unwrap() - 29.970_029).abs() < 0.000_001);
+        assert_eq!(parse_frame_rate("0/0"), None);
+        assert_eq!(parse_frame_rate("not-a-rate"), None);
+    }
+
+    #[test]
+    fn hls_keyframe_interval_is_fps_aware_for_two_second_segments() {
+        let mut source_probe = SourceProbe {
+            duration_ms: 12_000,
+            width: 1920,
+            height: 1080,
+            resolution_tier: "1080p",
+            has_audio: true,
+            frame_rate: Some(30.0),
+        };
+
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 60);
+        source_probe.frame_rate = Some(24.0);
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 48);
+        source_probe.frame_rate = Some(60.0);
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 120);
+        source_probe.frame_rate = None;
+        assert_eq!(
+            hls_keyframe_interval_frames(&source_probe),
+            HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES
         );
     }
 

@@ -67,6 +67,7 @@ const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
 const HLS_STARTUP_SEGMENTS_PER_RENDITION: usize = 2;
 const HLS_RENDITION_ORDER: [&str; 4] = ["720p", "1080p", "2k", "4k"];
+const HLS_STARTUP_RENDITION_ORDER: [&str; 4] = ["4k", "2k", "1080p", "720p"];
 const DEFAULT_ASSET_LIST_LIMIT: usize = 50;
 const MAX_ASSET_LIST_LIMIT: usize = 100;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
@@ -2972,7 +2973,7 @@ fn hls_startup_prefetch_paths<'a>(
     }
 
     let mut hints = Vec::new();
-    let tiers = hls_renditions_present(
+    let tiers = hls_startup_renditions_present(
         artifacts
             .iter()
             .map(|artifact| artifact.artifact_path.as_str()),
@@ -3052,9 +3053,16 @@ fn hls_startup_sort_key(path: &str) -> (u8, u8, u32) {
     (5, u8::MAX, u32::MAX)
 }
 
-fn hls_renditions_present<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
+fn hls_startup_renditions_present<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
+    hls_renditions_present_in_order(paths, &HLS_STARTUP_RENDITION_ORDER)
+}
+
+fn hls_renditions_present_in_order<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    order: &[&'static str],
+) -> Vec<&'static str> {
     let paths = paths.collect::<Vec<_>>();
-    HLS_RENDITION_ORDER
+    order
         .iter()
         .copied()
         .filter(|tier| {
@@ -4110,7 +4118,8 @@ fn edge_warm_artifact_paths(
                 push_unique_artifact_path(&mut artifact_paths, "hls/master.m3u8");
             }
 
-            let tiers = hls_renditions_present(generated_artifact_paths.iter().map(String::as_str));
+            let tiers =
+                hls_startup_renditions_present(generated_artifact_paths.iter().map(String::as_str));
             if !tiers.is_empty() {
                 for tier in tiers {
                     let playlist_path = format!("hls/{tier}/index.m3u8");
