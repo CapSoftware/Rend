@@ -21,6 +21,13 @@ const localOutDir = path.join(repoRoot, ".rend", "benchmarks", "providers", `day
 const publicOutDir = path.join(repoRoot, "apps", "site", "public", "benchmarks", "providers");
 let redactionApiKey = "";
 
+function benchmarkRegionForTarget(target) {
+  const normalized = String(target || "").toLowerCase();
+  if (normalized.startsWith("eu")) return "daytona-eu";
+  if (normalized.startsWith("us")) return "daytona-us";
+  return `daytona-${normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown"}`;
+}
+
 const rendEdgeStaticPageScript = `
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -364,7 +371,7 @@ async function main() {
     );
 
     const env = {
-      BENCHMARK_REGION: "daytona-us",
+      BENCHMARK_REGION: benchmarkRegionForTarget(sandbox.target || requestedTarget),
       BENCHMARK_REGION_LABEL: `Daytona ${sandbox.target} (${requestedTarget} requested)`,
       BENCHMARK_RUNNER_KIND: "daytona",
       BENCHMARK_RUNNER_LABEL: sandbox.id,
