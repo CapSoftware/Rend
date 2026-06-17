@@ -19,6 +19,9 @@ import {
   AUTH_HEADER_CODE,
   CURL_UPLOAD_CODE,
   LOCAL_DOCKER_CODE,
+  MCP_CLIENT_CONFIG_CODE,
+  MCP_LOCAL_CONFIG_CODE,
+  MCP_SMOKE_CODE,
   PLAYBACK_BOOTSTRAP_CODE,
   QUICKSTART_SDK_CODE,
   SDK_GUIDE_CODE,
@@ -275,6 +278,23 @@ export default function DocsPage() {
                   <li>Browser playback uses <code>https://rend.so/embed/{"{assetId}"}</code> or <code>/api/player/{"{assetId}"}</code> on the site origin.</li>
                   <li>Agents should prefer the SDK for app code and OpenAPI for generated tools.</li>
                 </ul>
+              </DocSection>
+
+              <DocSection id="mcp-server" label="MCP" title="Use Rend from MCP-compatible agents">
+                <p>
+                  Install <code>@rend-sdk/mcp</code> when an agent should use Rend directly through
+                  tools instead of writing integration code first. The server exposes upload, get,
+                  list, playback, delete, and analytics tools backed by the public SDK.
+                </p>
+                <CodeBlock code={MCP_CLIENT_CONFIG_CODE} language="json" title="mcp-config.json" />
+                <ul>
+                  <li>Pass the API key through the MCP client <code>env</code> block, not as a tool argument.</li>
+                  <li>Override <code>REND_API_BASE_URL</code> and <code>REND_SITE_BASE_URL</code> for local or private deployments.</li>
+                  <li>Uploads check local file size before sending data and reject detectable non-video files.</li>
+                  <li>Playback tool output includes hosted embed/watch URLs and redacts secret-bearing fields.</li>
+                </ul>
+                <CodeBlock code={MCP_LOCAL_CONFIG_CODE} language="json" title="mcp-local-config.json" />
+                <CodeBlock code={MCP_SMOKE_CODE} language="sh" title="mcp-smoke.sh" />
               </DocSection>
 
               <DocSection id="sdk-guide" label="SDK" title="Use the generated TypeScript SDK">
