@@ -20,6 +20,8 @@ import {
   CURL_UPLOAD_CODE,
   LOCAL_DOCKER_CODE,
   MCP_CLIENT_CONFIG_CODE,
+  MCP_CURSOR_INSTALL_URL,
+  MCP_INSTALL_COMMAND_CODE,
   MCP_LOCAL_CONFIG_CODE,
   MCP_SMOKE_CODE,
   PLAYBACK_BOOTSTRAP_CODE,
@@ -280,19 +282,86 @@ export default function DocsPage() {
                 </ul>
               </DocSection>
 
-              <DocSection id="mcp-server" label="MCP" title="Use Rend from MCP-compatible agents">
+              <DocSection id="mcp-server" label="MCP" title="Give your agent Rend tools">
                 <p>
-                  Install <code>@rend-sdk/mcp</code> when an agent should use Rend directly through
-                  tools instead of writing integration code first. The server exposes upload, get,
-                  list, playback, delete, and analytics tools backed by the public SDK.
+                  Use <code>@rend-sdk/mcp</code> when Claude, Cursor, or another MCP-compatible
+                  agent should upload videos, inspect assets, fetch playback links, read analytics,
+                  and clean up test assets through Rend without first writing app integration code.
                 </p>
+                <div className="my-6 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-[14px] border border-line bg-card p-4">
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-faint">
+                      Cursor
+                    </p>
+                    <h3 className="mt-2 font-head text-[20px] leading-tight text-ink">
+                      Install with one click
+                    </h3>
+                    <p className="mt-2 text-[14.5px] leading-[1.6] text-muted">
+                      Opens Cursor with the Rend MCP config prefilled. Review the command, paste
+                      your Rend API key into the env block, then approve the install.
+                    </p>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button href={MCP_CURSOR_INSTALL_URL} external size="sm">
+                        Add to Cursor <ArrowRight />
+                      </Button>
+                      <DocsCopyButton
+                        value={MCP_CLIENT_CONFIG_CODE}
+                        label="Copy config"
+                        copiedLabel="Config copied"
+                        ariaLabel="Copy Rend MCP config"
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-[14px] border border-line bg-card p-4">
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-faint">
+                      Any MCP client
+                    </p>
+                    <h3 className="mt-2 font-head text-[20px] leading-tight text-ink">
+                      Run the package with npx
+                    </h3>
+                    <p className="mt-2 text-[14.5px] leading-[1.6] text-muted">
+                      Clients that accept a command and args can launch the server directly. Keep
+                      <code>REND_API_KEY</code> in the client env, never in chat prompts.
+                    </p>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <code className="border border-line bg-bg-sunken px-2.5 py-2 font-mono text-[12px] text-ink">
+                        {MCP_INSTALL_COMMAND_CODE}
+                      </code>
+                      <DocsCopyButton
+                        value={MCP_INSTALL_COMMAND_CODE}
+                        label="Copy command"
+                        copiedLabel="Command copied"
+                        ariaLabel="Copy Rend MCP npx command"
+                      />
+                    </div>
+                  </div>
+                </div>
                 <CodeBlock code={MCP_CLIENT_CONFIG_CODE} language="json" title="mcp-config.json" />
+                <div className="my-6 grid gap-3 sm:grid-cols-2">
+                  {mcpCapabilities.map((capability) => (
+                    <div key={capability.title} className="rounded-[14px] border border-line bg-card p-4">
+                      <h3 className="font-head text-[18px] leading-tight text-ink">
+                        {capability.title}
+                      </h3>
+                      <p className="mt-2 text-[14.5px] leading-[1.6] text-muted">
+                        {capability.description}
+                      </p>
+                    </div>
+                  ))}
+                </div>
                 <ul>
-                  <li>Pass the API key through the MCP client <code>env</code> block, not as a tool argument.</li>
+                  <li>Grant API keys only the scopes the workflow needs: <code>upload</code>, <code>read</code>, <code>delete</code>, and <code>analytics</code>.</li>
+                  <li>Pass the API key through the MCP client <code>env</code> block, not as a tool argument or prompt text.</li>
                   <li>Override <code>REND_API_BASE_URL</code> and <code>REND_SITE_BASE_URL</code> for local or private deployments.</li>
                   <li>Uploads check local file size before sending data and reject detectable non-video files.</li>
                   <li>Playback tool output includes hosted embed/watch URLs and redacts secret-bearing fields.</li>
                 </ul>
+                <h3>Local development</h3>
+                <p>
+                  Point the MCP server at your local API and site when developing Rend itself, then
+                  run the smoke to upload a fixture, wait for playback, fetch analytics, delete the
+                  asset, and check that tool output stays public-safe.
+                </p>
                 <CodeBlock code={MCP_LOCAL_CONFIG_CODE} language="json" title="mcp-local-config.json" />
                 <CodeBlock code={MCP_SMOKE_CODE} language="sh" title="mcp-smoke.sh" />
               </DocSection>
