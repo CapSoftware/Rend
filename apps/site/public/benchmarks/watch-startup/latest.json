@@ -1,0 +1,262 @@
+{
+  "schemaVersion": "rend.watch-startup-benchmark.v1",
+  "generatedAt": "2026-06-17T14:41:55.000Z",
+  "run": {
+    "id": "postdeploy-20260617T143648Z",
+    "source": "fresh production reupload after backend deployment",
+    "assetId": "f2bd269c-cb16-49b8-82da-6e0d374a13dc",
+    "watchUrl": "https://www.rend.so/watch/f2bd269c-cb16-49b8-82da-6e0d374a13dc?autoplay=1",
+    "productionGitSha": "44de00b223cbcea6052a95ae1459922e0a361040"
+  },
+  "comparison": [
+    {
+      "id": "old-baseline",
+      "label": "Old baseline",
+      "note": "Legacy asset before the 30fps GOP cadence fix.",
+      "mode": "native_hls",
+      "observedResolution": "1920x1080",
+      "firstSegmentDurationSeconds": 3.2,
+      "firstSegmentBytes": 395000,
+      "firstFrameMedianMs": 901,
+      "firstSegmentFetchMedianMs": 221,
+      "firstByteToFrameMedianMs": 270
+    },
+    {
+      "id": "forced-1080-regression",
+      "label": "Forced 1080p regression",
+      "note": "Post-cadence-fix asset with source-first master ordering.",
+      "mode": "native_hls",
+      "observedResolution": "1920x1080",
+      "firstSegmentDurationSeconds": 2.02,
+      "firstSegmentBytes": 1090000,
+      "firstFrameMedianMs": 1024,
+      "firstSegmentFetchMedianMs": 210,
+      "firstByteToFrameMedianMs": 384
+    },
+    {
+      "id": "current-abr-first",
+      "label": "Current ABR-first",
+      "note": "Fresh asset after restoring ABR-first master ordering and startup hints.",
+      "mode": "native_hls",
+      "observedResolution": "browser exposed 1280x720 during the sampled startup window",
+      "firstSegmentDurationSeconds": 2,
+      "firstSegmentBytes": 671724,
+      "firstFrameMedianMs": 898,
+      "firstFrameP75Ms": 952,
+      "firstSegmentFetchMedianMs": 88.4,
+      "firstSegmentFetchP75Ms": 91.1,
+      "firstByteToFrameMedianMs": 254.5,
+      "firstByteToFrameP75Ms": 278.5
+    }
+  ],
+  "playlist": {
+    "bootstrapStatus": 200,
+    "masterStatus": 200,
+    "masterOrder": [
+      "720p/index.m3u8",
+      "1080p/index.m3u8"
+    ],
+    "edgeHost": "ams-1.play.rend.so",
+    "edgeId": "rend-edge-ams-1",
+    "edgeRegion": "amsterdam",
+    "cacheStatus": "HIT",
+    "prefetchHints": [
+      "hls/720p/index.m3u8",
+      "hls/720p/segment_00000.ts"
+    ],
+    "leakScanPassed": true,
+    "variants": [
+      {
+        "label": "720p",
+        "resolution": "1280x720",
+        "bandwidth": 3185600,
+        "firstSegmentDurationSeconds": 2,
+        "firstSegmentBytes": 671724,
+        "independentSegments": true,
+        "segmentStatus": 200,
+        "segmentCache": "HIT",
+        "rangeStatus": 206,
+        "rangeContentRange": "bytes 0-99/671724",
+        "secondFetchCache": "HIT"
+      },
+      {
+        "label": "1080p",
+        "resolution": "1920x1080",
+        "bandwidth": 5605600,
+        "firstSegmentDurationSeconds": 2,
+        "firstSegmentBytes": 1010688,
+        "independentSegments": true,
+        "segmentStatus": 200,
+        "segmentCache": "MISS",
+        "rangeStatus": 206,
+        "rangeContentRange": "bytes 0-99/1010688",
+        "secondFetchCache": "HIT"
+      }
+    ]
+  },
+  "localNativeHls": {
+    "environment": "local-europe-native-hls-1080",
+    "label": "Local Europe native HLS 1920x1080",
+    "browser": "26.5",
+    "sampleCount": 10,
+    "successCount": 10,
+    "playbackModes": {
+      "native_hls": 10
+    },
+    "selectedResolutions": {
+      "1280x720": 10
+    },
+    "edgeHosts": {
+      "ams-1.play.rend.so": 10
+    },
+    "firstFrame": {
+      "medianMs": 898,
+      "p75Ms": 952,
+      "samples": 10
+    },
+    "firstSegmentFetch": {
+      "medianMs": 88.4,
+      "p75Ms": 91.1,
+      "samples": 10
+    },
+    "firstByteToFrame": {
+      "medianMs": 254.5,
+      "p75Ms": 278.5,
+      "samples": 10
+    },
+    "manifestFetch": {
+      "medianMs": 62.1,
+      "p75Ms": 69.8,
+      "samples": 10
+    },
+    "mediaPlaylistFetch": {
+      "medianMs": 34,
+      "p75Ms": 35.5,
+      "samples": 10
+    },
+    "failureCounts": {
+      "media-segment:cancelled": 38
+    },
+    "stallCount": 10,
+    "stallNote": "Observed waiting events lasted 4-11ms and ended at canplay."
+  },
+  "remoteDaytona": {
+    "note": "Remote Daytona browser runs used hls.js/MSE in WebKit and are kept separate from local native-HLS results.",
+    "us": {
+      "env": "daytona-us",
+      "success": "4/5",
+      "modes": {
+        "hls_js": 5
+      },
+      "selectedResolutions": {
+        "1280x720": 5
+      },
+      "edgeHosts": {
+        "ash-1.play.rend.so": 5
+      },
+      "firstFrame": {
+        "medianMs": 1389.5,
+        "p75Ms": 1507,
+        "samples": 4
+      },
+      "firstSegmentFetch": {
+        "medianMs": 67.8,
+        "p75Ms": 74.6,
+        "samples": 4
+      },
+      "firstByteToFrame": {
+        "medianMs": 605.5,
+        "p75Ms": 670.7,
+        "samples": 4
+      },
+      "manifestFetch": {
+        "medianMs": 1.3,
+        "p75Ms": 1.8,
+        "samples": 4
+      },
+      "mediaPlaylistFetch": {
+        "medianMs": 7.4,
+        "p75Ms": 7.5,
+        "samples": 4
+      },
+      "failureCounts": {
+        "media error": 5
+      },
+      "stallCount": 0,
+      "failedSamples": [
+        {
+          "sampleId": "daytona-us-sample-03",
+          "success": false,
+          "mode": "hls_js",
+          "selectedResolution": "1280x720",
+          "firstFrameMs": null,
+          "firstSegmentFetchMs": 88.6,
+          "firstByteToFrameMs": null,
+          "edgeHosts": [
+            "ash-1.play.rend.so"
+          ],
+          "edgeLabels": [
+            "rend-edge-ash-1",
+            "us-east"
+          ],
+          "failures": [
+            {
+              "atMs": 394,
+              "code": 4,
+              "message": "media error"
+            }
+          ],
+          "stalls": [],
+          "warnings": []
+        }
+      ]
+    },
+    "eu": {
+      "env": "daytona-eu",
+      "success": "5/5",
+      "modes": {
+        "hls_js": 5
+      },
+      "selectedResolutions": {
+        "1280x720": 5
+      },
+      "edgeHosts": {
+        "ams-1.play.rend.so": 5
+      },
+      "firstFrame": {
+        "medianMs": 1915,
+        "p75Ms": 2215,
+        "samples": 5
+      },
+      "firstSegmentFetch": {
+        "medianMs": 108.7,
+        "p75Ms": 139.9,
+        "samples": 5
+      },
+      "firstByteToFrame": {
+        "medianMs": 929.4,
+        "p75Ms": 1085.5,
+        "samples": 5
+      },
+      "manifestFetch": {
+        "medianMs": 2.2,
+        "p75Ms": 2.4,
+        "samples": 5
+      },
+      "mediaPlaylistFetch": {
+        "medianMs": 14.3,
+        "p75Ms": 14.6,
+        "samples": 5
+      },
+      "failureCounts": {
+        "media error": 5
+      },
+      "stallCount": 0,
+      "failedSamples": []
+    }
+  },
+  "artifacts": {
+    "machineReadableUrl": "/benchmarks/watch-startup/latest.json",
+    "rawSamplesUrl": "/benchmarks/watch-startup/latest.samples.json"
+  }
+}
