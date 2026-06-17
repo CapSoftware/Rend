@@ -1,0 +1,476 @@
+{
+  "schemaVersion": "rend.watch-startup-benchmark-samples.v1",
+  "generatedAt": "2026-06-17T14:41:55.000Z",
+  "runId": "postdeploy-20260617T143648Z",
+  "redaction": {
+    "urlPolicy": "origin plus path class only; query strings, tokens, cookies, and signed URLs omitted"
+  },
+  "samples": {
+    "localNativeHls1080Viewport": [
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-01",
+        "startedAt": "2026-06-17T14:39:42.903Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 931,
+        "firstSegmentFetchMs": 178.3,
+        "firstByteToFrameMs": 240.70000000000005,
+        "stallCount": 1,
+        "stallDurationMs": 5,
+        "failureCount": 3,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-02",
+        "startedAt": "2026-06-17T14:39:50.047Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 916,
+        "firstSegmentFetchMs": 89.2,
+        "firstByteToFrameMs": 287.20000000000005,
+        "stallCount": 1,
+        "stallDurationMs": 7,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-03",
+        "startedAt": "2026-06-17T14:39:57.171Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 952,
+        "firstSegmentFetchMs": 90.2,
+        "firstByteToFrameMs": 229.79999999999995,
+        "stallCount": 1,
+        "stallDurationMs": 6,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-04",
+        "startedAt": "2026-06-17T14:40:04.300Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 842,
+        "firstSegmentFetchMs": 87.6,
+        "firstByteToFrameMs": 268.20000000000005,
+        "stallCount": 1,
+        "stallDurationMs": 11,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-05",
+        "startedAt": "2026-06-17T14:40:11.321Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 880,
+        "firstSegmentFetchMs": 87.4,
+        "firstByteToFrameMs": 197.10000000000002,
+        "stallCount": 1,
+        "stallDurationMs": 6,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-06",
+        "startedAt": "2026-06-17T14:40:18.390Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 981,
+        "firstSegmentFetchMs": 86.4,
+        "firstByteToFrameMs": 278.5,
+        "stallCount": 1,
+        "stallDurationMs": 5,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-07",
+        "startedAt": "2026-06-17T14:40:25.544Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 866,
+        "firstSegmentFetchMs": 86.7,
+        "firstByteToFrameMs": 187,
+        "stallCount": 1,
+        "stallDurationMs": 6,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-08",
+        "startedAt": "2026-06-17T14:40:32.583Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 700,
+        "firstSegmentFetchMs": 177.1,
+        "firstByteToFrameMs": 156.60000000000002,
+        "stallCount": 1,
+        "stallDurationMs": 4,
+        "failureCount": 3,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-09",
+        "startedAt": "2026-06-17T14:40:39.448Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 816,
+        "firstSegmentFetchMs": 86.8,
+        "firstByteToFrameMs": 280.20000000000005,
+        "stallCount": 1,
+        "stallDurationMs": 9,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      },
+      {
+        "sampleId": "local-europe-native-hls-1080-sample-10",
+        "startedAt": "2026-06-17T14:40:46.427Z",
+        "success": true,
+        "mode": "native_hls",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 1757,
+        "firstSegmentFetchMs": 91.1,
+        "firstByteToFrameMs": 274.79999999999995,
+        "stallCount": 1,
+        "stallDurationMs": 4,
+        "failureCount": 4,
+        "failureKinds": [
+          "media-segment"
+        ]
+      }
+    ],
+    "daytonaUsHlsJs": [
+      {
+        "sampleId": "daytona-us-sample-01",
+        "startedAt": "2026-06-17T14:41:48.617Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ash-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ash-1",
+          "us-east"
+        ],
+        "firstFrameMs": 1621,
+        "firstSegmentFetchMs": 33.1,
+        "firstByteToFrameMs": 423.20000000000005,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-us-sample-02",
+        "startedAt": "2026-06-17T14:41:53.195Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ash-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ash-1",
+          "us-east"
+        ],
+        "firstFrameMs": 1106,
+        "firstSegmentFetchMs": 60.9,
+        "firstByteToFrameMs": 540.3,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-us-sample-03",
+        "startedAt": "2026-06-17T14:41:58.024Z",
+        "success": false,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ash-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ash-1",
+          "us-east"
+        ],
+        "firstFrameMs": null,
+        "firstSegmentFetchMs": 88.6,
+        "firstByteToFrameMs": null,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-us-sample-04",
+        "startedAt": "2026-06-17T14:42:32.030Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ash-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ash-1",
+          "us-east"
+        ],
+        "firstFrameMs": 1272,
+        "firstSegmentFetchMs": 74.6,
+        "firstByteToFrameMs": 670.7,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-us-sample-05",
+        "startedAt": "2026-06-17T14:42:37.103Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ash-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ash-1",
+          "us-east"
+        ],
+        "firstFrameMs": 1507,
+        "firstSegmentFetchMs": 93.4,
+        "firstByteToFrameMs": 986.4,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      }
+    ],
+    "daytonaEuHlsJs": [
+      {
+        "sampleId": "daytona-eu-sample-01",
+        "startedAt": "2026-06-17T14:42:51.571Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 2965,
+        "firstSegmentFetchMs": 72.7,
+        "firstByteToFrameMs": 605.5999999999999,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-eu-sample-02",
+        "startedAt": "2026-06-17T14:42:59.434Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 1430,
+        "firstSegmentFetchMs": 93.8,
+        "firstByteToFrameMs": 590.2,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-eu-sample-03",
+        "startedAt": "2026-06-17T14:43:04.918Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 1628,
+        "firstSegmentFetchMs": 139.9,
+        "firstByteToFrameMs": 929.4,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-eu-sample-04",
+        "startedAt": "2026-06-17T14:43:10.818Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 1915,
+        "firstSegmentFetchMs": 108.7,
+        "firstByteToFrameMs": 1085.5,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      },
+      {
+        "sampleId": "daytona-eu-sample-05",
+        "startedAt": "2026-06-17T14:43:17.026Z",
+        "success": true,
+        "mode": "hls_js",
+        "selectedResolution": "1280x720",
+        "edgeHosts": [
+          "ams-1.play.rend.so"
+        ],
+        "edgeLabels": [
+          "rend-edge-ams-1",
+          "amsterdam"
+        ],
+        "firstFrameMs": 2215,
+        "firstSegmentFetchMs": 151.2,
+        "firstByteToFrameMs": 1348.1,
+        "stallCount": 0,
+        "stallDurationMs": 0,
+        "failureCount": 1,
+        "failureKinds": [
+          "media error"
+        ]
+      }
+    ]
+  }
+}
