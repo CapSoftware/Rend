@@ -22,6 +22,7 @@ import {
   playbackBaseUrlDecisionForRequest,
   type PlaybackBaseUrlDecision,
 } from "../../../../lib/player-edge-selection.ts";
+import { isTrustedRendHost, publicRequestHost } from "../../../../lib/player-request-origin.ts";
 import { getSiteDb } from "../../../../lib/server-db.ts";
 
 type UpstreamAssetResponse = {
@@ -142,13 +143,9 @@ function hostMatchesCookieDomain(host: string, domain: string) {
   return host === domain || host.endsWith(`.${domain}`);
 }
 
-function isTrustedRendHost(host: string) {
-  return host === "rend.so" || host.endsWith(".rend.so");
-}
-
 function directPlaybackCookieDomain(request: Request, playbackBaseUrl: string | null) {
   if (!playbackBaseUrl) return undefined;
-  const requestHost = new URL(request.url).hostname.toLowerCase();
+  const requestHost = publicRequestHost(request);
   const playbackHost = new URL(playbackBaseUrl).hostname.toLowerCase();
   const configured = envString("REND_PLAYER_PLAYBACK_COOKIE_DOMAIN") || envString("REND_PLAYBACK_COOKIE_DOMAIN");
 
@@ -175,7 +172,7 @@ function canUseDirectPlaybackCookie(
   if (!playbackBaseUrl) return false;
   if (cookieDomain) return true;
 
-  const requestHost = new URL(request.url).hostname.toLowerCase();
+  const requestHost = publicRequestHost(request);
   const playbackHost = new URL(playbackBaseUrl).hostname.toLowerCase();
   return requestHost === playbackHost;
 }
