@@ -1,0 +1,66 @@
+{
+  "name": "@rend-sdk/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Rend public API.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "homepage": "https://github.com/CapSoftware/Rend#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CapSoftware/Rend.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/CapSoftware/Rend/issues"
+  },
+  "keywords": [
+    "rend",
+    "video",
+    "mcp",
+    "model-context-protocol",
+    "api"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "rend-mcp": "dist/bin/rend-mcp.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun run --cwd ../sdk build && npm run clean && tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "pack:dry-run": "npm pack --dry-run",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test && npm run typecheck && npm run build",
+    "smoke:local": "node scripts/local-smoke.mjs",
+    "test": "npm run build && node --test test/*.mjs",
+    "typecheck": "bun run --cwd ../sdk build && tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@rend-sdk/client": "^0.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
