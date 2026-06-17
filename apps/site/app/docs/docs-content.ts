@@ -25,7 +25,7 @@ export const docsNavItems: DocsNavItem[] = [
   {
     href: "#mcp-server",
     title: "MCP server",
-    description: "Let MCP-compatible agents upload, inspect, play, analyze, and delete videos.",
+    description: "Install Rend tools in Cursor or any MCP client with one click or copyable config.",
   },
   {
     href: "#sdk-guide",
@@ -196,6 +196,11 @@ export const MCP_CLIENT_CONFIG_CODE = `{
     }
   }
 }`;
+
+export const MCP_INSTALL_COMMAND_CODE = `npx -y @rend-sdk/mcp`;
+
+export const MCP_CURSOR_INSTALL_URL =
+  "cursor://anysphere.cursor-deeplink/mcp/install?name=rend&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkByZW5kLXNkay9tY3AiXSwiZW52Ijp7IlJFTkRfQVBJX0tFWSI6InJlbmRfbGl2ZV8uLi4iLCJSRU5EX0FQSV9CQVNFX1VSTCI6Imh0dHBzOi8vYXBpLnJlbmQuc28iLCJSRU5EX1NJVEVfQkFTRV9VUkwiOiJodHRwczovL3JlbmQuc28ifX0%3D";
 
 export const MCP_LOCAL_CONFIG_CODE = `{
   "mcpServers": {
