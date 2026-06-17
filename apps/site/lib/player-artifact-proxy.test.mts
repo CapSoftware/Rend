@@ -31,6 +31,7 @@ test("rewritten manifest headers use transformed body length and drop range meta
   assert.equal(headers.get("cache-control"), "private, max-age=60, stale-while-revalidate=300");
   assert.equal(headers.get("content-type"), "application/vnd.apple.mpegurl");
   assert.equal(headers.get("x-rend-cache"), "HIT");
+  assert.equal(headers.get("timing-allow-origin"), "https://www.rend.so");
   assert.equal(headers.get("accept-ranges"), null);
   assert.equal(headers.get("content-range"), null);
 });
@@ -51,6 +52,7 @@ test("streamed artifact headers preserve upstream length and range metadata", ()
   assert.equal(headers.get("content-range"), "bytes 0-1233/1234");
   assert.equal(headers.get("content-type"), "video/mp2t");
   assert.equal(headers.get("x-rend-cache"), "MISS");
+  assert.equal(headers.get("timing-allow-origin"), null);
 });
 
 test("versioned public playback artifacts use private immutable browser caching", () => {
@@ -81,6 +83,10 @@ test("versioned public playback artifacts use private immutable browser caching"
   assert.equal(segmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(variantSegmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(failedHeaders.get("cache-control"), "no-store");
+  assert.equal(segmentHeaders.get("timing-allow-origin"), "https://www.rend.so");
+  assert.equal(variantSegmentHeaders.get("timing-allow-origin"), "https://www.rend.so");
+  assert.equal(openerHeaders.get("timing-allow-origin"), null);
+  assert.equal(thumbnailHeaders.get("timing-allow-origin"), null);
 });
 
 test("manifest fetches do not forward range requests because the body is rewritten", () => {
