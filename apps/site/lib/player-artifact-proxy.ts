@@ -20,10 +20,16 @@ type ArtifactResponseHeaderOptions = {
 
 const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL = "private, max-age=31536000, immutable";
 const PRIVATE_MANIFEST_CACHE_CONTROL = "private, max-age=60, stale-while-revalidate=300";
+const HLS_TIMING_ALLOW_ORIGIN = "https://www.rend.so";
 const HLS_VARIANT_MANIFEST_PATH_RE = /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/;
+const HLS_SEGMENT_PATH_RE = /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/;
 
 export function isHlsManifestArtifactPath(artifactPath: string | undefined) {
   return artifactPath === "hls/master.m3u8" || HLS_VARIANT_MANIFEST_PATH_RE.test(artifactPath ?? "");
+}
+
+function isHlsTimingArtifactPath(artifactPath: string | undefined) {
+  return isHlsManifestArtifactPath(artifactPath) || HLS_SEGMENT_PATH_RE.test(artifactPath ?? "");
 }
 
 function safeCookieValue(value: unknown) {
@@ -151,6 +157,9 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
   if (options.contentType) headers.set("content-type", options.contentType);
   if (options.rewrittenBody !== undefined) {
     headers.set("content-length", String(new TextEncoder().encode(options.rewrittenBody).byteLength));
+  }
+  if (isHlsTimingArtifactPath(options.artifactPath)) {
+    headers.set("timing-allow-origin", HLS_TIMING_ALLOW_ORIGIN);
   }
 
   return headers;
