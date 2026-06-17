@@ -386,6 +386,22 @@ export default function BenchmarksPage() {
             published.
           </p>
           <p className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[15px]">
+            <a
+              href={watchStartup.artifacts.machineReadableUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              /watch startup JSON
+            </a>
+            <a
+              href={watchStartup.artifacts.rawSamplesUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={linkClass}
+            >
+              /watch startup samples
+            </a>
             <a href={latest.artifacts.machineReadableUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
               US summary JSON
             </a>
