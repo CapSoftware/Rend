@@ -129,7 +129,7 @@ export type PlaybackAnalyticsResponse = {
   last_seen?: IsoTimestamp;
 };
 
-export type PlayerTelemetryPhase = "player_load" | "bootstrap_complete" | "source_selected" | "metadata_loaded" | "canplay" | "first_frame" | "bootstrap_failure" | "playback_failure";
+export type PlayerTelemetryPhase = "player_load" | "bootstrap_complete" | "source_selected" | "source_handoff" | "hls_ready" | "hls_level_switch" | "hls_fragment_loaded" | "metadata_loaded" | "canplay" | "first_frame" | "stall_start" | "stall_end" | "watch_heartbeat" | "bootstrap_failure" | "playback_failure" | "playback_ended";
 
 export type PlayerTelemetryEvent = {
   playback_session_id: string;
@@ -140,6 +140,20 @@ export type PlayerTelemetryEvent = {
   bootstrap_http_status?: number;
   selected_playback_mode?: "native_hls" | "hls_js" | "opener" | "primary";
   selected_artifact_path?: PlaybackArtifactPath;
+  previous_playback_mode?: "native_hls" | "hls_js" | "opener" | "primary";
+  previous_artifact_path?: PlaybackArtifactPath;
+  selected_width?: number;
+  selected_height?: number;
+  selected_bitrate?: number;
+  hls_level_index?: number;
+  hls_fragment_index?: number;
+  hls_fragment_duration_ms?: number;
+  hls_fragment_load_ms?: number;
+  stall_reason?: string;
+  stall_start_ms?: number;
+  stall_end_ms?: number;
+  stall_duration_ms?: number;
+  watch_delta_ms?: number;
   metadata_loaded_ms?: number;
   canplay_ms?: number;
   first_frame_ms?: number;
