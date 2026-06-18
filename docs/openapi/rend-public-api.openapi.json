@@ -862,11 +862,19 @@
           "player_load",
           "bootstrap_complete",
           "source_selected",
+          "source_handoff",
+          "hls_ready",
+          "hls_level_switch",
+          "hls_fragment_loaded",
           "metadata_loaded",
           "canplay",
           "first_frame",
+          "stall_start",
+          "stall_end",
+          "watch_heartbeat",
           "bootstrap_failure",
-          "playback_failure"
+          "playback_failure",
+          "playback_ended"
         ]
       },
       "PlayerTelemetryEvent": {
@@ -885,6 +893,23 @@
             "enum": ["native_hls", "hls_js", "opener", "primary"]
           },
           "selected_artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
+          "previous_playback_mode": {
+            "type": "string",
+            "enum": ["native_hls", "hls_js", "opener", "primary"]
+          },
+          "previous_artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
+          "selected_width": { "type": "integer", "minimum": 1 },
+          "selected_height": { "type": "integer", "minimum": 1 },
+          "selected_bitrate": { "type": "integer", "minimum": 1 },
+          "hls_level_index": { "type": "integer", "minimum": 0 },
+          "hls_fragment_index": { "type": "integer", "minimum": 0 },
+          "hls_fragment_duration_ms": { "type": "integer", "minimum": 0 },
+          "hls_fragment_load_ms": { "type": "integer", "minimum": 0 },
+          "stall_reason": { "type": "string", "maxLength": 80 },
+          "stall_start_ms": { "type": "integer", "minimum": 0 },
+          "stall_end_ms": { "type": "integer", "minimum": 0 },
+          "stall_duration_ms": { "type": "integer", "minimum": 0 },
+          "watch_delta_ms": { "type": "integer", "minimum": 0 },
           "metadata_loaded_ms": { "type": "integer", "minimum": 0 },
           "canplay_ms": { "type": "integer", "minimum": 0 },
           "first_frame_ms": { "type": "integer", "minimum": 0 },
