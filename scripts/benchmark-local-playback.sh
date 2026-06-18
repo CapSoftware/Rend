@@ -1246,7 +1246,9 @@ docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null
 docker compose exec -T redis redis-cli ping >/dev/null
 docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null
 curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null
-docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery <"$root_dir/clickhouse/001_playback_events.sql"
+for schema in "$root_dir"/clickhouse/*.sql; do
+  docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery <"$schema"
+done
 
 mkdir -p "$root_dir/.rend" "$REND_EDGE_CACHE_DIR" "$REND_EDGE_TELEMETRY_SPOOL_DIR" "$(dirname "$output_path")"
 cargo build -p rend-api -p rend-edge >/dev/null
