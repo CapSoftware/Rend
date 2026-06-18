@@ -1,5 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
+  clearDashboardAuthHintCookieHeader,
+  dashboardAuthHintCookieHeader,
+  hasDashboardAuthHint,
+  hasDashboardSessionCookie,
+  requestUsesSecureCookies,
+} from "./lib/dashboard-auth-hint.ts";
+import {
   WATCH_BOOTSTRAP_HEADER,
   WATCH_BOOTSTRAP_MS_HEADER,
   encodeWatchBootstrapHeader,
@@ -74,16 +81,30 @@ function setCookieHeaders(headers: Headers) {
   return value ? [value] : [];
 }
 
+function dashboardAuthHintSetCookie(request: NextRequest) {
+  const cookieHeader = request.headers.get("cookie");
+  const hasHint = hasDashboardAuthHint(cookieHeader);
+  const hasSessionCookie = hasDashboardSessionCookie(cookieHeader);
+  const secure = requestUsesSecureCookies(request);
+
+  if (hasSessionCookie && !hasHint) return dashboardAuthHintCookieHeader({ secure });
+  if (!hasSessionCookie && hasHint) return clearDashboardAuthHintCookieHeader({ secure });
+  return null;
+}
+
 export async function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
+  const dashboardSetCookie = dashboardAuthHintSetCookie(request);
 
   const assetId = watchAssetId(request.nextUrl.pathname);
   if (!assetId) {
-    return NextResponse.next({
+    const response = NextResponse.next({
       request: {
         headers: requestHeaders,
       },
     });
+    if (dashboardSetCookie) response.headers.append("set-cookie", dashboardSetCookie);
+    return response;
   }
 
   const startedAt = Date.now();
@@ -97,6 +118,7 @@ export async function proxy(request: NextRequest) {
   }).catch(() => null);
 
   const responseHeaders = new Headers();
+  if (dashboardSetCookie) responseHeaders.append("set-cookie", dashboardSetCookie);
   if (!bootstrapResponse) {
     const response = NextResponse.next({
       request: {
@@ -131,5 +153,8 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/watch/:path*"],
+  matcher: [
+    "/watch/:path*",
+    "/((?!api|dashboard|operator|watch|_next/static|_next/image|.*\\..*).*)",
+  ],
 };
