@@ -48,13 +48,18 @@ async function seedLocalAuthOnce() {
     })
     .returning({ id: user.id });
 
+  const seededMetadata = {
+    seeded: "local",
+    onboarding: { completed_at: now.toISOString(), source: "local_seed" },
+  };
+
   await db
     .insert(organization)
     .values({
       id: LOCAL_ORG_ID,
       name: "Rend Local",
       slug: "local",
-      metadata: { seeded: "local" },
+      metadata: seededMetadata,
       created_at: now,
       updated_at: now,
     })
@@ -63,6 +68,7 @@ async function seedLocalAuthOnce() {
       set: {
         name: "Rend Local",
         slug: "local",
+        metadata: seededMetadata,
         updated_at: now,
       },
     });

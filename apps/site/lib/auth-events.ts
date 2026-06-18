@@ -16,6 +16,8 @@ export type AuthEventName =
   | "org_provisioning_started"
   | "org_provisioning_completed"
   | "org_provisioning_failed"
+  | "onboarding_completed"
+  | "onboarding_failed"
   | "autumn_customer_sync_started"
   | "autumn_customer_sync_completed"
   | "autumn_customer_sync_failed";
