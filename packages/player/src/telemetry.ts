@@ -18,8 +18,10 @@ export type RendPlayerTelemetryPhase =
   | "first_frame"
   | "stall_start"
   | "stall_end"
+  | "watch_heartbeat"
   | "bootstrap_failure"
-  | "playback_failure";
+  | "playback_failure"
+  | "playback_ended";
 
 export type RendPlayerTelemetryEvent = {
   playback_session_id: string;
@@ -45,6 +47,7 @@ export type RendPlayerTelemetryEvent = {
   stall_start_ms?: number;
   stall_end_ms?: number;
   stall_duration_ms?: number;
+  watch_delta_ms?: number;
   metadata_loaded_ms?: number;
   canplay_ms?: number;
   first_frame_ms?: number;
@@ -186,6 +189,7 @@ function telemetryDedupeKey(event: RendPlayerTelemetryEvent) {
     "first_frame",
     "bootstrap_failure",
     "playback_failure",
+    "playback_ended",
   ]);
 
   if (!oncePhases.has(event.phase) && event.phase !== "stall_start" && event.phase !== "stall_end") {
