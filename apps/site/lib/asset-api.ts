@@ -1,4 +1,6 @@
 import type {
+  AnalyticsAssetSummary,
+  AnalyticsOverview,
   AssetArtifact,
   AssetDetail,
   AssetListResponse,
@@ -7,6 +9,7 @@ import type {
   AssetErrorResponse,
   AssetPlaybackAnalytics,
   AssetUploadResponse,
+  AnalyticsTimeSeriesPoint,
 } from "./asset-types.ts";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
@@ -476,6 +479,140 @@ function sanitizeAnalytics(value: unknown): AssetPlaybackAnalytics | null {
   };
 }
 
+function safeOptionalRatio(value: unknown) {
+  const number = safeNumber(value);
+  if (number === undefined || number < 0 || number > 1) return undefined;
+  return number;
+}
+
+function safeOptionalMetric(value: unknown) {
+  const number = safeNumber(value);
+  if (number === undefined || number < 0) return undefined;
+  return number;
+}
+
+function sanitizeTimeSeriesPoint(value: unknown): AnalyticsTimeSeriesPoint | null {
+  if (!isRecord(value)) return null;
+  const bucketStart = safeTimestamp(value.bucket_start);
+  const views = safeOptionalPositiveInteger(value.views);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const requestCount = safeOptionalPositiveInteger(value.request_count);
+  const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
+  if (
+    !bucketStart ||
+    views === undefined ||
+    watchTimeMs === undefined ||
+    requestCount === undefined ||
+    bytesServed === undefined
+  ) {
+    return null;
+  }
+  return {
+    bucket_start: bucketStart,
+    views,
+    watch_time_ms: watchTimeMs,
+    request_count: requestCount,
+    bytes_served: bytesServed,
+  };
+}
+
+function sanitizeAnalyticsAsset(value: unknown): AnalyticsAssetSummary | null {
+  if (!isRecord(value)) return null;
+  const assetId = safeAssetId(value.asset_id);
+  const views = safeOptionalPositiveInteger(value.views);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const requestCount = safeOptionalPositiveInteger(value.request_count);
+  const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
+  if (
+    !assetId ||
+    views === undefined ||
+    watchTimeMs === undefined ||
+    requestCount === undefined ||
+    bytesServed === undefined
+  ) {
+    return null;
+  }
+  return {
+    asset_id: assetId,
+    views,
+    watch_time_ms: watchTimeMs,
+    request_count: requestCount,
+    bytes_served: bytesServed,
+  };
+}
+
+function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
+  if (!isRecord(value)) return null;
+  const windowStartedAt = safeTimestamp(value.window_started_at);
+  const windowEndedAt = safeTimestamp(value.window_ended_at);
+  const views = safeOptionalPositiveInteger(value.views);
+  const sessions = safeOptionalPositiveInteger(value.sessions);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const startupSuccessRate = safeOptionalRatio(value.startup_success_rate);
+  const rebufferRatio = safeOptionalRatio(value.rebuffer_ratio);
+  const stalledSessions = safeOptionalPositiveInteger(value.stalled_sessions);
+  const stallCount = safeOptionalPositiveInteger(value.stall_count);
+  const stallDurationMs = safeOptionalPositiveInteger(value.stall_duration_ms);
+  const playbackFailures = safeOptionalPositiveInteger(value.playback_failures);
+  const requestCount = safeOptionalPositiveInteger(value.request_count);
+  const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
+  const cacheHitRate = safeOptionalRatio(value.cache_hit_rate);
+  const errorRate = safeOptionalRatio(value.error_rate);
+  if (
+    !windowStartedAt ||
+    !windowEndedAt ||
+    views === undefined ||
+    sessions === undefined ||
+    watchTimeMs === undefined ||
+    startupSuccessRate === undefined ||
+    rebufferRatio === undefined ||
+    stalledSessions === undefined ||
+    stallCount === undefined ||
+    stallDurationMs === undefined ||
+    playbackFailures === undefined ||
+    requestCount === undefined ||
+    bytesServed === undefined ||
+    cacheHitRate === undefined ||
+    errorRate === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    window_started_at: windowStartedAt,
+    window_ended_at: windowEndedAt,
+    views,
+    sessions,
+    watch_time_ms: watchTimeMs,
+    startup_success_rate: startupSuccessRate,
+    startup_p50_ms: safeOptionalMetric(value.startup_p50_ms),
+    startup_p95_ms: safeOptionalMetric(value.startup_p95_ms),
+    rebuffer_ratio: rebufferRatio,
+    stalled_sessions: stalledSessions,
+    stall_count: stallCount,
+    stall_duration_ms: stallDurationMs,
+    playback_failures: playbackFailures,
+    request_count: requestCount,
+    bytes_served: bytesServed,
+    cache_hit_rate: cacheHitRate,
+    error_rate: errorRate,
+    request_p50_ms: safeOptionalMetric(value.request_p50_ms),
+    request_p95_ms: safeOptionalMetric(value.request_p95_ms),
+    timeseries: Array.isArray(value.timeseries)
+      ? value.timeseries.flatMap((point) => {
+          const safePoint = sanitizeTimeSeriesPoint(point);
+          return safePoint ? [safePoint] : [];
+        })
+      : [],
+    top_assets: Array.isArray(value.top_assets)
+      ? value.top_assets.flatMap((asset) => {
+          const safeAsset = sanitizeAnalyticsAsset(asset);
+          return safeAsset ? [safeAsset] : [];
+        })
+      : [],
+  };
+}
+
 export async function listAssets(
   auth: AssetApiAuthContext,
   limit = 50
@@ -570,6 +707,28 @@ export async function fetchAssetPlaybackAnalytics(
   );
   const data = await readUpstreamJson(upstream);
   const analytics = sanitizeAnalytics(data);
+  if (!analytics) {
+    throw new AssetApiError(502, {
+      status: "error",
+      error: "rend_api_invalid_response",
+      message: "Rend API returned invalid analytics",
+    });
+  }
+
+  return analytics;
+}
+
+export async function fetchAnalyticsOverview(
+  auth: AssetApiAuthContext,
+  windowSeconds = 24 * 60 * 60
+): Promise<AnalyticsOverview> {
+  const boundedWindow = Math.min(Math.max(Math.trunc(windowSeconds) || 24 * 60 * 60, 60), 90 * 24 * 60 * 60);
+  const upstream = await controlPlaneFetch(
+    auth,
+    `/v1/analytics/overview?window_seconds=${boundedWindow}`
+  );
+  const data = await readUpstreamJson(upstream);
+  const analytics = sanitizeAnalyticsOverview(data);
   if (!analytics) {
     throw new AssetApiError(502, {
       status: "error",
