@@ -156,11 +156,13 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        clickhouse-client \
-          --host clickhouse \
-          --user "$$CLICKHOUSE_USER" \
-          --password "$$CLICKHOUSE_PASSWORD" \
-          --multiquery < /schema/001_playback_events.sql
+        for schema in /schema/*.sql; do
+          clickhouse-client \
+            --host clickhouse \
+            --user "$$CLICKHOUSE_USER" \
+            --password "$$CLICKHOUSE_PASSWORD" \
+            --multiquery < "$$schema"
+        done
     restart: "no"
 
   minio:
