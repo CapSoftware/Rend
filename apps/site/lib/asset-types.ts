@@ -54,6 +54,51 @@ export type AssetPlaybackAnalytics = {
   last_seen?: string;
 };
 
+export type AnalyticsTimeSeriesPoint = {
+  bucket_start: string;
+  views: number;
+  watch_time_ms: number;
+  request_count: number;
+  bytes_served: number;
+};
+
+export type AnalyticsAssetSummary = {
+  asset_id: string;
+  views: number;
+  watch_time_ms: number;
+  request_count: number;
+  bytes_served: number;
+};
+
+export type AnalyticsOverview = {
+  window_started_at: string;
+  window_ended_at: string;
+  views: number;
+  sessions: number;
+  watch_time_ms: number;
+  startup_success_rate: number;
+  startup_p50_ms?: number;
+  startup_p95_ms?: number;
+  rebuffer_ratio: number;
+  stalled_sessions: number;
+  stall_count: number;
+  stall_duration_ms: number;
+  playback_failures: number;
+  request_count: number;
+  bytes_served: number;
+  cache_hit_rate: number;
+  error_rate: number;
+  request_p50_ms?: number;
+  request_p95_ms?: number;
+  timeseries: AnalyticsTimeSeriesPoint[];
+  top_assets: AnalyticsAssetSummary[];
+};
+
+export type AnalyticsOverviewResponse = {
+  status: "ok";
+  analytics: AnalyticsOverview;
+};
+
 export type AssetPlayerTelemetryEvent = {
   playback_session_id: string;
   asset_id: string;
@@ -64,6 +109,8 @@ export type AssetPlayerTelemetryEvent = {
   bootstrap_http_status?: number;
   selected_playback_mode?: string;
   selected_artifact_path?: string;
+  stall_duration_ms?: number;
+  watch_delta_ms?: number;
   metadata_loaded_ms?: number;
   canplay_ms?: number;
   first_frame_ms?: number;
