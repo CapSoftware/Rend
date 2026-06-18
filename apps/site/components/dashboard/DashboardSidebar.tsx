@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, CreditCard, Film, KeyRound, Mail, type LucideIcon } from "lucide-react";
+import { BarChart3, BookOpen, CreditCard, Film, KeyRound, Mail, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/components/ui/cn";
@@ -20,6 +20,7 @@ type NavItem = { label: string; href: string; icon: LucideIcon };
 
 const workspaceNav: NavItem[] = [
   { label: "Assets", href: "/dashboard/assets", icon: Film },
+  { label: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
   { label: "API keys", href: "/dashboard/api-keys", icon: KeyRound },
   { label: "Billing", href: "/dashboard/billing", icon: CreditCard },
 ];
