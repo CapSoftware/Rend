@@ -5,6 +5,11 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { cn } from "@/components/ui/cn";
+import {
+  DASHBOARD_HOME_HREF,
+  DASHBOARD_START_HREF,
+  hasDashboardAuthHint,
+} from "@/lib/dashboard-auth-hint";
 
 type NavLink = { label: string; href: string; external?: boolean };
 
@@ -17,7 +22,7 @@ const defaultNav: NavLink[] = [
   { label: "GitHub", href: "https://github.com/CapSoftware/Rend", external: true },
 ];
 
-const defaultCta = { label: "Get started", href: "/login?next=%2Fdashboard%2Fassets" };
+const defaultCta = { label: "Get started", href: DASHBOARD_START_HREF };
 
 function NavAnchor({
   link,
@@ -56,6 +61,9 @@ export function SiteHeader({
 }) {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const [dashboardHint, setDashboardHint] = useState(false);
+
+  const resolvedCta = dashboardHint ? { label: "Dashboard", href: DASHBOARD_HOME_HREF } : cta;
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -72,6 +80,21 @@ export function SiteHeader({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
+
+  useEffect(() => {
+    const refreshDashboardHint = () => setDashboardHint(hasDashboardAuthHint(document.cookie));
+    const onVisibilityChange = () => {
+      if (!document.hidden) refreshDashboardHint();
+    };
+
+    refreshDashboardHint();
+    window.addEventListener("focus", refreshDashboardHint);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refreshDashboardHint);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   return (
     <header
@@ -106,8 +129,8 @@ export function SiteHeader({
 
         <div className="flex items-center gap-2.5">
           {children}
-          <Button href={cta.href} size="sm" className="hidden sm:inline-flex">
-            {cta.label}
+          <Button href={resolvedCta.href} size="sm" className="hidden sm:inline-flex">
+            {resolvedCta.label}
           </Button>
           <button
             type="button"
@@ -138,8 +161,8 @@ export function SiteHeader({
                 </div>
               ))}
               <div className="p-2 pt-3">
-                <Button href={cta.href} size="md" className="w-full" onClick={() => setOpen(false)}>
-                  {cta.label}
+                <Button href={resolvedCta.href} size="md" className="w-full" onClick={() => setOpen(false)}>
+                  {resolvedCta.label}
                 </Button>
               </div>
             </nav>

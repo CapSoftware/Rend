@@ -6,7 +6,9 @@
  * drift apart. Keep copy plain and human, and never use em dashes (AGENTS.md).
  */
 
-export const START_HREF = "/login?next=%2Fdashboard%2Fassets";
+import { DASHBOARD_START_HREF } from "./dashboard-auth-hint";
+
+export const START_HREF = DASHBOARD_START_HREF;
 export const GITHUB_URL = "https://github.com/CapSoftware/Rend";
 
 export type MarketingFaq = { q: string; a: string };
