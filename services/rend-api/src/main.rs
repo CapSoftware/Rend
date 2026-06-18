@@ -966,6 +966,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
         .route("/v1/events", get(get_event_stream))
+        .route(
+            "/v1/analytics/overview",
+            get(telemetry::get_analytics_overview),
+        )
         .route("/v1/assets", get(list_assets))
         .route(
             "/v1/assets/{asset_id}",
@@ -983,6 +987,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         ));
     let telemetry_routes = Router::new()
         .route("/playback", post(telemetry::post_playback_telemetry))
+        .route("/player", post(telemetry::post_player_telemetry))
         .route_layer(DefaultBodyLimit::max(
             state.config.playback_telemetry.max_body_bytes,
         ))
@@ -2209,7 +2214,10 @@ async fn asset_row_exists(
     Ok(exists)
 }
 
-async fn ensure_org_not_suspended(db: &PgPool, organization_id: &str) -> Result<(), AppError> {
+pub(crate) async fn ensure_org_not_suspended(
+    db: &PgPool,
+    organization_id: &str,
+) -> Result<(), AppError> {
     let organization_id = normalize_org_id(organization_id)?;
     let suspended: Option<bool> = sqlx::query_scalar(
         "
