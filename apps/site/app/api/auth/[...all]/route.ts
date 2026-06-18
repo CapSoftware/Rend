@@ -9,6 +9,11 @@ import {
 import { ensureLocalAuthSeed } from "../../../../lib/auth-seed.ts";
 import { getAuth } from "../../../../lib/auth.ts";
 import {
+  clearDashboardAuthHintCookieHeader,
+  dashboardAuthHintCookieHeader,
+  requestUsesSecureCookies,
+} from "../../../../lib/dashboard-auth-hint.ts";
+import {
   legalAssentAccepted,
   legalAssentCookieHeader,
   legalAssentRequiredResponse,
@@ -35,12 +40,20 @@ function isOtpSendRequest(request: Request) {
   return new URL(request.url).pathname.endsWith("/email-otp/send-verification-otp");
 }
 
+function isOtpSignInRequest(request: Request) {
+  return new URL(request.url).pathname.endsWith("/sign-in/email-otp");
+}
+
 function isOtpVerificationRequest(request: Request) {
   const pathname = new URL(request.url).pathname;
   return (
     pathname.endsWith("/sign-in/email-otp") ||
     pathname.endsWith("/email-otp/check-verification-otp")
   );
+}
+
+function isSignOutRequest(request: Request) {
+  return new URL(request.url).pathname.endsWith("/sign-out");
 }
 
 function authRouteTimeoutMs() {
@@ -194,6 +207,16 @@ async function parseAuthJson(request: Request) {
   return isRecord(payload) ? payload : null;
 }
 
+function responseWithSetCookie(response: Response, setCookie: string) {
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", setCookie);
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
 export const GET = authHandlers.GET;
 
 export async function POST(request: Request) {
@@ -224,6 +247,12 @@ export async function POST(request: Request) {
         ...authEmailSummary(normalizedEmail),
         path: new URL(request.url).pathname,
       });
+      if (isOtpSignInRequest(request)) {
+        return responseWithSetCookie(
+          response,
+          dashboardAuthHintCookieHeader({ secure: requestUsesSecureCookies(request) })
+        );
+      }
     } else {
       logAuthEvent(
         "otp_verification_failed",
@@ -238,7 +267,16 @@ export async function POST(request: Request) {
     return response;
   }
 
-  if (!isOtpSendRequest(request)) return callAuthPost(request, requestContext(request));
+  if (!isOtpSendRequest(request)) {
+    const response = await callAuthPost(request, requestContext(request));
+    if (response.ok && isSignOutRequest(request)) {
+      return responseWithSetCookie(
+        response,
+        clearDashboardAuthHintCookieHeader({ secure: requestUsesSecureCookies(request) })
+      );
+    }
+    return response;
+  }
 
   const payload = await parseAuthJson(request);
   if (!isRecord(payload) || !legalAssentAccepted(payload) || typeof payload.email !== "string") {
