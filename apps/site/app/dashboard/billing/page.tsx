@@ -1,29 +1,19 @@
 import type { Metadata } from "next";
 import { Wallet } from "lucide-react";
-import Link from "next/link";
 import {
   billingFeatureIds,
   billingOverview,
   billingReadinessFromOverview,
   type BillingBalance,
+  type BillingOverview,
 } from "../../../lib/billing.ts";
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
 import { LEGAL_ASSENT_VERSION } from "../../../lib/legal-assent-constants.ts";
+import BillingPlansClient from "@/components/BillingPlansClient";
 import { Button } from "@/components/ui/Button";
-import {
-  Callout,
-  DashboardContent,
-  Panel,
-  StatusBadge,
-  SubHeader,
-  TBody,
-  TD,
-  TH,
-  THead,
-  TR,
-  Table,
-} from "@/components/dashboard";
+import { cn } from "@/components/ui/cn";
+import { Callout, DashboardContent, SubHeader } from "@/components/dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -35,43 +25,150 @@ export const metadata: Metadata = {
   },
 };
 
+const USAGE_CREDITS_FEATURE_ID = (process.env.REND_BILLING_FEATURE_USAGE_CREDITS || "rend_usage_credits").trim();
+
 type BillingPageProps = {
   searchParams?: Promise<{ billing_error?: string | string[] }>;
 };
 
+type UsageRow = {
+  featureId: string;
+  tierLabel: string;
+  balance: BillingBalance;
+};
+
 function formatNumber(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value)) return "-";
-  return new Intl.NumberFormat("en-US").format(value);
+  return new Intl.NumberFormat("en-US").format(Math.round(value));
 }
 
-function formatTimestamp(value: string | undefined) {
-  if (!value) return "-";
+function formatDate(value: string | undefined) {
+  if (!value) return undefined;
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
-function displayBalanceValue(balance: BillingBalance) {
-  if (balance.unlimited) return "Unlimited";
-  if (balance.remaining !== undefined && balance.granted !== undefined) {
-    return `${formatNumber(balance.remaining)} / ${formatNumber(balance.granted)}`;
-  }
-  if (balance.usage !== undefined) return formatNumber(balance.usage);
-  return "-";
+function humanizeFeature(featureId: string) {
+  const base = featureId.replace(/^rend[_-]/i, "").replace(/[_-]+/g, " ").trim();
+  return base ? base.charAt(0).toUpperCase() + base.slice(1) : featureId;
 }
 
 function balanceLabel(featureId: string) {
   const features = billingFeatureIds();
-  if (featureId === features.delivery720p) return "Delivery 720p seconds";
-  if (featureId === features.delivery1080p) return "Delivery 1080p seconds";
-  if (featureId === features.delivery2k) return "Delivery 2K seconds";
-  if (featureId === features.delivery4k) return "Delivery 4K seconds";
-  if (featureId === features.storage720p) return "Storage 720p second-months";
-  if (featureId === features.storage1080p) return "Storage 1080p second-months";
-  if (featureId === features.storage2k) return "Storage 2K second-months";
-  if (featureId === features.storage4k) return "Storage 4K second-months";
-  return featureId;
+  if (featureId === features.delivery720p) return "720p";
+  if (featureId === features.delivery1080p) return "1080p";
+  if (featureId === features.delivery2k) return "2K";
+  if (featureId === features.delivery4k) return "4K";
+  if (featureId === features.storage720p) return "720p";
+  if (featureId === features.storage1080p) return "1080p";
+  if (featureId === features.storage2k) return "2K";
+  if (featureId === features.storage4k) return "4K";
+  return humanizeFeature(featureId);
+}
+
+function groupUsage(balances: BillingBalance[]) {
+  const features = billingFeatureIds();
+  const order: [string, "delivery" | "storage", string][] = [
+    [features.delivery720p, "delivery", "720p"],
+    [features.delivery1080p, "delivery", "1080p"],
+    [features.delivery2k, "delivery", "2K"],
+    [features.delivery4k, "delivery", "4K"],
+    [features.storage720p, "storage", "720p"],
+    [features.storage1080p, "storage", "1080p"],
+    [features.storage2k, "storage", "2K"],
+    [features.storage4k, "storage", "4K"],
+  ];
+  const byId = new Map(balances.map((balance) => [balance.featureId, balance]));
+  const used = new Set<string>();
+  const delivery: UsageRow[] = [];
+  const storage: UsageRow[] = [];
+  for (const [id, kind, tierLabel] of order) {
+    const balance = byId.get(id);
+    if (!balance) continue;
+    used.add(id);
+    (kind === "delivery" ? delivery : storage).push({ featureId: id, tierLabel, balance });
+  }
+  const other: UsageRow[] = balances
+    .filter((balance) => !used.has(balance.featureId))
+    .map((balance) => ({ featureId: balance.featureId, tierLabel: balanceLabel(balance.featureId), balance }));
+  return { delivery, storage, other };
+}
+
+function usedValue(balance: BillingBalance) {
+  if (balance.usage !== undefined) return balance.usage;
+  if (balance.granted !== undefined && balance.remaining !== undefined) {
+    return Math.max(0, balance.granted - balance.remaining);
+  }
+  return undefined;
+}
+
+function displayBalanceValue(balance: BillingBalance) {
+  if (balance.remaining !== undefined && balance.granted !== undefined && !balance.unlimited) {
+    return `${formatNumber(balance.remaining)} left of ${formatNumber(balance.granted)}`;
+  }
+  const used = usedValue(balance);
+  if (balance.unlimited) {
+    return used !== undefined && used > 0 ? `${formatNumber(used)} used` : "Unlimited";
+  }
+  return used === undefined ? "-" : `${formatNumber(used)} used`;
+}
+
+function meterFor(balance: BillingBalance) {
+  const granted = balance.granted;
+  const hasMeter = !balance.unlimited && granted !== undefined && granted > 0;
+  const used = usedValue(balance) ?? 0;
+  const pct = hasMeter ? Math.min(100, Math.max(0, (used / granted) * 100)) : 0;
+  const exhausted = balance.remaining !== undefined && balance.remaining <= 0 && !balance.unlimited;
+  const barColor = exhausted ? "bg-[#b54033]" : pct >= 85 ? "bg-[#c79a2e]" : "bg-ink";
+  return { hasMeter, pct, exhausted, barColor };
+}
+
+function Meter({ balance, className }: { balance: BillingBalance; className?: string }) {
+  const { hasMeter, pct, barColor } = meterFor(balance);
+  if (!hasMeter) return null;
+  return (
+    <div className={cn("h-1.5 overflow-hidden rounded-full bg-bg-sunken", className)}>
+      <div className={cn("h-full rounded-full", barColor)} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function UsageRowLine({ row }: { row: UsageRow }) {
+  const { exhausted } = meterFor(row.balance);
+  const value = displayBalanceValue(row.balance);
+  const reset = formatDate(row.balance.nextResetAt);
+  return (
+    <div className="border-b border-line-soft py-3 first:pt-0 last:border-0 last:pb-0">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[13.5px] text-ink">{row.tierLabel}</span>
+        <span
+          className={cn(
+            "font-mono text-[12px] tabular-nums",
+            value === "Unlimited" ? "text-faint" : exhausted ? "text-[#9a2b22]" : "text-ink-soft",
+          )}
+        >
+          {value}
+        </span>
+      </div>
+      <Meter balance={row.balance} className="mt-2" />
+      {reset ? <p className="mt-1.5 text-[11px] text-faint">Resets {reset}</p> : null}
+    </div>
+  );
+}
+
+function UsageGroup({ title, caption, rows, className }: { title: string; caption: string; rows: UsageRow[]; className?: string }) {
+  return (
+    <div className={className}>
+      <h3 className="font-head text-[17px] leading-none text-ink">{title}</h3>
+      <p className="mt-1.5 text-[12.5px] text-muted">{caption}</p>
+      <div className="mt-4 flex flex-col">
+        {rows.map((row) => (
+          <UsageRowLine key={row.featureId} row={row} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function firstParam(value: string | string[] | undefined) {
@@ -101,6 +198,19 @@ function billingActionErrorMessage(code: string | undefined) {
   return "Plan activation could not be started. Check billing configuration and try again.";
 }
 
+function planNote(billing: BillingOverview) {
+  if (billing.status !== "ok") {
+    return "Showing your last saved billing state while sync catches up.";
+  }
+  if (billing.mode === "local") {
+    return "Local mode is on, so uploads and API keys work without a paid plan.";
+  }
+  const active = billing.subscriptions.find((subscription) => subscription.status.toLowerCase() === "active");
+  const renews = formatDate(active?.currentPeriodEnd);
+  if (renews) return `Renews on ${renews}. You only pay for what you deliver and store.`;
+  return "You only pay for what you deliver and store, with no lock-in.";
+}
+
 export default async function BillingPage({ searchParams }: BillingPageProps) {
   const access = await requireDashboardAccess("/dashboard/billing");
   const params = searchParams ? await searchParams : {};
@@ -108,6 +218,14 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
   const billing = await billingOverview(access);
   const dashboardState = dashboardStateFromBilling(billingReadinessFromOverview(billing));
   const returnUrl = "/dashboard/billing";
+
+  const activePlan = billing.plans.find((plan) => plan.relationshipStatus === "active");
+  const currentPlanName = activePlan?.name ?? billing.currentPlanLabel;
+  const credits = billing.balances.find((balance) => balance.featureId === USAGE_CREDITS_FEATURE_ID);
+  const usage = groupUsage(billing.balances.filter((balance) => balance.featureId !== USAGE_CREDITS_FEATURE_ID));
+  const hasBreakdown = usage.delivery.length > 0 || usage.storage.length > 0 || usage.other.length > 0;
+  const healthy = billing.status === "ok";
+  const statusLabel = !healthy ? "Sync issue" : billing.mode === "local" ? "Local mode" : "Active";
 
   return (
     <>
@@ -117,13 +235,7 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
         actions={
           <form action="/api/billing/portal" method="post">
             <input name="return_url" type="hidden" value={returnUrl} />
-            <Button
-              type="submit"
-              variant="secondary"
-              size="sm"
-              className="rounded-md"
-              disabled={!billing.manageBillingEnabled}
-            >
+            <Button type="submit" variant="secondary" size="sm" disabled={!billing.manageBillingEnabled}>
               <Wallet className="size-4" />
               <span className="hidden sm:inline">Manage billing</span>
               <span className="sm:hidden">Manage</span>
@@ -133,159 +245,103 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
       />
 
       <DashboardContent>
-      <div className="mb-5 flex flex-col gap-3 empty:hidden">
-        {billing.error ? <Callout tone="danger">{billing.error}</Callout> : null}
-        {billingActionError ? <Callout tone="danger">{billingActionError}</Callout> : null}
-        {dashboardState.status !== "ready_to_upload" ? (
-          <Callout
-            tone={dashboardState.status === "billing_unavailable" ? "danger" : "warn"}
-            title={dashboardState.title}
-          >
-            {dashboardState.message}
-          </Callout>
-        ) : null}
-      </div>
+        <div className="mb-6 flex flex-col gap-3 empty:hidden">
+          {billing.error ? <Callout tone="danger">{billing.error}</Callout> : null}
+          {billingActionError ? <Callout tone="danger">{billingActionError}</Callout> : null}
+          {dashboardState.status !== "ready_to_upload" ? (
+            <Callout
+              tone={dashboardState.status === "billing_unavailable" ? "danger" : "warn"}
+              title={dashboardState.title}
+            >
+              {dashboardState.message}
+            </Callout>
+          ) : null}
+        </div>
 
-      <div className="mb-5 grid gap-5 lg:grid-cols-2">
-        <Panel
-          title="Plan"
-          actions={
-            <StatusBadge tone={billing.status === "ok" ? "success" : "danger"}>
-              {billing.mode.charAt(0).toUpperCase() + billing.mode.slice(1)}
-            </StatusBadge>
-          }
-        >
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-4">
-            <div className="col-span-2">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Customer</dt>
-              <dd className="mt-1.5 break-all font-mono text-[12.5px] text-ink-soft">{billing.customerId}</dd>
+        {/* Current plan */}
+        <section className="animate-rise rounded-[18px] border border-line bg-card p-6 sm:p-7">
+          <div className="flex flex-col gap-7 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              <p className="text-[13px] text-muted">Your plan</p>
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+                <h2 className="font-head text-[clamp(26px,4vw,32px)] leading-none text-ink">{currentPlanName}</h2>
+                <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
+                  <span className={cn("size-1.5 rounded-full", healthy ? "bg-live" : "bg-[#c79a2e]")} />
+                  {statusLabel}
+                </span>
+              </div>
+              <p className="mt-3 max-w-[460px] text-[13.5px] leading-[1.55] text-muted">{planNote(billing)}</p>
             </div>
-            <div>
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Current plan</dt>
-              <dd className="mt-1.5 text-[13.5px] font-medium text-ink">{billing.currentPlanLabel}</dd>
-            </div>
-            <div>
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Billing sync</dt>
-              <dd className="mt-1.5 text-[13.5px] text-ink-soft">{billing.status}</dd>
-            </div>
-            <div className="col-span-2">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Last sync</dt>
-              <dd className="mt-1.5 font-mono text-[12.5px] text-ink-soft">{formatTimestamp(billing.syncedAt)}</dd>
-            </div>
-          </dl>
-        </Panel>
 
-        <Panel title="Usage" flush={billing.balances.length > 0} bodyClassName={billing.balances.length > 0 ? undefined : "p-4 sm:p-5"}>
-          {billing.balances.length === 0 ? (
-            <p className="text-[13.5px] text-muted">No billing balances are available.</p>
-          ) : (
-            <Table>
-              <THead>
-                <TR>
-                  <TH>Feature</TH>
-                  <TH className="text-right">Balance</TH>
-                  <TH className="text-right">Usage</TH>
-                  <TH className="hidden text-right sm:table-cell">Reset</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {billing.balances.map((balance) => (
-                  <TR key={balance.featureId}>
-                    <TD className="text-ink">{balanceLabel(balance.featureId)}</TD>
-                    <TD className="text-right font-mono text-[12px] tabular-nums text-ink-soft">
-                      {displayBalanceValue(balance)}
-                    </TD>
-                    <TD className="text-right font-mono text-[12px] tabular-nums text-muted">
-                      {formatNumber(balance.usage)}
-                    </TD>
-                    <TD className="hidden text-right font-mono text-[12px] text-muted sm:table-cell">
-                      {formatTimestamp(balance.nextResetAt)}
-                    </TD>
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          )}
-        </Panel>
-      </div>
-
-      <Panel title="Plans">
-        {billing.plans.length === 0 ? (
-          <p className="text-[13.5px] text-muted">No plans are available.</p>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {billing.plans.map((plan) => {
-              const actionDisabled =
-                !billing.checkoutEnabled ||
-                plan.attachAction === "none" ||
-                plan.relationshipStatus === "active";
-              const assentId = `billing-assent-${plan.id}`;
-              const isCurrent = plan.relationshipStatus === "active";
-
-              return (
-                <article
-                  key={plan.id}
-                  className="flex flex-col gap-4 rounded-xl border border-line bg-card p-5"
-                >
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="font-head text-[17px] leading-tight text-ink">{plan.name}</h3>
-                      {isCurrent ? <StatusBadge tone="success">Current</StatusBadge> : null}
-                    </div>
-                    {plan.description ? (
-                      <p className="mt-1.5 text-[13px] leading-relaxed text-muted">{plan.description}</p>
-                    ) : null}
-                  </div>
-
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="font-mono text-[22px] font-medium text-ink">
-                      {plan.priceLabel ?? plan.id}
-                    </span>
-                    {plan.intervalLabel ? (
-                      <span className="text-[12px] text-muted">{plan.intervalLabel}</span>
-                    ) : null}
-                  </div>
-
-                  <form action="/api/billing/checkout" method="post" className="mt-auto flex flex-col gap-3">
-                    <input name="plan_id" type="hidden" value={plan.id} />
-                    <input name="return_url" type="hidden" value={returnUrl} />
-                    <input name="legal_assent_version" type="hidden" value={LEGAL_ASSENT_VERSION} />
-                    <label
-                      htmlFor={assentId}
-                      className="flex items-start gap-2.5 rounded-md border border-line bg-bg-sunken/50 p-2.5 text-[12px] leading-relaxed text-muted"
-                    >
-                      <input
-                        aria-describedby={`${assentId}-copy`}
-                        disabled={actionDisabled}
-                        id={assentId}
-                        name="legal_assent"
-                        required
-                        type="checkbox"
-                        value="accepted"
-                        className="mt-0.5 size-3.5 shrink-0 accent-ink"
-                      />
-                      <span id={`${assentId}-copy`}>
-                        I agree to the{" "}
-                        <Link href="/terms" target="_blank" rel="noopener noreferrer" className="font-medium text-ink underline underline-offset-2">
-                          Terms
-                        </Link>{" "}
-                        and{" "}
-                        <Link href="/privacy" target="_blank" rel="noopener noreferrer" className="font-medium text-ink underline underline-offset-2">
-                          Privacy Notice
-                        </Link>
-                        , including renewal, usage, and overage charges for this plan.
-                      </span>
-                    </label>
-                    <Button type="submit" className="w-full rounded-md" disabled={actionDisabled}>
-                      {isCurrent ? "Current plan" : plan.attachAction ?? "Choose plan"}
-                    </Button>
-                  </form>
-                </article>
-              );
-            })}
+            {credits ? (
+              <div className="rounded-2xl border border-line-soft bg-bg-sunken/40 p-5 md:w-[300px] md:shrink-0">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-[13px] text-ink">Usage credits</span>
+                  <span className="font-head text-[18px] leading-none text-ink">
+                    {credits.unlimited ? "Unlimited" : formatNumber(credits.remaining ?? usedValue(credits))}
+                  </span>
+                </div>
+                <Meter balance={credits} className="mt-3.5" />
+                <p className="mt-3 text-[12px] text-muted">{displayBalanceValue(credits)}</p>
+              </div>
+            ) : null}
           </div>
+        </section>
+
+        {/* Usage */}
+        {hasBreakdown ? (
+          <>
+            <div className="mb-4 mt-9">
+              <h2 className="font-head text-[20px] leading-none text-ink">Usage</h2>
+              <p className="mt-2 text-[13px] text-muted">What you have delivered and stored this period, by resolution.</p>
+            </div>
+            <div className="rounded-[18px] border border-line bg-card p-6 sm:p-7">
+              {usage.delivery.length > 0 || usage.storage.length > 0 ? (
+                <div className="grid gap-8 sm:grid-cols-2 sm:gap-12">
+                  {usage.delivery.length > 0 ? (
+                    <UsageGroup title="Delivery" caption="Seconds delivered to viewers" rows={usage.delivery} />
+                  ) : null}
+                  {usage.storage.length > 0 ? (
+                    <UsageGroup
+                      title="Storage"
+                      caption="Second-months kept in your library"
+                      rows={usage.storage}
+                      className="sm:border-l sm:border-line-soft sm:pl-12"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              {usage.other.length > 0 ? (
+                <UsageGroup
+                  title="Other"
+                  caption="Other metered features on your plan"
+                  rows={usage.other}
+                  className={usage.delivery.length > 0 || usage.storage.length > 0 ? "mt-8 border-t border-line-soft pt-8" : undefined}
+                />
+              ) : null}
+            </div>
+          </>
+        ) : null}
+
+        {/* Plans */}
+        <div className="mb-4 mt-9">
+          <h2 className="font-head text-[20px] leading-none text-ink">Plans</h2>
+          <p className="mt-2 text-[13px] text-muted">
+            Start on pay as you go, or pick a plan with monthly credits included. Move between plans whenever you like, with no lock-in.
+          </p>
+        </div>
+        {billing.plans.length === 0 ? (
+          <div className="rounded-[18px] border border-line bg-card p-7 text-[13.5px] text-muted">
+            No plans are available.
+          </div>
+        ) : (
+          <BillingPlansClient
+            plans={billing.plans}
+            checkoutEnabled={billing.checkoutEnabled}
+            returnUrl={returnUrl}
+            legalAssentVersion={LEGAL_ASSENT_VERSION}
+          />
         )}
-      </Panel>
       </DashboardContent>
     </>
   );
