@@ -27,8 +27,10 @@ const PHASES = new Set<RendPlayerTelemetryPhase>([
   "first_frame",
   "stall_start",
   "stall_end",
+  "watch_heartbeat",
   "bootstrap_failure",
   "playback_failure",
+  "playback_ended",
 ]);
 
 const PLAYBACK_MODES = new Set<RendPlayerPlaybackMode>([
@@ -261,6 +263,7 @@ function sanitizeEvent(
   addOptional(event, "stall_start_ms", safeTiming(value.stall_start_ms));
   addOptional(event, "stall_end_ms", safeTiming(value.stall_end_ms));
   addOptional(event, "stall_duration_ms", safeTiming(value.stall_duration_ms));
+  addOptional(event, "watch_delta_ms", safeTiming(value.watch_delta_ms));
 
   addOptional(event, "metadata_loaded_ms", safeTiming(value.metadata_loaded_ms));
   addOptional(event, "canplay_ms", safeTiming(value.canplay_ms));
