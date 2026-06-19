@@ -33,7 +33,7 @@ export function TH({ className, ...props }: ComponentProps<"th">) {
   return (
     <th
       className={cn(
-        "whitespace-nowrap border-b border-line px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-faint",
+        "whitespace-nowrap border-b border-line px-4 py-2.5 text-left text-[12px] font-medium text-faint",
         className,
       )}
       {...props}

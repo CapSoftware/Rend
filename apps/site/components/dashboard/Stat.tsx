@@ -24,7 +24,7 @@ export function Stat({
   return (
     <div className={cn("rounded-xl border border-line bg-card px-4 py-3.5", className)}>
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">{label}</p>
+        <p className="text-[12px] font-medium text-faint">{label}</p>
         {Icon ? <Icon className="size-4 text-faint" /> : null}
       </div>
       <p className="mt-2 font-mono text-[21px] font-medium leading-none tabular-nums text-ink">{value}</p>
