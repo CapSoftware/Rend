@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AssetApiError,
+  fetchAnalyticsOverview,
   fetchAssetDetail,
   listAssets,
   uploadAsset,
@@ -192,6 +193,41 @@ test("asset client propagates only redacted safe upstream errors", async () => {
           assert.equal(serialized.includes("token=secret"), false);
           assert.equal(serialized.includes("Bearer abc"), false);
           assert.match(String((error as AssetApiError).body.message), /\[redacted/);
+          return true;
+        }
+      );
+    });
+  });
+});
+
+test("analytics overview 404 does not use asset not-found copy", async () => {
+  await withEnv(routeEnv(), async () => {
+    let calls = 0;
+    await withMockFetch(async (url) => {
+      calls += 1;
+      assert.equal(
+        String(url),
+        "http://127.0.0.1:4000/v1/analytics/overview?window_seconds=86400"
+      );
+      return calls === 1
+        ? new Response("", { status: 404 })
+        : Response.json({ message: "Asset was not found" }, { status: 404 });
+    }, async () => {
+      await assert.rejects(
+        fetchAnalyticsOverview(AUTH_CONTEXT),
+        (error) => {
+          assert.equal(error instanceof AssetApiError, true);
+          assert.equal((error as AssetApiError).status, 404);
+          assert.equal((error as AssetApiError).body.message, "Analytics overview is unavailable");
+          return true;
+        }
+      );
+      await assert.rejects(
+        fetchAnalyticsOverview(AUTH_CONTEXT),
+        (error) => {
+          assert.equal(error instanceof AssetApiError, true);
+          assert.equal((error as AssetApiError).status, 404);
+          assert.equal((error as AssetApiError).body.message, "Analytics overview is unavailable");
           return true;
         }
       );
