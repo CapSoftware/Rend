@@ -107,6 +107,12 @@ function formatPreciseNumber(value: number | undefined, maximumFractionDigits = 
   }).format(value);
 }
 
+function formatBalanceQuantity(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value)) return "-";
+  const maximumFractionDigits = Number.isInteger(value) ? 0 : Math.abs(value) < 1 ? 6 : 3;
+  return formatPreciseNumber(value, maximumFractionDigits);
+}
+
 function formatUsageValue(value: number | undefined, kind: BillingUsageKind) {
   if (value === undefined || !Number.isFinite(value)) return "-";
   if (kind === "delivery") return `${formatPreciseNumber(value, 3)} s`;
