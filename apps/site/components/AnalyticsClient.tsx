@@ -170,11 +170,12 @@ export default function AnalyticsClient({
       <SubHeader title="Analytics" docsHref="/docs" docsLabel="Analytics API" actions={actions} />
       <DashboardContent>
         {error ? <Callout tone="danger">{error}</Callout> : null}
-        {!analytics ? (
+        {!analytics && !error ? (
           <Panel>
             <p className="text-[13.5px] text-muted">No analytics available yet.</p>
           </Panel>
-        ) : (
+        ) : null}
+        {analytics ? (
           <div className="flex flex-col gap-5">
             <StatGrid>
               <Stat label="Views" value={formatNumber(analytics.views)} hint="Sessions with first frame" icon={Eye} />
@@ -257,7 +258,7 @@ export default function AnalyticsClient({
               )}
             </Panel>
           </div>
-        )}
+        ) : null}
       </DashboardContent>
     </>
   );
