@@ -306,6 +306,19 @@ function customerEmail(context: Pick<DashboardAccessContext, "userEmail">) {
   return context.userEmail;
 }
 
+function autumnCustomerSyncBody(context: DashboardAccessContext, expand?: string[]) {
+  const body: JsonRecord = {
+    customer_id: customerId(context),
+    name: customerName(context),
+    email: customerEmail(context),
+    metadata: {
+      rend_organization_slug: context.organizationSlug,
+    },
+  };
+  if (expand?.length) body.expand = expand;
+  return body;
+}
+
 async function writeBillingCustomerSync(
   organizationId: string,
   input: {
@@ -361,14 +374,7 @@ export async function ensureBillingCustomer(context: DashboardAccessContext) {
   });
 
   try {
-    await autumnPost("/customers.get_or_create", {
-      customer_id: customerId(context),
-      name: customerName(context),
-      email: customerEmail(context),
-      metadata: {
-        rend_organization_slug: context.organizationSlug,
-      },
-    });
+    await autumnPost("/customers.get_or_create", autumnCustomerSyncBody(context));
     await writeBillingCustomerSync(context.organizationId, {
       mode,
       customerSyncedAt: new Date(),
