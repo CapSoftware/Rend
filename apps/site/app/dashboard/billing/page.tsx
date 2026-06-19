@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import Link from "next/link";
-import { BarChart3, CreditCard, ListTree, Wallet } from "lucide-react";
+import { BarChart3, CreditCard, Info, ListTree, Wallet } from "lucide-react";
 import {
   billingFeatureIds,
   billingOverview,
@@ -51,6 +52,10 @@ export const metadata: Metadata = {
 
 const USAGE_CREDITS_FEATURE_ID = (process.env.REND_BILLING_FEATURE_USAGE_CREDITS || "rend_usage_credits").trim();
 const BILLING_OVERVIEW_CACHE_TTL_MS = 60_000;
+const DELIVERY_USAGE_HELP =
+  "Delivery is viewer playback time. Seconds are counted when video is delivered to viewers.";
+const STORAGE_USAGE_HELP =
+  "Storage is video duration prorated by how long it was stored. One second-mo equals one second of video stored for one month.";
 
 type BillingPageProps = {
   searchParams?: Promise<{
@@ -120,6 +125,16 @@ function formatUsageValue(value: number | undefined, kind: BillingUsageKind) {
   return `${formatPreciseNumber(value, 3)} units`;
 }
 
+function formatUsageExplanation(value: number | undefined, kind: "delivery" | "storage") {
+  if (value === undefined || !Number.isFinite(value)) {
+    return kind === "delivery" ? DELIVERY_USAGE_HELP : STORAGE_USAGE_HELP;
+  }
+  if (kind === "delivery") {
+    return `${DELIVERY_USAGE_HELP} This total is ${formatPreciseNumber(value, 3)} seconds delivered.`;
+  }
+  return `${STORAGE_USAGE_HELP} This total is equivalent to ${formatPreciseNumber(value, 2)} seconds stored for one month.`;
+}
+
 function formatDate(value: string | undefined) {
   if (!value) return undefined;
   const date = new Date(value);
@@ -145,6 +160,59 @@ function shortId(value: string | undefined) {
 
 function balanceLabel(featureId: string) {
   return billingUsageFeatureInfo(featureId).tierLabel;
+}
+
+function UnitInfoButton({
+  label,
+  id,
+  children,
+}: {
+  label: string;
+  id: string;
+  children: ReactNode;
+}) {
+  return (
+    <span className="group relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label={label}
+        aria-describedby={id}
+        className="inline-flex size-5 items-center justify-center rounded-full border border-line-soft text-faint transition-colors hover:border-line hover:text-ink focus-visible:border-ink focus-visible:text-ink focus-visible:outline-none"
+      >
+        <Info className="size-3" aria-hidden="true" />
+      </button>
+      <span
+        id={id}
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-[min(260px,calc(100vw-48px))] -translate-x-1/2 rounded-lg border border-line bg-ink px-3 py-2 text-left text-[12px] font-normal leading-[1.45] text-bg opacity-0 shadow-[0_18px_40px_-24px_rgba(22,21,19,0.55)] transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
+
+function UsageLabel({
+  children,
+  info,
+  infoId,
+  infoLabel,
+}: {
+  children: ReactNode;
+  info?: ReactNode;
+  infoId?: string;
+  infoLabel?: string;
+}) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span>{children}</span>
+      {info && infoId ? (
+        <UnitInfoButton id={infoId} label={infoLabel ?? "Explain usage"}>
+          {info}
+        </UnitInfoButton>
+      ) : null}
+    </span>
+  );
 }
 
 function groupUsage(balances: BillingBalance[]) {
