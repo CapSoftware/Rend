@@ -199,13 +199,19 @@ function usedValue(balance: BillingBalance) {
 
 function displayBalanceValue(balance: BillingBalance) {
   if (balance.remaining !== undefined && balance.granted !== undefined && !balance.unlimited) {
-    return `${formatNumber(balance.remaining)} left of ${formatNumber(balance.granted)}`;
+    if (balance.granted <= 0 && balance.overageAllowed) {
+      const used = usedValue(balance);
+      return used !== undefined && used > 0
+        ? `${formatBalanceQuantity(used)} used beyond included credits`
+        : "Pay-as-you-go with no included credit balance";
+    }
+    return `${formatBalanceQuantity(balance.remaining)} left of ${formatBalanceQuantity(balance.granted)}`;
   }
   const used = usedValue(balance);
   if (balance.unlimited) {
-    return used !== undefined && used > 0 ? `${formatNumber(used)} used` : "Unlimited";
+    return used !== undefined && used > 0 ? `${formatBalanceQuantity(used)} used` : "Unlimited";
   }
-  return used === undefined ? "-" : `${formatNumber(used)} used`;
+  return used === undefined ? "-" : `${formatBalanceQuantity(used)} used`;
 }
 
 function meterFor(balance: BillingBalance) {
@@ -258,16 +264,24 @@ function UsageGroup({
   rows,
   exact = false,
   className,
+  info,
+  infoId,
 }: {
   title: string;
   caption: string;
   rows: UsageRow[];
   exact?: boolean;
   className?: string;
+  info?: ReactNode;
+  infoId?: string;
 }) {
   return (
     <div className={className}>
-      <h3 className="font-head text-[17px] leading-none text-ink">{title}</h3>
+      <h3 className="font-head text-[17px] leading-none text-ink">
+        <UsageLabel info={info} infoId={infoId} infoLabel={`Explain ${title} usage`}>
+          {title}
+        </UsageLabel>
+      </h3>
       <p className="mt-1.5 text-[12.5px] text-muted">{caption}</p>
       <div className="mt-4 flex flex-col">
         {rows.map((row) => (
@@ -377,6 +391,10 @@ function CurrentPlanPanel({
 }) {
   const activePlan = billing.plans.find((plan) => plan.relationshipStatus === "active");
   const currentPlanName = activePlan?.name ?? billing.currentPlanLabel;
+  const creditUsed = credits ? usedValue(credits) : undefined;
+  const payAsYouGoCredits = Boolean(
+    credits && !credits.unlimited && credits.overageAllowed && (credits.granted ?? 0) <= 0,
+  );
 
   return (
     <section className="animate-rise rounded-[18px] border border-line bg-card p-6 sm:p-7">
