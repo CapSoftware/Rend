@@ -484,7 +484,11 @@ function CurrentPlanPanel({
             <div className="flex items-baseline justify-between gap-3">
               <span className="text-[13px] text-ink">Usage credits</span>
               <span className="font-head text-[18px] leading-none text-ink">
-                {credits.unlimited ? "Unlimited" : formatNumber(credits.remaining ?? usedValue(credits))}
+                {credits.unlimited
+                  ? "Unlimited"
+                  : payAsYouGoCredits
+                    ? `${formatBalanceQuantity(creditUsed)} used`
+                    : formatBalanceQuantity(credits.remaining ?? creditUsed)}
               </span>
             </div>
             <Meter balance={credits} className="mt-3.5" />
@@ -524,13 +528,21 @@ function OverviewTab({
           {usage.delivery.length > 0 || usage.storage.length > 0 ? (
             <div className="grid gap-8 sm:grid-cols-2 sm:gap-12">
               {usage.delivery.length > 0 ? (
-                <UsageGroup title="Delivery" caption="Seconds delivered to viewers" rows={usage.delivery} />
+                <UsageGroup
+                  title="Delivery"
+                  caption="Seconds delivered to viewers"
+                  rows={usage.delivery}
+                  info={DELIVERY_USAGE_HELP}
+                  infoId="overview-delivery-usage-info"
+                />
               ) : null}
               {usage.storage.length > 0 ? (
                 <UsageGroup
                   title="Storage"
                   caption="Second-months kept in your library"
                   rows={usage.storage}
+                  info={STORAGE_USAGE_HELP}
+                  infoId="overview-storage-usage-info"
                   className="sm:border-l sm:border-line-soft sm:pl-12"
                 />
               ) : null}
@@ -563,14 +575,36 @@ function UsageStatus({ status, billable }: { status: string; billable: boolean }
   return <StatusBadge tone={tone}>{status}</StatusBadge>;
 }
 
+function ProviderBalanceEmptyState({ credits }: { credits?: BillingBalance }) {
+  const creditUsed = credits ? usedValue(credits) : undefined;
+  const creditUsageText =
+    creditUsed !== undefined && creditUsed > 0
+      ? ` Autumn reports ${formatBalanceQuantity(creditUsed)} ${USAGE_CREDITS_FEATURE_ID} used this period.`
+      : "";
+
+  return (
+    <div className="rounded-xl border border-line-soft bg-bg-sunken/40 p-5">
+      <p className="text-[13.5px] leading-[1.55] text-ink">
+        Autumn is not returning separate delivery or storage balance rows for this account.
+      </p>
+      <p className="mt-2 text-[13px] leading-[1.55] text-muted">
+        Detailed usage is still being tracked in the ledger below. This plan bills usage through the pooled{" "}
+        {USAGE_CREDITS_FEATURE_ID} credit balance instead of per-meter balances.{creditUsageText}
+      </p>
+    </div>
+  );
+}
+
 function UsageTab({
   details,
   usage,
+  credits,
   hasBreakdown,
   range,
 }: {
   details: BillingUsageDetails;
   usage: ReturnType<typeof groupUsage>;
+  credits?: BillingBalance;
   hasBreakdown: boolean;
   range: BillingUsageRange;
 }) {
@@ -584,20 +618,38 @@ function UsageTab({
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h2 className="font-head text-[20px] leading-none text-ink">Usage</h2>
-          <p className="mt-2 text-[13px] text-muted">Billable aggregation rows and provider balances, grouped by meter.</p>
+          <p className="mt-2 text-[13px] text-muted">
+            Billable aggregation rows grouped by meter, with provider balances when available.
+          </p>
         </div>
         <UsageRangeLinks activeRange={range} />
       </div>
 
       <StatGrid>
         <Stat
-          label="Delivery"
+          label={
+            <UsageLabel
+              info={formatUsageExplanation(details.totals.billableDeliverySeconds, "delivery")}
+              infoId="delivery-total-info"
+              infoLabel="Explain delivery usage"
+            >
+              Delivery
+            </UsageLabel>
+          }
           value={formatUsageValue(details.totals.billableDeliverySeconds, "delivery")}
           hint={details.rangeLabel}
           icon={BarChart3}
         />
         <Stat
-          label="Storage"
+          label={
+            <UsageLabel
+              info={formatUsageExplanation(details.totals.billableStorageSecondMonths, "storage")}
+              infoId="storage-total-info"
+              infoLabel="Explain storage usage"
+            >
+              Storage
+            </UsageLabel>
+          }
           value={formatUsageValue(details.totals.billableStorageSecondMonths, "storage")}
           hint={details.rangeLabel}
           icon={CreditCard}
@@ -618,7 +670,7 @@ function UsageTab({
 
       <Panel
         title="Current billing balance"
-        description="Exact usage currently reported by the billing provider for each configured meter."
+        description="Meter-level usage currently reported by the billing provider, when the provider exposes those balances."
         bodyClassName="p-6 sm:p-7"
       >
         {hasBreakdown ? (
