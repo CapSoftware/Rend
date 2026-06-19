@@ -678,7 +678,14 @@ function UsageTab({
             {usage.delivery.length > 0 || usage.storage.length > 0 ? (
               <div className="grid gap-8 sm:grid-cols-2 sm:gap-12">
                 {usage.delivery.length > 0 ? (
-                  <UsageGroup title="Delivery" caption="Seconds delivered this billing period" rows={usage.delivery} exact />
+                  <UsageGroup
+                    title="Delivery"
+                    caption="Seconds delivered this billing period"
+                    rows={usage.delivery}
+                    exact
+                    info={DELIVERY_USAGE_HELP}
+                    infoId="provider-delivery-usage-info"
+                  />
                 ) : null}
                 {usage.storage.length > 0 ? (
                   <UsageGroup
@@ -686,6 +693,8 @@ function UsageTab({
                     caption="Second-months stored this billing period"
                     rows={usage.storage}
                     exact
+                    info={STORAGE_USAGE_HELP}
+                    infoId="provider-storage-usage-info"
                     className="sm:border-l sm:border-line-soft sm:pl-12"
                   />
                 ) : null}
@@ -702,7 +711,7 @@ function UsageTab({
             ) : null}
           </>
         ) : (
-          <p className="py-5 text-center text-[13.5px] text-muted">No metered balances are available yet.</p>
+          <ProviderBalanceEmptyState credits={credits} />
         )}
       </Panel>
 
@@ -878,7 +887,7 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
         ) : null}
 
         {activeTab === "usage" && usageDetails ? (
-          <UsageTab details={usageDetails} usage={usage} hasBreakdown={hasBreakdown} range={range} />
+          <UsageTab details={usageDetails} usage={usage} credits={credits} hasBreakdown={hasBreakdown} range={range} />
         ) : null}
 
         {activeTab === "plans" ? <PlansTab billing={billing} returnUrl={returnUrl} /> : null}
