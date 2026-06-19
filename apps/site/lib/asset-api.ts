@@ -19,6 +19,9 @@ const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
 
 type JsonRecord = Record<string, unknown>;
 type RequestInitWithDuplex = RequestInit & { duplex?: "half" };
+type UpstreamErrorOptions = {
+  notFoundMessage?: string;
+};
 
 export type AssetApiAuthContext = {
   organizationId: string;
@@ -191,14 +194,18 @@ function unsupportedUpstreamStatus(status: number) {
   return ![400, 403, 404, 409, 413, 415].includes(status);
 }
 
-async function upstreamError(upstream: Response): Promise<AssetApiError> {
+async function upstreamError(
+  upstream: Response,
+  options: UpstreamErrorOptions = {}
+): Promise<AssetApiError> {
   const publicStatus = unsupportedUpstreamStatus(upstream.status) ? 502 : upstream.status;
   const fallback =
     publicStatus === 413
       ? "Upload is too large"
       : publicStatus === 404
-        ? "Asset was not found"
+        ? options.notFoundMessage ?? "Asset was not found"
         : "Rend API request failed";
+  const useContextNotFoundMessage = publicStatus === 404 && Boolean(options.notFoundMessage);
 
   let message = fallback;
   let upstreamCode: string | undefined;
@@ -207,7 +214,9 @@ async function upstreamError(upstream: Response): Promise<AssetApiError> {
     const parsed = JSON.parse(text) as unknown;
     if (isRecord(parsed)) {
       upstreamCode = safeState(parsed.error);
-      message = safeErrorMessage(parsed.message ?? parsed.error, fallback);
+      if (!useContextNotFoundMessage) {
+        message = safeErrorMessage(parsed.message ?? parsed.error, fallback);
+      }
     }
   } catch {
     message = fallback;
@@ -227,8 +236,11 @@ async function upstreamError(upstream: Response): Promise<AssetApiError> {
   });
 }
 
-async function readUpstreamJson(upstream: Response) {
-  if (!upstream.ok) throw await upstreamError(upstream);
+async function readUpstreamJson(
+  upstream: Response,
+  options: UpstreamErrorOptions = {}
+) {
+  if (!upstream.ok) throw await upstreamError(upstream, options);
 
   try {
     return (await upstream.json()) as unknown;
@@ -727,7 +739,9 @@ export async function fetchAnalyticsOverview(
     auth,
     `/v1/analytics/overview?window_seconds=${boundedWindow}`
   );
-  const data = await readUpstreamJson(upstream);
+  const data = await readUpstreamJson(upstream, {
+    notFoundMessage: "Analytics overview is unavailable",
+  });
   const analytics = sanitizeAnalyticsOverview(data);
   if (!analytics) {
     throw new AssetApiError(502, {
