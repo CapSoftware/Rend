@@ -62,6 +62,10 @@ export type BillingOverview = {
   error?: string;
 };
 
+export type BillingOverviewOptions = {
+  cacheTtlMs?: number;
+};
+
 export type BillingReadiness = {
   status: BillingReadinessStatus;
   code: "ready" | "billing_required" | "limit_exceeded" | "billing_unavailable";
@@ -618,14 +622,103 @@ function currentPlanLabel(subscriptions: BillingSubscription[]) {
   return active?.planId ?? "No active plan";
 }
 
+type StoredBillingStateRow = {
+  billing_state: unknown;
+  billing_state_synced_at: Date | string | null;
+  billing_state_error: string | null;
+};
+
+function billingOverviewFromStoredState(
+  context: DashboardAccessContext,
+  row: StoredBillingStateRow,
+  status: BillingSyncStatus,
+  error?: unknown
+): BillingOverview {
+  const state = isRecord(row.billing_state) ? row.billing_state : {};
+  const subscriptions = normalizeSubscriptions(state.subscriptions);
+  const balances = Array.isArray(state.balances)
+    ? state.balances.flatMap((item) => {
+        const balance = normalizeBalance("", item);
+        return balance ? [balance] : [];
+      })
+    : [];
+  const plans = normalizeBillingPlans(Array.isArray(state.plans) ? state.plans : []);
+  const mode = billingMode();
+  return {
+    mode,
+    customerId: customerId(context),
+    status,
+    currentPlanLabel: currentPlanLabel(subscriptions),
+    subscriptions,
+    balances,
+    plans,
+    manageBillingEnabled: status === "ok" && mode === "autumn",
+    checkoutEnabled: status === "ok" && mode === "autumn",
+    syncedAt: isoDate(row.billing_state_synced_at),
+    error:
+      error instanceof Error
+        ? error.message
+        : status === "ok"
+          ? undefined
+          : row.billing_state_error || "Billing state could not be loaded",
+  };
+}
+
+async function storedBillingStateRow(context: DashboardAccessContext) {
+  const [row] = await getSiteDb()
+    .select({
+      billing_state: billingCustomers.billing_state,
+      billing_state_synced_at: billingCustomers.billing_state_synced_at,
+      billing_state_error: billingCustomers.billing_state_error,
+    })
+    .from(billingCustomers)
+    .where(eq(billingCustomers.organization_id, context.organizationId))
+    .limit(1)
+    .catch(() => []);
+  return row ?? null;
+}
+
+async function cachedBillingOverview(context: DashboardAccessContext, cacheTtlMs: number) {
+  if (!Number.isFinite(cacheTtlMs) || cacheTtlMs <= 0) return null;
+  const row = await storedBillingStateRow(context);
+  if (!row?.billing_state || !row.billing_state_synced_at) return null;
+  const syncedAt = new Date(row.billing_state_synced_at);
+  if (Number.isNaN(syncedAt.getTime())) return null;
+  if (Date.now() - syncedAt.getTime() > cacheTtlMs) return null;
+  return billingOverviewFromStoredState(context, row, "ok");
+}
+
 async function autumnBillingOverview(context: DashboardAccessContext): Promise<BillingOverview> {
-  await ensureBillingCustomer(context);
-  const customer = await autumnPost("/customers.get_or_create", {
-    customer_id: customerId(context),
-    name: customerName(context),
-    email: customerEmail(context),
-    expand: ["subscriptions.plan", "purchases.plan", "balances.feature"],
+  logAuthEvent("autumn_customer_sync_started", {
+    ...authEmailSummary(context.userEmail),
+    organization_id_hash: authSubjectId(context.organizationId),
+    billing_mode: "autumn",
   });
+
+  let customer: unknown;
+  try {
+    customer = await autumnPost(
+      "/customers.get_or_create",
+      autumnCustomerSyncBody(context, ["subscriptions.plan", "purchases.plan", "balances.feature"])
+    );
+  } catch (error) {
+    await writeBillingCustomerSync(context.organizationId, {
+      mode: "autumn",
+      customerSyncError: error instanceof Error ? error.message : "Billing customer sync failed",
+    }).catch(() => undefined);
+    logAuthEvent(
+      "autumn_customer_sync_failed",
+      {
+        ...authEmailSummary(context.userEmail),
+        organization_id_hash: authSubjectId(context.organizationId),
+        billing_mode: "autumn",
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "error"
+    );
+    throw error;
+  }
+
   const plans = await autumnPost("/plans.list", {
     customer_id: customerId(context),
   }).catch(() => ({ list: [] }));
@@ -655,47 +748,40 @@ async function autumnBillingOverview(context: DashboardAccessContext): Promise<B
     billingStateSyncedAt: new Date(),
     billingStateError: null,
   }).catch(() => undefined);
+  logAuthEvent("autumn_customer_sync_completed", {
+    ...authEmailSummary(context.userEmail),
+    organization_id_hash: authSubjectId(context.organizationId),
+    billing_mode: "autumn",
+  });
   return overview;
 }
 
 async function fallbackBillingOverview(context: DashboardAccessContext, error: unknown): Promise<BillingOverview> {
-  const [row] = await getSiteDb()
-    .select({
-      billing_state: billingCustomers.billing_state,
-      billing_state_synced_at: billingCustomers.billing_state_synced_at,
-      billing_state_error: billingCustomers.billing_state_error,
-    })
-    .from(billingCustomers)
-    .where(eq(billingCustomers.organization_id, context.organizationId))
-    .limit(1)
-    .catch(() => []);
-
-  const state = isRecord(row?.billing_state) ? row.billing_state : {};
-  const subscriptions = normalizeSubscriptions(state.subscriptions);
-  const balances = Array.isArray(state.balances)
-    ? state.balances.flatMap((item) => {
-        const balance = normalizeBalance("", item);
-        return balance ? [balance] : [];
-      })
-    : [];
-  const plans = normalizeBillingPlans(Array.isArray(state.plans) ? state.plans : []);
+  const row = await storedBillingStateRow(context);
+  if (row?.billing_state) {
+    return billingOverviewFromStoredState(context, row, "soft_failed", error);
+  }
   return {
     mode: billingMode(),
     customerId: customerId(context),
-    status: row?.billing_state ? "soft_failed" : "not_configured",
-    currentPlanLabel: currentPlanLabel(subscriptions),
-    subscriptions,
-    balances,
-    plans,
+    status: "not_configured",
+    currentPlanLabel: "No active plan",
+    subscriptions: [],
+    balances: [],
+    plans: [],
     manageBillingEnabled: false,
     checkoutEnabled: false,
-    syncedAt: isoDate(row?.billing_state_synced_at),
-    error: error instanceof Error ? error.message : row?.billing_state_error || "Billing state could not be loaded",
+    error: error instanceof Error ? error.message : "Billing state could not be loaded",
   };
 }
 
-export async function billingOverview(context: DashboardAccessContext): Promise<BillingOverview> {
+export async function billingOverview(
+  context: DashboardAccessContext,
+  options: BillingOverviewOptions = {}
+): Promise<BillingOverview> {
   if (billingMode() === "local") return localBillingOverview(context);
+  const cached = await cachedBillingOverview(context, options.cacheTtlMs ?? 0);
+  if (cached) return cached;
   try {
     return await autumnBillingOverview(context);
   } catch (error) {
