@@ -2,6 +2,7 @@
 
 import { ArrowLeft, Code, Eye, RefreshCw, Trash2 } from "lucide-react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssetDetail,
@@ -10,11 +11,11 @@ import type {
   AssetPlayerTelemetryEvent,
   AssetPlayerTelemetryResponse,
 } from "../lib/asset-types.ts";
+import EmbedCustomizer from "./EmbedCustomizer";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
 import {
   Callout,
-  CopyButton,
   DashboardContent,
   Panel,
   StatusBadge,
@@ -84,11 +85,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export default function AssetDetailClient({
   initialAnalytics,
   initialAsset,
+  initialTab,
   initialTelemetry,
   readOnlyReason,
 }: {
   initialAnalytics: AssetPlaybackAnalytics | null;
   initialAsset: AssetDetail;
+  initialTab: AssetTab;
   initialTelemetry: AssetPlayerTelemetryEvent[];
   readOnlyReason?: string;
 }) {
@@ -102,14 +105,14 @@ export default function AssetDetailClient({
   const [metricsLoading, setMetricsLoading] = useState(false);
   const [deleteState, setDeleteState] = useState<"idle" | "deleting" | "deleted" | "error">("idle");
   const [deleteMessage, setDeleteMessage] = useState("");
-  const [tab, setTab] = useState<AssetTab>("overview");
+  const [tab, setTab] = useState<AssetTab>(initialTab);
   const pollAttempt = useRef(0);
+  const router = useRouter();
+  const pathname = usePathname();
 
   const assetId = asset.asset_id;
   const embedPath = `/embed/${assetId}`;
   const watchPath = `/watch/${assetId}`;
-  const embedUrl = `${origin}${embedPath}`;
-  const iframeSnippet = `<iframe src="${embedUrl || embedPath}" width="960" height="540" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
   const suspensionReason =
     readOnlyReason ??
     (asset.suspended_at
@@ -160,6 +163,19 @@ export default function AssetDetailClient({
   useEffect(() => {
     setOrigin(window.location.origin);
   }, []);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+
+  const selectTab = useCallback(
+    (next: AssetTab) => {
+      setTab(next);
+      const target = next === "overview" ? pathname : `${pathname}?tab=${next}`;
+      router.push(target, { scroll: false });
+    },
+    [pathname, router],
+  );
 
   useEffect(() => {
     if (terminal(asset.playable_state) || pollExhausted || deleteState === "deleted") return;
@@ -327,7 +343,7 @@ export default function AssetDetailClient({
         <Tabs
           items={tabs}
           value={tab}
-          onValueChange={(value) => setTab(value as AssetTab)}
+          onValueChange={(value) => selectTab(value as AssetTab)}
           ariaLabel="Asset sections"
           className="mb-5"
         />
@@ -497,28 +513,13 @@ export default function AssetDetailClient({
         ) : null}
 
         {tab === "embed" ? (
-          <Panel title="Embed">
-            <div className="flex flex-col gap-4">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">Embed URL</p>
-                <div className="mt-1.5 flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md border border-line bg-bg-sunken px-3 py-2 font-mono text-[12px] text-ink-soft">
-                    {embedUrl || embedPath}
-                  </code>
-                  <CopyButton value={embedUrl || embedPath} iconOnly label="Copy embed URL" disabled={readOnly} />
-                </div>
-              </div>
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-faint">iframe</p>
-                <div className="mt-1.5 flex items-start gap-2">
-                  <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md border border-line bg-bg-sunken px-3 py-2 font-mono text-[12px] leading-relaxed text-ink-soft">
-                    {iframeSnippet}
-                  </code>
-                  <CopyButton value={iframeSnippet} iconOnly label="Copy iframe" disabled={readOnly} />
-                </div>
-              </div>
-            </div>
-          </Panel>
+          <EmbedCustomizer
+            origin={origin}
+            embedPath={embedPath}
+            assetId={assetId}
+            previewable={showPreview}
+            disabled={readOnly}
+          />
         ) : null}
       </DashboardContent>
     </>
