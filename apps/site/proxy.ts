@@ -26,9 +26,9 @@ const FORWARDED_CONTEXT_HEADER_NAMES = [
   "x-forwarded-proto",
 ];
 
-function watchAssetId(pathname: string) {
+function playerAssetId(pathname: string) {
   const parts = pathname.split("/").filter(Boolean);
-  if (parts.length !== 2 || parts[0] !== "watch") return null;
+  if (parts.length !== 2 || (parts[0] !== "watch" && parts[0] !== "embed")) return null;
   const assetId = parts[1]?.trim().toLowerCase();
   return assetId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(assetId)
     ? assetId
@@ -54,8 +54,16 @@ function forwardedBootstrapHeaders(request: NextRequest) {
   return headers;
 }
 
+const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 1500;
+
 function envString(name: string) {
   return (process.env[name] || "").trim();
+}
+
+function bootstrapTimeoutMs() {
+  const raw = Number(envString("REND_WATCH_BOOTSTRAP_TIMEOUT_MS"));
+  if (Number.isFinite(raw) && raw > 0) return Math.min(raw, 3_000);
+  return DEFAULT_BOOTSTRAP_TIMEOUT_MS;
 }
 
 function internalBootstrapOrigin(request: NextRequest) {
@@ -96,7 +104,7 @@ export async function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   const dashboardSetCookie = dashboardAuthHintSetCookie(request);
 
-  const assetId = watchAssetId(request.nextUrl.pathname);
+  const assetId = playerAssetId(request.nextUrl.pathname);
   if (!assetId) {
     const response = NextResponse.next({
       request: {
@@ -115,6 +123,7 @@ export async function proxy(request: NextRequest) {
   const bootstrapResponse = await fetch(bootstrapUrl, {
     cache: "no-store",
     headers: forwardedBootstrapHeaders(request),
+    signal: AbortSignal.timeout(bootstrapTimeoutMs()),
   }).catch(() => null);
 
   const responseHeaders = new Headers();
@@ -155,6 +164,7 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/watch/:path*",
-    "/((?!api|dashboard|operator|watch|_next/static|_next/image|.*\\..*).*)",
+    "/embed/:path*",
+    "/((?!api|dashboard|operator|watch|embed|_next/static|_next/image|.*\\..*).*)",
   ],
 };
