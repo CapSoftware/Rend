@@ -1245,6 +1245,7 @@
   }
 }
 
+/* Watch page shell (centered, framed preview) */
 .rend-embed-page {
   min-height: 100svh;
   background: linear-gradient(135deg, #101311 0%, #171915 45%, #202118 100%);
@@ -1259,29 +1260,12 @@
   width: min(1080px, 100%);
 }
 
-.rend-embed-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
-}
-
-.rend-embed-logo {
-  display: block;
-  height: 34px;
-  width: auto;
-  filter: invert(1) saturate(0) brightness(1.9);
-}
-
-.rend-embed-asset {
-  max-width: min(56vw, 520px);
+/* Embed page: full-bleed slick player */
+.rend-embed {
+  position: fixed;
+  inset: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: rgba(247, 244, 236, 0.64);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
+  background: #000;
 }
 
 .rend-player {
@@ -1313,11 +1297,12 @@
   inset: 0;
   display: grid;
   place-content: center;
-  gap: 10px;
+  gap: 14px;
   padding: 28px;
   text-align: center;
   background: rgba(5, 6, 5, 0.72);
   backdrop-filter: blur(6px);
+  pointer-events: none;
 }
 
 .rend-player[data-rend-player-state="ready"] .rend-player__overlay,
@@ -1341,58 +1326,456 @@
   line-height: 1.5;
 }
 
-.rend-player__retry {
+.rend-player__spinner {
   justify-self: center;
-  border: 1px solid rgba(247, 244, 236, 0.24);
-  border-radius: 8px;
-  background: rgba(247, 244, 236, 0.1);
+  width: 44px;
+  height: 44px;
   color: #f7f4ec;
-  cursor: pointer;
-  font: inherit;
-  font-size: 14px;
-  line-height: 1;
-  padding: 10px 14px;
 }
 
-.rend-player__retry:hover {
-  background: rgba(247, 244, 236, 0.16);
-}
-
-.rend-player__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  color: rgba(247, 244, 236, 0.6);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-}
-
-.rend-player__meta span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  border: 1px solid rgba(247, 244, 236, 0.1);
-  border-radius: 6px;
-  background: rgba(247, 244, 236, 0.05);
-  padding: 5px 7px;
+.rend-player[data-rend-player-state="not_playable"] .rend-player__spinner,
+.rend-player[data-rend-player-state="unavailable"] .rend-player__spinner,
+.rend-player[data-rend-player-state="bootstrap_failure"] .rend-player__spinner,
+.rend-player[data-rend-player-state="playback_failure"] .rend-player__spinner {
+  display: none;
 }
 
 @media (max-width: 640px) {
-  .rend-embed-page {
-    align-items: flex-start;
-    padding: 18px;
-  }
-
-  .rend-embed-header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .rend-embed-asset {
-    max-width: 100%;
-  }
-
   .rend-player__stage {
     min-height: 190px;
+  }
+}
+
+/* ============================================================
+   Full-bleed embed player + Mux-inspired controls
+   ============================================================ */
+
+.rend-player--embed {
+  --rend-accent: #b5872b;
+  display: block;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  color: #fff;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.rend-player--embed .rend-player__stage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  background: #000;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.rend-player--embed .rend-player__video {
+  background: #000;
+}
+
+.rend-player--embed .rend-player__overlay {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.rend-player--embed .rend-player__message {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* Controls layer */
+.rend-ctrl {
+  position: absolute;
+  inset: 0;
+  display: none;
+  color: #fff;
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.rend-player--ui .rend-ctrl {
+  display: block;
+}
+
+.rend-ctrl__gradient {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 38%;
+  min-height: 88px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.74) 0%, rgba(0, 0, 0, 0.32) 42%, rgba(0, 0, 0, 0) 100%);
+  opacity: 0;
+  transition: opacity 0.22s ease;
+  pointer-events: none;
+}
+
+.rend-player--ui.is-active .rend-ctrl__gradient,
+.rend-player--ui.is-paused .rend-ctrl__gradient {
+  opacity: 1;
+}
+
+/* Center big play */
+.rend-ctrl__bigplay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  margin: 0;
+  padding: 0;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.42);
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+  transform: translate(-50%, -50%) scale(0.86);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.15s ease;
+}
+
+.rend-ctrl__bigplay:hover {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.rend-player--ui.is-paused:not(.is-buffering) .rend-ctrl__bigplay {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* Buffering spinner */
+.rend-ctrl__spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+.rend-player--ui.is-buffering .rend-ctrl__spinner {
+  opacity: 1;
+}
+
+.rend-ctrl__spinner svg,
+.rend-player__spinner svg {
+  width: 100%;
+  height: 100%;
+  animation: rend-spin 1.1s linear infinite;
+}
+
+.rend-ctrl__spinner-track {
+  stroke: rgba(255, 255, 255, 0.22);
+}
+
+.rend-ctrl__spinner-head {
+  stroke: #fff;
+  stroke-dasharray: 95 220;
+}
+
+@keyframes rend-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Bottom bar */
+.rend-ctrl__bar {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px 11px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  pointer-events: none;
+}
+
+.rend-player--ui.is-active .rend-ctrl__bar,
+.rend-player--ui.is-paused .rend-ctrl__bar {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Timeline */
+.rend-ctrl__timeline {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 16px;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.rend-ctrl__timeline:focus-visible {
+  outline: 2px solid var(--rend-accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.rend-ctrl__rail {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.26);
+  border-radius: 999px;
+  overflow: visible;
+  transition: height 0.12s ease;
+}
+
+.rend-ctrl__timeline:hover .rend-ctrl__rail,
+.rend-player.is-scrubbing .rend-ctrl__rail {
+  height: 6px;
+}
+
+.rend-ctrl__buffered,
+.rend-ctrl__hoverfill,
+.rend-ctrl__played {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.rend-ctrl__buffered {
+  width: 0;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.rend-ctrl__hoverfill {
+  width: 0;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.rend-ctrl__played {
+  width: 0;
+  background: var(--rend-accent);
+}
+
+.rend-ctrl__thumb {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 13px;
+  height: 13px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transform: translate(50%, -50%) scale(0);
+  transition: transform 0.12s ease;
+}
+
+.rend-ctrl__timeline:hover .rend-ctrl__thumb,
+.rend-ctrl__timeline:focus-visible .rend-ctrl__thumb,
+.rend-player.is-scrubbing .rend-ctrl__thumb {
+  transform: translate(50%, -50%) scale(1);
+}
+
+/* Buttons row */
+.rend-ctrl__buttons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rend-ctrl__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin: 0;
+  padding: 0;
+  color: #fff;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0.92;
+  transition: opacity 0.12s ease, background 0.12s ease, transform 0.12s ease;
+}
+
+.rend-ctrl__btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.rend-ctrl__btn:active {
+  transform: scale(0.92);
+}
+
+.rend-ctrl__btn:focus-visible {
+  outline: 2px solid var(--rend-accent);
+  outline-offset: 2px;
+}
+
+.rend-ctrl__i--pause,
+.rend-ctrl__i--vol-low,
+.rend-ctrl__i--vol-off,
+.rend-ctrl__i--fs-exit {
+  display: none;
+}
+
+.rend-player.is-playing .rend-ctrl__i--play {
+  display: none;
+}
+
+.rend-player.is-playing .rend-ctrl__i--pause {
+  display: inline;
+}
+
+.rend-player[data-rend-vol-level="low"] .rend-ctrl__i--vol-high {
+  display: none;
+}
+
+.rend-player[data-rend-vol-level="low"] .rend-ctrl__i--vol-low {
+  display: inline;
+}
+
+.rend-player[data-rend-vol-level="off"] .rend-ctrl__i--vol-high {
+  display: none;
+}
+
+.rend-player[data-rend-vol-level="off"] .rend-ctrl__i--vol-off {
+  display: inline;
+}
+
+.rend-player.is-fullscreen .rend-ctrl__i--fs-enter {
+  display: none;
+}
+
+.rend-player.is-fullscreen .rend-ctrl__i--fs-exit {
+  display: inline;
+}
+
+/* Volume */
+.rend-ctrl__vol {
+  display: flex;
+  align-items: center;
+}
+
+.rend-ctrl__volslider {
+  display: flex;
+  align-items: center;
+  width: 0;
+  height: 38px;
+  overflow: hidden;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  transition: width 0.18s ease, opacity 0.18s ease;
+  opacity: 0;
+}
+
+.rend-ctrl__vol:hover .rend-ctrl__volslider,
+.rend-ctrl__vol:focus-within .rend-ctrl__volslider {
+  width: 70px;
+  opacity: 1;
+}
+
+.rend-ctrl__volrail {
+  position: relative;
+  width: 58px;
+  height: 4px;
+  margin: 0 6px;
+  background: rgba(255, 255, 255, 0.26);
+  border-radius: 999px;
+}
+
+.rend-ctrl__volfill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  background: #fff;
+  border-radius: 999px;
+}
+
+.rend-ctrl__volthumb {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 11px;
+  height: 11px;
+  background: #fff;
+  border-radius: 50%;
+  transform: translate(50%, -50%);
+}
+
+.rend-ctrl__volslider:focus-visible {
+  outline: 2px solid var(--rend-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Time */
+.rend-ctrl__time {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 8px 0 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+}
+
+.rend-ctrl__time-sep {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.rend-player.is-live .rend-ctrl__time-sep,
+.rend-player.is-live [data-rend-current] {
+  display: none;
+}
+
+.rend-ctrl__spacer {
+  flex: 1 1 auto;
+}
+
+/* Cursor hide when playing + idle */
+.rend-player--ui.is-playing:not(.is-active) {
+  cursor: none;
+}
+
+@media (max-width: 520px) {
+  .rend-ctrl__vol {
+    display: none;
+  }
+
+  .rend-ctrl__time {
+    font-size: 12px;
+  }
+
+  .rend-ctrl__bigplay {
+    width: 60px;
+    height: 60px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rend-ctrl__gradient,
+  .rend-ctrl__bar,
+  .rend-ctrl__bigplay,
+  .rend-ctrl__btn,
+  .rend-ctrl__rail,
+  .rend-ctrl__thumb,
+  .rend-ctrl__volslider {
+    transition: none;
   }
 }
 
