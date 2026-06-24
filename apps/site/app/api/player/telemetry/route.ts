@@ -8,6 +8,8 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
+
 function envBooleanOverride(name: string) {
   const value = (process.env[name] || "").trim().toLowerCase();
   if (!value) return undefined;
@@ -36,6 +38,12 @@ function telemetryIngestEnabled() {
 function controlPlaneUrl(path: string) {
   const baseUrl = envString("REND_API_BASE_URL", "http://127.0.0.1:4000").replace(/\/+$/, "");
   return `${baseUrl}${path}`;
+}
+
+function siteInternalToken() {
+  const configured = envString("REND_SITE_INTERNAL_TOKEN");
+  if (configured) return configured;
+  return productionProfile() ? "" : LOCAL_SITE_INTERNAL_TOKEN;
 }
 
 function telemetryInternalToken() {
@@ -79,8 +87,26 @@ async function readBoundedBody(request: Request) {
 }
 
 async function forwardDurablePlayerTelemetry(events: SanitizedPlayerTelemetryEvent[]) {
+  if (events.length === 0) return;
+
+  const body = JSON.stringify({ events });
+  const siteToken = siteInternalToken();
+  if (siteToken) {
+    const response = await fetch(controlPlaneUrl("/v1/site/player-telemetry"), {
+      method: "POST",
+      cache: "no-store",
+      signal: AbortSignal.timeout(1500),
+      headers: {
+        "content-type": "application/json",
+        "x-rend-site-token": siteToken,
+      },
+      body,
+    });
+    if (response.ok) return;
+  }
+
   const token = telemetryInternalToken();
-  if (!token || events.length === 0) return;
+  if (!token) return;
 
   await fetch(controlPlaneUrl("/internal/telemetry/player"), {
     method: "POST",
@@ -90,7 +116,7 @@ async function forwardDurablePlayerTelemetry(events: SanitizedPlayerTelemetryEve
       "content-type": "application/json",
       "x-rend-internal-token": token,
     },
-    body: JSON.stringify({ events }),
+    body,
   });
 }
 

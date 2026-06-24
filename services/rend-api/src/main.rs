@@ -1002,6 +1002,18 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             state.clone(),
             require_api_auth,
         ));
+    let site_player_telemetry_routes = Router::new()
+        .route(
+            "/v1/site/player-telemetry",
+            post(telemetry::post_player_telemetry),
+        )
+        .route_layer(DefaultBodyLimit::max(
+            state.config.playback_telemetry.max_body_bytes,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_site_internal_token,
+        ));
     let telemetry_routes = Router::new()
         .route("/playback", post(telemetry::post_playback_telemetry))
         .route("/player", post(telemetry::post_player_telemetry))
@@ -1050,6 +1062,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/v1/readyz", get(readyz))
         .route("/player", get(player_harness))
         .merge(authenticated_routes)
+        .merge(site_player_telemetry_routes)
         .nest("/internal/site", site_internal_routes)
         .nest("/internal/edges", edge_routes)
         .nest("/internal/operator", operator_routes)
@@ -4940,6 +4953,23 @@ async fn require_internal_edge_token(
             }),
         )
             .into_response()
+    }
+}
+
+async fn require_site_internal_token(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let provided = request
+        .headers()
+        .get("x-rend-site-token")
+        .and_then(|value| value.to_str().ok());
+
+    if provided.is_some_and(|token| secret_matches(token, &state.config.site_internal_token)) {
+        next.run(request).await
+    } else {
+        unauthorized_response()
     }
 }
 

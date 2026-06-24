@@ -21,6 +21,43 @@ async function responseJson(response: Response) {
   return (await response.json()) as Record<string, unknown>;
 }
 
+async function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>) {
+  const previous = new Map<string, string | undefined>();
+  for (const key of Object.keys(values)) previous.set(key, process.env[key]);
+
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    return await callback();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+async function withMockFetch<T>(
+  handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  callback: () => Promise<T>
+) {
+  const original = globalThis.fetch;
+  globalThis.fetch = handler as typeof fetch;
+  try {
+    return await callback();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
 async function withTelemetryIngestEnabled(callback: () => Promise<void>) {
   const env = process.env as Record<string, string | undefined>;
   const previous = env.REND_PLAYER_TELEMETRY_INGEST;
@@ -80,6 +117,50 @@ test("POST accepts sanitized player telemetry and recent endpoint returns it", a
     assert.equal(serialized.includes("edge.example"), false);
     assert.equal(serialized.includes("authorization"), false);
   });
+});
+
+test("POST forwards durable telemetry through the public site-token API route", async () => {
+  await withEnv(
+    {
+      REND_PLAYER_TELEMETRY_INGEST: "1",
+      REND_API_BASE_URL: "https://api.example.test/",
+      REND_SITE_INTERNAL_TOKEN: "site-token",
+      REND_INTERNAL_TELEMETRY_TOKEN: undefined,
+      REND_EDGE_INTERNAL_TOKEN: undefined,
+    },
+    async () => {
+      const calls: Array<{ url: string; init?: RequestInit }> = [];
+      await withMockFetch(async (url, init) => {
+        calls.push({ url: url instanceof Request ? url.url : String(url), init });
+        return Response.json({ accepted: 1 }, { status: 202 });
+      }, async () => {
+        const response = await POST(
+          telemetryRequest({
+            events: [
+              {
+                playback_session_id: "route-session-forward",
+                asset_id: "asset-123",
+                phase: "source_selected",
+                event_time_ms: EVENT_TIME_MS,
+                selected_playback_mode: "hls_js",
+                selected_artifact_path: "hls/master.m3u8",
+              },
+            ],
+          })
+        );
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(await responseJson(response), { status: "ok", accepted: 1 });
+      });
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, "https://api.example.test/v1/site/player-telemetry");
+      const headers = new Headers(calls[0].init?.headers);
+      assert.equal(headers.get("x-rend-site-token"), "site-token");
+      assert.equal(headers.get("x-rend-internal-token"), null);
+      assert.match(String(calls[0].init?.body), /route-session-forward/);
+    }
+  );
 });
 
 test("POST rejects non-json and malformed JSON bodies", async () => {

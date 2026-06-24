@@ -294,6 +294,24 @@ async fn post_internal_telemetry(
         .unwrap()
 }
 
+async fn post_site_player_telemetry(
+    app: Router,
+    body: impl Into<Body>,
+    token: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/site/player-telemetry")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-rend-site-token", token);
+    }
+
+    app.oneshot(builder.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
 async fn post_internal_edge_register(
     app: Router,
     body: impl Into<Body>,
@@ -760,6 +778,21 @@ async fn internal_operator_routes_require_site_internal_token() {
 
     let response = post_internal_operator(app, path, body, Some("wrong-token")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn site_player_telemetry_requires_site_internal_token() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let body = serde_json::json!({"events":[]}).to_string();
+
+    let response = post_site_player_telemetry(app.clone(), body.clone(), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post_site_player_telemetry(app.clone(), body.clone(), Some("wrong-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post_site_player_telemetry(app, body, Some("site-internal")).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
