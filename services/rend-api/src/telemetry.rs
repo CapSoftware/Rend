@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -36,6 +36,7 @@ const DEFAULT_ANALYTICS_MAX_WINDOW_SECS: usize = 7 * 24 * 60 * 60;
 const ANALYTICS_ROLLUP_THROTTLE_SECS: u64 = 60;
 const ANALYTICS_ROLLUP_LOOKBACK_SECS: i64 = 2 * 60 * 60;
 const ANALYTICS_ROLLUP_LAG_SECS: i64 = 60;
+const ANALYTICS_ROLLUP_CATCHUP_BUFFER_SECS: u64 = 5;
 const DEFAULT_OVERVIEW_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_OVERVIEW_WINDOW_SECS: u64 = 90 * 24 * 60 * 60;
 const PLAYER_WATCH_DELTA_MAX_MS: u32 = 60_000;
@@ -2106,12 +2107,43 @@ fn schedule_analytics_rollup_refresh(state: Arc<AppState>) {
         return;
     }
 
+    spawn_analytics_rollup_refresh(state.clone(), "immediate", 0);
+    spawn_analytics_rollup_refresh(
+        state.clone(),
+        "lag_catchup",
+        analytics_rollup_lag_catchup_delay_secs(),
+    );
+    spawn_analytics_rollup_refresh(
+        state,
+        "throttle_catchup",
+        analytics_rollup_throttle_catchup_delay_secs(),
+    );
+}
+
+fn spawn_analytics_rollup_refresh(
+    state: Arc<AppState>,
+    refresh_kind: &'static str,
+    delay_secs: u64,
+) {
     tokio::spawn(async move {
+        if delay_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        }
         if let Err(error) = refresh_recent_analytics_rollups(state.clone()).await {
             state.metrics.record_analytics_rollup_failure();
-            tracing::warn!(?error, "analytics rollup refresh failed");
+            tracing::warn!(?error, refresh_kind, "analytics rollup refresh failed");
         }
     });
+}
+
+fn analytics_rollup_lag_catchup_delay_secs() -> u64 {
+    u64::try_from(ANALYTICS_ROLLUP_LAG_SECS)
+        .unwrap_or(0)
+        .saturating_add(ANALYTICS_ROLLUP_CATCHUP_BUFFER_SECS)
+}
+
+fn analytics_rollup_throttle_catchup_delay_secs() -> u64 {
+    ANALYTICS_ROLLUP_THROTTLE_SECS.saturating_add(analytics_rollup_lag_catchup_delay_secs())
 }
 
 async fn refresh_recent_analytics_rollups(
@@ -2414,6 +2446,20 @@ mod tests {
             DateTime::parse_from_rfc3339("2026-06-24T13:52:47.991Z")
                 .unwrap()
                 .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn rollup_catchup_delays_cover_lag_and_throttle_window() {
+        assert_eq!(
+            analytics_rollup_lag_catchup_delay_secs(),
+            65,
+            "first catch-up should run just after the rollup exclusion lag"
+        );
+        assert_eq!(
+            analytics_rollup_throttle_catchup_delay_secs(),
+            125,
+            "final catch-up should include events received during the throttle window"
         );
     }
 
