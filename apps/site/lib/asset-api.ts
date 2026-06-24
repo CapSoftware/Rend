@@ -3,6 +3,7 @@ import type {
   AnalyticsBreakdown,
   AnalyticsBreakdownRow,
   AnalyticsOverview,
+  AnalyticsOverviewComparison,
   AssetArtifact,
   AssetDetail,
   AssetListResponse,
@@ -597,6 +598,49 @@ function sanitizeAnalyticsBreakdown(value: unknown): AnalyticsBreakdown | null {
   };
 }
 
+function sanitizeAnalyticsComparison(value: unknown): AnalyticsOverviewComparison | undefined {
+  if (!isRecord(value)) return undefined;
+  const views = safeOptionalPositiveInteger(value.views);
+  const uniqueViewers = safeOptionalPositiveInteger(value.unique_viewers);
+  const sessions = safeOptionalPositiveInteger(value.sessions);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const completions = safeOptionalPositiveInteger(value.completions);
+  const requestCount = safeOptionalPositiveInteger(value.request_count);
+  const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
+  const startupSuccessRate = safeOptionalRatio(value.startup_success_rate);
+  const rebufferRatio = safeOptionalRatio(value.rebuffer_ratio);
+  const errorRate = safeOptionalRatio(value.error_rate);
+  const cacheHitRate = safeOptionalRatio(value.cache_hit_rate);
+  if (
+    views === undefined ||
+    uniqueViewers === undefined ||
+    sessions === undefined ||
+    watchTimeMs === undefined ||
+    completions === undefined ||
+    requestCount === undefined ||
+    bytesServed === undefined ||
+    startupSuccessRate === undefined ||
+    rebufferRatio === undefined ||
+    errorRate === undefined ||
+    cacheHitRate === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    views,
+    unique_viewers: uniqueViewers,
+    sessions,
+    watch_time_ms: watchTimeMs,
+    completions,
+    request_count: requestCount,
+    bytes_served: bytesServed,
+    startup_success_rate: startupSuccessRate,
+    rebuffer_ratio: rebufferRatio,
+    error_rate: errorRate,
+    cache_hit_rate: cacheHitRate,
+  };
+}
+
 function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
   if (!isRecord(value)) return null;
   const windowStartedAt = safeTimestamp(value.window_started_at);
@@ -681,6 +725,7 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
           return safeBreakdown ? [safeBreakdown] : [];
         })
       : [],
+    previous: sanitizeAnalyticsComparison(value.previous),
   };
 }
 
