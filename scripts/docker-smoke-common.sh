@@ -160,7 +160,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     response = json.load(f)
 if response.get("playable_state") != "hls_ready":
     raise SystemExit(f"expected hls_ready bootstrap, got {response.get('playable_state')}")
-for key in ["playback_url", "manifest_url", "opener_url"]:
+for key in ["playback_url", "manifest_url"]:
     if not response.get(key):
         raise SystemExit(f"bootstrap response missing {key}")
 if not response.get("prefetch_hints"):
@@ -177,6 +177,14 @@ playback_url_from_bootstrap() {
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     print(json.load(f)["playback_url"])
+PY
+}
+
+opener_url_from_bootstrap() {
+  python3 - "$1" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f).get("opener_url") or "")
 PY
 }
 

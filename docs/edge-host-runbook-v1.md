@@ -155,6 +155,7 @@ For the first Latitude production shape, bind Rend services to loopback and let 
 own public TLS. Checked Caddy templates live in:
 
 - `docs/templates/control-plane.Caddyfile`
+- `docs/templates/control-plane-upstream.Caddyfile`
 - `docs/templates/edge-host.Caddyfile`
 
 The control-plane template exposes `api.rend.so` for the public `/v1/*` API and
@@ -296,6 +297,7 @@ Production-style templates are checked in under `docs/templates/`:
 - `docs/templates/control-plane.compose.yml`
 - `docs/templates/edge-host.compose.yml`
 - `docs/templates/control-plane.Caddyfile`
+- `docs/templates/control-plane-upstream.Caddyfile`
 - `docs/templates/edge-host.Caddyfile`
 
 Build production images from a clean git worktree before bootstrapping or deploy:
@@ -345,6 +347,7 @@ Control-plane host bootstrap:
 sudo mkdir -p /opt/rend /etc/rend
 sudo cp docs/templates/control-plane.compose.yml /opt/rend/control-plane.compose.yml
 sudo cp docs/templates/control-plane.Caddyfile /etc/caddy/Caddyfile
+sudo cp docs/templates/control-plane-upstream.Caddyfile /etc/caddy/rend-control-plane-upstream.caddy
 sudo cp docs/env/rend-api.env.example /etc/rend/rend-api.env
 sudo cp docs/env/rend-media-worker.env.example /etc/rend/rend-media-worker.env
 sudoedit /etc/rend/rend-api.env /etc/rend/rend-media-worker.env
@@ -354,6 +357,12 @@ scripts/preflight-control-plane-host.sh --manifest .rend/releases/production-001
 scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json --dry-run
 scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json
 ```
+
+The checked `control-plane-upstream.Caddyfile` points at `127.0.0.1:4000` for
+bootstrap so importing it into an existing single-slot host does not switch
+traffic before a blue/green candidate exists. The first transactional deploy
+records that as the legacy previous upstream, starts `rend-api-blue` on `4001`,
+and promotes Caddy only after private health checks pass.
 
 Edge host bootstrap:
 
@@ -556,9 +565,31 @@ scripts/validate-production-env.sh --role control-plane
 scripts/preflight-control-plane-host.sh --manifest .rend/releases/production-004.json
 scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-004.json --dry-run
 scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-004.json
-curl -fsS http://127.0.0.1:4000/readyz
+cat /var/lib/rend/control-plane/active-slot
+curl -fsS "http://127.0.0.1:$(cat /var/lib/rend/control-plane/active-slot | sed 's/blue/4001/;s/green/4002/')/readyz"
 docker compose -f /opt/rend/control-plane.compose.yml ps
 ```
+
+The helper runs `rend-api migrate` as a one-shot service before promotion,
+starts only the inactive API slot, probes it directly, then switches
+`/etc/caddy/rend-control-plane-upstream.caddy` and reloads Caddy. If the
+candidate fails before promotion, the old Caddy upstream is untouched. If Caddy
+reload or post-promotion readiness fails, the helper switches the snippet back
+to the previous upstream. When run through `scripts/deploy-release-over-ssh.sh`,
+the control-plane transaction runs as a transient `systemd-run` unit on the host
+so it can finish rollback if the SSH session or GitHub runner dies after the
+unit starts.
+
+The SSH wrapper bootstraps host files before preflight: it installs the current
+control-plane Compose template, patches an existing concrete Caddyfile to use
+the managed upstream snippet, backs up existing copies, creates the snippet only
+if missing, removes legacy `admin off` Caddy settings, and preserves any
+existing upstream target. It reloads Caddy while the upstream still points at
+the current slot; if the old running config cannot reload because admin was
+disabled, it performs one restart before the transaction starts. The sync step
+enforces `REND_API_AUTO_MIGRATE=false` in serving env files so migrations stay
+in the one-shot deploy service. Keep the managed upstream snippet `0644`; the
+`caddy` service user must be able to import it during reload.
 
 Edge deploy:
 
@@ -571,6 +602,28 @@ scripts/deploy-edge-host.sh --manifest .rend/releases/production-004.json
 curl -fsS http://127.0.0.1:4100/readyz
 curl -fsS -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" http://127.0.0.1:4100/metrics
 ```
+
+The edge deploy helper is still in-place for each edge host. Deploy one edge at
+a time, keep the other configured edge serving public playback, and run the
+multi-edge verifier/readiness gate after each edge change. Do not claim edge
+deploys are fully zero-downtime until they have their own blue/green slot
+transaction and Caddy rollback path.
+
+The production workflow syncs each host's `REND_EDGE_ID`, `REND_EDGE_REGION`,
+`REND_EDGE_BASE_URL`, and shared `REND_EXPECTED_EDGES` from
+`REND_READINESS_EDGES` before restarting that edge. Manual edits should preserve
+those values unless the workflow variable is updated at the same time.
+
+The production GitHub workflow runs the same control-plane transaction through
+`scripts/deploy-release-over-ssh.sh`, then can verify registry rows from the
+control-plane host with `scripts/verify-edge-registry-over-ssh.sh` and run
+`scripts/verify-first-host-deploy.sh --skip-registration` with the tunneled edge
+private bases when `run_first_host_verifier=true`. A manual dispatch with
+`verify_control_plane_rollback=true` drills the previous-slot rollback and then
+re-promotes the current digest. Configure `REND_VERIFY_ASSET_ID` only when an
+existing synthetic/non-customer `hls_ready` asset should be used for the
+verifier's warmed-playback smoke; otherwise the workflow uses the synthetic
+playback readiness gate for playback proof.
 
 After each deploy, run the remote health and smoke commands above. For a
 multi-edge production deployment, verify each registered edge appears in
@@ -591,9 +644,9 @@ curl -fsS http://127.0.0.1:4100/readyz
 Control-plane rollback:
 
 ```sh
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json --dry-run
-scripts/deploy-control-plane-host.sh --manifest .rend/releases/production-001.json
-curl -fsS http://127.0.0.1:4000/readyz
+scripts/deploy-control-plane-host.sh --rollback --dry-run
+scripts/deploy-control-plane-host.sh --rollback
+cat /var/lib/rend/control-plane/active-slot
 ```
 
 Rollback order:
@@ -602,18 +655,30 @@ Rollback order:
    telemetry-spool regressions.
 2. Roll back `rend-media-worker` for ffmpeg, artifact-generation, or warm-call
    regressions.
-3. Roll back `rend-api` last. Treat Postgres migrations as forward-only unless
-   a tested rollback migration exists.
+3. Roll back `rend-api` last by switching Caddy back to the previous slot with
+   `scripts/deploy-control-plane-host.sh --rollback`. This does not pull or
+   rebuild images; it assumes the previous slot is still running. Treat Postgres
+   migrations as forward-only unless a tested rollback migration exists.
 
 Do not delete `/var/spool/rend/edge-telemetry` during rollback unless the
 telemetry ingest contract changed incompatibly. It is safe to purge
 `/var/lib/rend/edge-cache` if cache contents are suspected bad.
 
+## Residual SPOFs And Follow-Up
+
+The control-plane transaction protects against deploy-action failures on a
+single host; it does not make the control-plane host itself highly available.
+Host, kernel, network, disk, Docker daemon, and Caddy process failures remain
+single-host SPOFs. The precise edge follow-up is to add
+`rend-edge-blue`/`rend-edge-green` services on separate private ports, a managed
+edge Caddy upstream snippet, candidate private `/readyz` and `/healthz` probes,
+and automatic rollback on Caddy reload or post-promotion playback failures.
+
 ## Logs And Metrics Guidance
 
 API logs to inspect:
 
-- Startup migration failures when `REND_API_AUTO_MIGRATE=true`
+- One-shot `rend-api migrate` failures before candidate promotion
 - `/readyz` dependency failures for Postgres, Redis, or object storage
 - Upload errors and asset state transitions
 - Edge warm/purge fanout lifecycle events, including per-edge status summaries
@@ -694,7 +759,9 @@ scripts/preflight-control-plane-host.sh --dry-run --allow-dev-defaults \
   --manifest .rend/releases/production-001.json \
   --api-env .env.docker.example \
   --worker-env .env.docker.example \
-  --compose-file docs/templates/control-plane.compose.yml
+  --compose-file docs/templates/control-plane.compose.yml \
+  --caddyfile docs/templates/control-plane.Caddyfile \
+  --caddy-upstream-file docs/templates/control-plane-upstream.Caddyfile
 
 scripts/preflight-edge-host.sh --dry-run --allow-dev-defaults \
   --allow-local-image-refs \

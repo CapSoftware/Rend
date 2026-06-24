@@ -1,6 +1,4 @@
-{
-	admin off
-}
+import /etc/caddy/rend-control-plane-upstream.caddy
 
 # Internal control-plane ingress for edge hosts.
 #
@@ -23,7 +21,7 @@
 		path /v1/* /readyz
 	}
 	handle @public_api {
-		reverse_proxy 127.0.0.1:4000
+		import rend_active_control_plane
 	}
 
 	handle {
@@ -37,7 +35,7 @@
 		remote_ip {$REND_CONTROL_PLANE_ALLOWED_EDGE_IPS}
 	}
 	handle @allowed_internal {
-		reverse_proxy 127.0.0.1:4000
+		import rend_active_control_plane
 	}
 	handle {
 		respond 404

@@ -1,0 +1,7 @@
+# Managed by scripts/deploy-control-plane-host.sh after bootstrap.
+# Bootstrap points at the legacy/current API port so installing the import is
+# safe before the first blue/green promotion. The deploy script atomically
+# switches this snippet to blue or green only after the candidate slot is ready.
+(rend_active_control_plane) {
+	reverse_proxy 127.0.0.1:4000
+}

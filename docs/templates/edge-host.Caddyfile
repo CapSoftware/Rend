@@ -1,7 +1,3 @@
-{
-	admin off
-}
-
 # Public edge ingress. Only canonical signed playback paths reach rend-edge.
 # Every other public path, including /internal/*, /metrics, probes, and
 # non-canonical /v/* paths, returns 404.

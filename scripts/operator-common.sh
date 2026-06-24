@@ -740,6 +740,14 @@ operator_validate_api_env() {
   operator_check_bool "$file" REND_API_AUTO_MIGRATE
   operator_check_bool "$file" REND_API_INLINE_MEDIA_PROCESSING
   operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
+  if [[ "$(operator_env_value "$file" REND_ENV 2>/dev/null || true)" == "production" ]] &&
+    [[ "$(operator_env_value "$file" REND_API_AUTO_MIGRATE 2>/dev/null || true)" != "false" ]]; then
+    if [[ "$allow_dev_defaults" == "true" ]]; then
+      operator_warn "API env REND_API_AUTO_MIGRATE is not false; allowed only because --allow-dev-defaults was set"
+    else
+      operator_fail "API env REND_API_AUTO_MIGRATE must be false for production serving containers; run rend-api migrate as a one-shot step"
+    fi
+  fi
   operator_check_absolute_path "$file" REND_FFMPEG_PATH
   operator_check_absolute_path "$file" REND_FFPROBE_PATH
   for key in "${numeric_keys[@]}"; do

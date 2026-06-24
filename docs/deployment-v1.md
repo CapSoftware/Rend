@@ -321,10 +321,18 @@ liveness because the worker has no HTTP listener.
 
 ## Bootstrap And Migrations
 
-Postgres migrations are applied by `rend-api` through SQLx when
-`REND_API_AUTO_MIGRATE=true`. In local Compose, the worker waits for the API and
-sets `REND_API_AUTO_MIGRATE=false` to avoid duplicate startup migration work.
-For production, deploy or run the API migration step before starting workers.
+Postgres migrations are applied through the explicit one-shot
+`rend-api migrate` command. Local Compose still sets
+`REND_API_AUTO_MIGRATE=true` on the local API for developer convenience and sets
+the worker to `false` to avoid duplicate startup migration work. Production
+serving API and worker containers must use `REND_API_AUTO_MIGRATE=false`; the
+control-plane deploy helper runs the candidate image's `rend-api-migrate`
+service before any Caddy traffic promotion.
+
+Treat production Postgres migrations as expand/contract and rollback-hostile
+unless a tested rollback migration exists. A failed pre-promotion candidate
+keeps the old API slot serving, but an already-applied schema migration is not
+automatically reverted.
 
 ClickHouse schema is applied by the local `clickhouse-init` one-shot service on
 every Compose startup. The schema uses `CREATE DATABASE IF NOT EXISTS` and
@@ -370,18 +378,20 @@ scripts/preflight-edge-host.sh \
   --manifest .rend/releases/production-001.json
 ```
 
-The control-plane preflight checks Docker/Compose, compose/env files, manifest
-digest refs, manifest platform metadata, manifest image pull readiness, pulled
-image OS/architecture, managed dependency connectivity where local tools allow
-it, and host bind ports. The edge preflight checks Docker/Compose, edge env,
+The control-plane preflight checks Docker/Compose, compose/env files, Caddy
+upstream template wiring, manifest digest refs, manifest platform metadata,
+manifest image pull readiness, pulled image OS/architecture, and managed
+dependency connectivity where local tools allow it. The active blue/green API
+slot is expected to keep one private port bound, so control-plane preflight does
+not require API ports to be free. The edge preflight checks Docker/Compose, edge env,
 manifest digest ref, manifest platform metadata, manifest image pull readiness,
 pulled image OS/architecture,
 private-by-default direct port publishing, uid/gid `10001` cache and spool
 writeability, object-store health, control-plane register/heartbeat
 reachability, telemetry ingest reachability, and host bind ports.
 
-Use deploy helpers in dry-run mode first to print the exact Compose commands
-with manifest image refs:
+Use deploy helpers in dry-run mode first to print the exact Compose/Caddy
+transaction with manifest image refs:
 
 ```sh
 scripts/deploy-control-plane-host.sh \
@@ -392,6 +402,44 @@ scripts/deploy-edge-host.sh \
   --manifest .rend/releases/production-001.json \
   --dry-run
 ```
+
+The control-plane helper is transactional on the host. It takes
+`/var/lock/rend-control-plane-deploy.lock`, records active/previous slot state
+under `/var/lib/rend/control-plane`, runs the one-shot migration, recreates only
+the inactive API slot (`rend-api-blue` or `rend-api-green`), probes candidate
+`/readyz` and `/healthz` directly, then atomically replaces
+`/etc/caddy/rend-control-plane-upstream.caddy` and reloads Caddy. If promotion
+or post-promotion checks fail, it restores the previous upstream. The previous
+API slot remains running after a successful promotion for immediate rollback.
+When invoked by `scripts/deploy-release-over-ssh.sh`, the control-plane
+transaction runs under `sudo systemd-run --wait --collect --pipe` so rollback can
+continue on the host if the GitHub runner or SSH session dies after the unit is
+started.
+
+The SSH wrapper also bootstraps production host files before preflight: it
+installs the current control-plane Compose template, patches an existing
+concrete Caddyfile to use the managed upstream snippet, creates
+`/etc/caddy/rend-control-plane-upstream.caddy` only when missing, removes
+legacy `admin off` Caddy settings, and preserves an existing upstream target.
+The bootstrap reloads Caddy while the upstream still points at the current slot;
+if an older running config cannot reload because admin was disabled, it performs
+one restart before the transaction starts so later blue/green promotions can use
+normal Caddy reloads. The managed upstream snippet must stay `0644`; preflight
+fails if the file is root-only because the `caddy` service user imports it on
+reload.
+
+The edge helper remains an in-place per-host deploy. For production, deploy
+edges serially and keep at least one edge serving while the other updates, then
+run the multi-edge verifier/readiness gate. A future edge hardening pass should
+mirror the control-plane slot model: `rend-edge-blue`/`rend-edge-green`, private
+candidate probes, a managed Caddy upstream snippet, and automatic rollback on
+post-promotion failures.
+
+The production workflow derives each edge host's `REND_EDGE_ID`,
+`REND_EDGE_REGION`, `REND_EDGE_BASE_URL`, and shared `REND_EXPECTED_EDGES` from
+`REND_READINESS_EDGES` before restarting that edge. Keep those entries aligned
+with the intended registry IDs; the verifier treats the registry as authoritative
+after deploy.
 
 After deploy, verify the first-host path:
 
@@ -528,15 +576,30 @@ usage or watch accounting.
 5. Run `scripts/validate-production-env.sh` and the relevant preflight script on
    each host.
 6. Run the deploy helper with `--dry-run`, then run it without `--dry-run`.
-7. Deploy `rend-api` with `REND_API_AUTO_MIGRATE=true` for the migration step.
-8. Start `rend-api` serving traffic after `/readyz` passes.
+7. On the control-plane host, let `scripts/deploy-control-plane-host.sh` run the
+   candidate image's one-shot `rend-api migrate` service.
+8. Let the control-plane helper start the inactive API slot, verify private
+   `/readyz` and `/healthz`, then promote Caddy to the candidate slot.
 9. Start `rend-edge` nodes with unique `REND_EDGE_ID`, `REND_EDGE_REGION`,
    API-reachable `REND_EDGE_BASE_URL`, cache volume, and telemetry spool volume.
-10. Start `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
+10. Start or update `rend-media-worker` with `REND_API_AUTO_MIGRATE=false`.
 11. Run `scripts/verify-first-host-deploy.sh` with a provided `hls_ready` asset
     to confirm edge registration, signed playback, and telemetry analytics.
 12. Run `bun run playback:readiness -- --target configured --skip-local-stack`
     or pass `--run-readiness-gate` to the verifier before promoting traffic.
+
+The production GitHub workflow runs the first-host verifier when
+`run_first_host_verifier=true`. It first verifies edge registry rows from the
+control-plane host with `scripts/verify-edge-registry-over-ssh.sh`, using the
+host's deployed `/etc/rend/rend-api.env` instead of a separate GitHub
+`DATABASE_URL`. It then rewrites private edge targets through SSH tunnels before
+running API/edge health, ClickHouse, and public deny checks with
+`scripts/verify-first-host-deploy.sh --skip-registration`.
+When `REND_VERIFY_ASSET_ID` or `verify_asset_id` points at an existing
+synthetic/non-customer `hls_ready` asset, the verifier also runs warmed
+playback and analytics checks. If no asset id is configured, the workflow runs
+the verifier with `--skip-playback` and relies on the synthetic playback
+readiness gate for upload, playback, and telemetry proof.
 
 ## Rollback Basics
 
@@ -544,8 +607,15 @@ Roll back services in dependency order from the edge inward:
 
 1. Roll back `rend-edge` first if playback cache behavior regresses.
 2. Roll back `rend-media-worker` if artifact generation or warming regresses.
-3. Roll back `rend-api` last. Treat Postgres migrations as forward-only unless a
-   tested rollback migration exists.
+3. Roll back `rend-api` last. For the control plane, prefer
+   `scripts/deploy-control-plane-host.sh --rollback` to switch Caddy back to the
+   previous slot without pulling or rebuilding. Treat Postgres migrations as
+   forward-only unless a tested rollback migration exists.
+
+For a production rollback drill in GitHub Actions, run the workflow manually
+with `verify_control_plane_rollback=true`. The workflow switches Caddy back to
+the previous control-plane slot, verifies public `/readyz`, then deploys the
+current digest manifest again to re-promote the candidate slot.
 
 Edge cache can be purged or discarded during rollback. Telemetry spool files can
 be retained for replay or deleted if the ingest contract changed incompatibly.
@@ -562,3 +632,14 @@ US East and London edge nodes differ only by environment and attached volumes:
 - local telemetry spool volume
 
 The same `rend-edge` image and command run in both regions.
+
+## Residual SPOFs
+
+The blue/green control-plane transaction prevents a failed deploy, failed
+candidate, failed Caddy reload, or failed post-promotion check from taking down
+the currently serving API process. It does not remove single-host or
+single-daemon failure modes. A kernel panic, VM outage, host network loss, disk
+failure, Docker daemon failure, or Caddy process failure on the control-plane
+host can still cause downtime. The current edge model is resilient only at the
+multi-edge operational level; each individual edge host still updates
+`rend-edge` in place.

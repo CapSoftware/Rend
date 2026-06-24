@@ -218,6 +218,15 @@ fi
 
 api_base="${api_base%/}"
 control_plane_url="${control_plane_url%/}"
+edge_registry_retries="${REND_EDGE_REGISTRY_VERIFY_RETRIES:-6}"
+edge_registry_retry_delay="${REND_EDGE_REGISTRY_VERIFY_RETRY_DELAY_SECS:-5}"
+
+if ! [[ "$edge_registry_retries" =~ ^[0-9]+$ ]] || [[ "$edge_registry_retries" -lt 1 ]]; then
+  edge_registry_retries=1
+fi
+if ! [[ "$edge_registry_retry_delay" =~ ^[0-9]+$ ]]; then
+  edge_registry_retry_delay=5
+fi
 
 expected_edge_rows() {
   python3 - "$1" <<'PY'
@@ -394,19 +403,31 @@ check_registration() {
       operator_fail "expected edge registry check requires --database-url/--api-env and psql"
       return 0
     fi
-    local rows sql psql_url
+    local attempt last_error psql_error_file psql_status rows sql psql_url validation_error_file
     sql="$(registry_sql_for_expected_edges "$expected_edges")"
     psql_url="$(operator_psql_database_url "$database_url")"
     if [[ "$psql_url" != "$database_url" ]]; then
       operator_info "normalized DATABASE_URL for psql by removing sslrootcert=system"
     fi
-    rows="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -F $'\t' -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
-    if validate_expected_edge_rows "$expected_edges" "$rows" 2>/tmp/rend-edge-registry-error.$$; then
-      operator_ok "all expected edges are registered healthy"
-    else
-      operator_fail "expected edge registry check failed: $(cat /tmp/rend-edge-registry-error.$$)"
-    fi
-    rm -f /tmp/rend-psql-error.$$ /tmp/rend-edge-registry-error.$$
+    psql_error_file="$tmp_dir/expected-edge-registry-psql-error.txt"
+    validation_error_file="$tmp_dir/expected-edge-registry-validation-error.txt"
+    for ((attempt = 1; attempt <= edge_registry_retries; attempt++)); do
+      psql_status=0
+      rows="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -F $'\t' -At -c "$sql" 2>"$psql_error_file")" || psql_status=$?
+      if [[ "$psql_status" != "0" ]]; then
+        last_error="psql query failed with exit $psql_status; database connection details suppressed"
+      elif validate_expected_edge_rows "$expected_edges" "$rows" 2>"$validation_error_file"; then
+        operator_ok "all expected edges are registered healthy"
+        return 0
+      else
+        last_error="$(cat "$validation_error_file")"
+      fi
+      if [[ "$attempt" -lt "$edge_registry_retries" ]]; then
+        operator_warn "expected edge registry check not ready yet: $last_error"
+        sleep "$edge_registry_retry_delay"
+      fi
+    done
+    operator_fail "expected edge registry check failed: $last_error"
     return 0
   fi
 
@@ -416,20 +437,24 @@ check_registration() {
   fi
 
   if [[ -n "$database_url" ]] && command -v psql >/dev/null 2>&1; then
-    local result sql psql_url
+    local psql_error_file psql_status result sql psql_url
     sql="$(registry_sql_for_edge "$edge_id")"
     psql_url="$(operator_psql_database_url "$database_url")"
     if [[ "$psql_url" != "$database_url" ]]; then
       operator_info "normalized DATABASE_URL for psql by removing sslrootcert=system"
     fi
-    result="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -At -c "$sql" 2>/tmp/rend-psql-error.$$ || true)"
-    if [[ -n "$result" ]]; then
-      operator_ok "edge registration is visible in Postgres: $result"
-      rm -f /tmp/rend-psql-error.$$
+    psql_error_file="$tmp_dir/edge-registry-psql-error.txt"
+    psql_status=0
+    result="$(PGCONNECT_TIMEOUT=8 psql "$psql_url" -At -c "$sql" 2>"$psql_error_file")" || psql_status=$?
+    if [[ "$psql_status" != "0" ]]; then
+      operator_fail "edge registry query failed with exit $psql_status; database connection details suppressed"
       return 0
     fi
-    operator_fail "edge $edge_id was not visible in rend.edge_nodes via Postgres: $(cat /tmp/rend-psql-error.$$ 2>/dev/null || true)"
-    rm -f /tmp/rend-psql-error.$$
+    if [[ -n "$result" ]]; then
+      operator_ok "edge registration is visible in Postgres: $result"
+      return 0
+    fi
+    operator_fail "edge $edge_id was not visible in rend.edge_nodes via Postgres"
     return 0
   fi
 

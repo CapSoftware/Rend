@@ -13,7 +13,9 @@ Usage: scripts/sync-control-plane-billing-env-over-ssh.sh --host HOST --user USE
 
 Sync the deploy-managed env allowlist into the production control-plane API and
 media-worker env files over SSH. Values are read from this process environment;
-only key names are printed.
+only key names are printed. The sync also enforces production serving containers
+with REND_API_AUTO_MIGRATE=false; migrations run through the one-shot deploy
+step.
 
 Options:
   --host HOST           SSH host.
@@ -125,6 +127,7 @@ import sys
 
 target = sys.argv[1]
 defaults = {
+    "REND_API_AUTO_MIGRATE": "false",
     "CLICKHOUSE_DATABASE": "rend",
     "REND_API_CORS_ALLOWED_ORIGINS": "https://rend.so,https://www.rend.so",
     "REND_BILLING_MODE": "autumn",
@@ -145,6 +148,7 @@ defaults = {
     "REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS": "3600",
 }
 keys = [
+    "REND_API_AUTO_MIGRATE",
     "CLICKHOUSE_URL",
     "CLICKHOUSE_DATABASE",
     "CLICKHOUSE_USER",
@@ -250,4 +254,4 @@ scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
 remote_command="python3 $(shell_quote "$remote_merge") $(shell_quote "$remote_fragment") $(shell_quote "$api_env") $(shell_quote "$worker_env")"
 ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$remote_command")"
 ssh "${ssh_args[@]}" "$target" "rm -rf $remote_dir_q"
-echo "Control-plane env sync completed for keys: CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
+echo "Control-plane env sync completed for keys: REND_API_AUTO_MIGRATE CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"

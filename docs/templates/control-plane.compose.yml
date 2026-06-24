@@ -3,13 +3,16 @@ name: rend-control-plane
 # Set REND_API_IMAGE and REND_MEDIA_WORKER_IMAGE to immutable digest refs from
 # the release manifest, for example registry.example.com/rend/rend-api@sha256:...
 services:
-  rend-api:
+  rend-api-blue:
     image: ${REND_API_IMAGE:?set REND_API_IMAGE}
     restart: unless-stopped
     env_file:
       - /etc/rend/rend-api.env
+    environment:
+      REND_API_AUTO_MIGRATE: "false"
+      REND_API_BIND_ADDR: 0.0.0.0:4000
     ports:
-      - "${REND_API_PUBLISH_ADDR:-127.0.0.1}:${REND_API_PUBLISH_PORT:-4000}:4000"
+      - "${REND_API_PUBLISH_ADDR:-127.0.0.1}:${REND_API_BLUE_PUBLISH_PORT:-4001}:4000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/readyz"]
       interval: 10s
@@ -22,14 +25,44 @@ services:
         max-size: "100m"
         max-file: "5"
 
+  rend-api-green:
+    image: ${REND_API_IMAGE:?set REND_API_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/rend/rend-api.env
+    environment:
+      REND_API_AUTO_MIGRATE: "false"
+      REND_API_BIND_ADDR: 0.0.0.0:4000
+    ports:
+      - "${REND_API_PUBLISH_ADDR:-127.0.0.1}:${REND_API_GREEN_PUBLISH_PORT:-4002}:4000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 18
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  rend-api-migrate:
+    image: ${REND_API_IMAGE:?set REND_API_IMAGE}
+    restart: "no"
+    command: ["migrate"]
+    env_file:
+      - /etc/rend/rend-api.env
+    environment:
+      REND_API_AUTO_MIGRATE: "false"
+
   rend-media-worker:
     image: ${REND_MEDIA_WORKER_IMAGE:?set REND_MEDIA_WORKER_IMAGE}
     restart: unless-stopped
     env_file:
       - /etc/rend/rend-media-worker.env
-    depends_on:
-      rend-api:
-        condition: service_healthy
+    environment:
+      REND_API_AUTO_MIGRATE: "false"
     healthcheck:
       test:
         [

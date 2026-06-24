@@ -26,6 +26,9 @@ Options:
 Environment:
   REND_EDGE_CORS_ALLOWED_ORIGINS
                     Edge CORS allowlist. Defaults to production Rend origins.
+  REND_EDGE_ID, REND_EDGE_REGION, REND_EDGE_BASE_URL, REND_EXPECTED_EDGES
+                    Optional deploy-managed edge identity values derived from
+                    REND_READINESS_EDGES by the production workflow.
   REND_SSH_KEY_PATH Optional private key path passed to ssh/scp.
   REND_SSH_EXTRA_OPTS
                     Optional extra ssh options, split by shell words.
@@ -113,29 +116,64 @@ import sys
 from urllib.parse import urlparse
 
 target = sys.argv[1]
-key = "REND_EDGE_CORS_ALLOWED_ORIGINS"
-value = os.environ.get(key, "https://rend.so,https://www.rend.so")
-if not value:
-    raise SystemExit(f"{key} is required")
-if "\n" in value or "\r" in value:
-    raise SystemExit(f"{key} must be a single-line value")
+updates = {}
 
-origins = [item.strip() for item in value.split(",") if item.strip()]
+def require_single_line(key, value):
+    if not value:
+        raise SystemExit(f"{key} is required")
+    if "\n" in value or "\r" in value:
+        raise SystemExit(f"{key} must be a single-line value")
+    return value
+
+def require_http_url(key, value):
+    value = require_single_line(key, value).rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise SystemExit(f"{key} must be an absolute http(s) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise SystemExit(f"{key} must not include credentials, query, or fragment")
+    return value
+
+cors_key = "REND_EDGE_CORS_ALLOWED_ORIGINS"
+cors_value = os.environ.get(cors_key, "https://rend.so,https://www.rend.so")
+cors_value = require_single_line(cors_key, cors_value)
+origins = [item.strip() for item in cors_value.split(",") if item.strip()]
 if not origins:
-    raise SystemExit(f"{key} must include at least one origin")
+    raise SystemExit(f"{cors_key} must include at least one origin")
 for origin in origins:
     parsed = urlparse(origin)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise SystemExit(f"{key} entry must be an absolute http(s) origin: {origin}")
+        raise SystemExit(f"{cors_key} entry must be an absolute http(s) origin: {origin}")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise SystemExit(f"{key} entries must not include credentials, query, or fragment: {origin}")
+        raise SystemExit(f"{cors_key} entries must not include credentials, query, or fragment: {origin}")
     if parsed.path not in {"", "/"}:
-        raise SystemExit(f"{key} entries must be origins only: {origin}")
+        raise SystemExit(f"{cors_key} entries must be origins only: {origin}")
     if parsed.port is not None and not (1 <= parsed.port <= 65535):
-        raise SystemExit(f"{key} port must be 1-65535: {origin}")
+        raise SystemExit(f"{cors_key} port must be 1-65535: {origin}")
+updates[cors_key] = cors_value
+
+for key in ("REND_EDGE_ID", "REND_EDGE_REGION"):
+    value = os.environ.get(key)
+    if value is not None:
+        updates[key] = require_single_line(key, value)
+
+value = os.environ.get("REND_EDGE_BASE_URL")
+if value is not None:
+    updates["REND_EDGE_BASE_URL"] = require_http_url("REND_EDGE_BASE_URL", value)
+
+expected = os.environ.get("REND_EXPECTED_EDGES")
+if expected is not None:
+    expected = require_single_line("REND_EXPECTED_EDGES", expected)
+    for item in [part.strip() for part in expected.split(",") if part.strip()]:
+        pieces = item.split("=", 2)
+        if len(pieces) != 3 or not pieces[0].strip() or not pieces[1].strip():
+            raise SystemExit("REND_EXPECTED_EDGES entries must use edge_id=region=base_url")
+        require_http_url("REND_EXPECTED_EDGES base_url", pieces[2].strip())
+    updates["REND_EXPECTED_EDGES"] = expected
 
 with open(target, "w", encoding="utf-8") as file:
-    file.write(f"{key}={value}\n")
+    for key, value in updates.items():
+        file.write(f"{key}={value}\n")
 PY
 
 cat >"$merge_script" <<'PY'
@@ -210,4 +248,12 @@ scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
 remote_command="python3 $(shell_quote "$remote_merge") $(shell_quote "$remote_fragment") $(shell_quote "$edge_env")"
 # shellcheck disable=SC2029
 ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$remote_command")"
-echo "Edge env sync completed for keys: REND_EDGE_CORS_ALLOWED_ORIGINS"
+python3 - "$fragment" <<'PY'
+import sys
+from pathlib import Path
+keys = []
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        keys.append(line.split("=", 1)[0])
+print("Edge env sync completed for keys: " + ", ".join(keys))
+PY

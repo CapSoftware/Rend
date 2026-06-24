@@ -351,7 +351,7 @@ impl ApiConfig {
                 poll_interval: env_duration_secs("REND_MEDIA_WORKER_POLL_INTERVAL_SECS", 1)?,
                 lock_timeout: env_duration_secs("REND_MEDIA_JOB_LOCK_TIMEOUT_SECS", 300)?,
             },
-            auto_migrate: env_bool("REND_API_AUTO_MIGRATE", true)?,
+            auto_migrate: env_bool("REND_API_AUTO_MIGRATE", !rend_env.is_strict())?,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
             max_upload_bytes,
             cors_allowed_origins,
@@ -916,7 +916,8 @@ async fn main() -> Result<()> {
     install_rustls_crypto_provider();
     load_dotenv()?;
     init_tracing();
-    let command = std::env::args().skip(1).collect::<Vec<_>>();
+    let command_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let command = command_args.iter().map(String::as_str).collect::<Vec<_>>();
 
     let config = ApiConfig::from_env()?;
     let db = PgPoolOptions::new()
@@ -924,6 +925,25 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await
         .context("failed to connect to Postgres")?;
+
+    match command.as_slice() {
+        ["migrate"] => {
+            MIGRATOR
+                .run(&db)
+                .await
+                .context("failed to apply database migrations")?;
+            tracing::info!("rend-api database migrations applied");
+            return Ok(());
+        }
+        [] | ["worker", "media"] => {}
+        _ => anyhow::bail!("usage: rend-api [migrate|worker media]"),
+    }
+
+    if config.edge_registry.rend_env.is_strict() && config.auto_migrate {
+        anyhow::bail!(
+            "REND_API_AUTO_MIGRATE=true is not permitted for long-running production processes; run `rend-api migrate` before promotion"
+        );
+    }
 
     if config.auto_migrate {
         MIGRATOR
@@ -945,10 +965,10 @@ async fn main() -> Result<()> {
 
     match command.as_slice() {
         [] => {}
-        [command, subcommand] if command == "worker" && subcommand == "media" => {
+        ["worker", "media"] => {
             return run_media_worker(state).await;
         }
-        _ => anyhow::bail!("usage: rend-api [worker media]"),
+        _ => unreachable!("command was validated before state initialization"),
     }
 
     let app = build_app(state.clone(), request_timeout);

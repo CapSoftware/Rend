@@ -39,6 +39,7 @@ wait_for_asset_event "$asset_id" "edge.warming_succeeded"
 bootstrap_response="$tmp_dir/bootstrap.json"
 fetch_playback_bootstrap "$asset_id" "$bootstrap_response"
 playback_url="$(playback_url_from_bootstrap "$bootstrap_response")"
+opener_url="$(opener_url_from_bootstrap "$bootstrap_response")"
 expected_url="$edge_base/v/$asset_id/hls/master.m3u8"
 if [[ "$playback_url" != "$expected_url" ]]; then
   echo "expected bootstrap playback_url to be $expected_url" >&2
@@ -50,8 +51,13 @@ purge_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8"
 fetch_and_expect_cache "manifest-miss" "$playback_url" "MISS" "$tmp_dir/manifest-miss.body"
 fetch_and_expect_cache "manifest-hit" "$playback_url" "HIT" "$tmp_dir/manifest-hit.body"
 
-purge_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8" "opener.mp4"
-warm_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8" "opener.mp4"
+if [[ -n "$opener_url" ]]; then
+  purge_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8" "opener.mp4"
+  warm_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8" "opener.mp4"
+else
+  purge_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8"
+  warm_edge_artifacts "$edge_base" "$asset_id" "hls/master.m3u8"
+fi
 fetch_and_expect_cache "manifest-warmed-hit" "$playback_url" "HIT" "$tmp_dir/manifest-warmed-hit.body"
 
 wait_for_playback_analytics "$asset_id" 1 2

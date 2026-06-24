@@ -42,6 +42,20 @@ on:
         required: true
         default: true
         type: boolean
+      run_first_host_verifier:
+        description: "Run scripts/verify-first-host-deploy.sh after deploy."
+        required: true
+        default: true
+        type: boolean
+      verify_asset_id:
+        description: "Optional existing hls_ready synthetic/non-customer asset id for deeper verifier playback smoke."
+        required: false
+        type: string
+      verify_control_plane_rollback:
+        description: "After verification, drill control-plane rollback to the previous slot and re-promote this release."
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -125,9 +139,12 @@ jobs:
       DEPLOY_CONTROL_PLANE: ${{ github.event_name == 'push' || inputs.deploy_control_plane }}
       DEPLOY_EDGES: ${{ github.event_name == 'push' || inputs.deploy_edges }}
       RUN_READINESS: ${{ github.event_name == 'push' || inputs.run_readiness }}
+      RUN_FIRST_HOST_VERIFIER: ${{ github.event_name == 'push' || inputs.run_first_host_verifier }}
+      VERIFY_CONTROL_PLANE_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_control_plane_rollback }}
       IMAGE_PLATFORM: ${{ needs.release-images.outputs.image-platform }}
       REND_API_BASE_URL: ${{ vars.REND_API_BASE_URL || 'https://api.rend.so' }}
       REND_READINESS_EDGES: ${{ vars.REND_READINESS_EDGES }}
+      REND_VERIFY_ASSET_ID: ${{ inputs.verify_asset_id || vars.REND_VERIFY_ASSET_ID }}
       REND_READINESS_API_KEY: ${{ secrets.REND_READINESS_API_KEY }}
       REND_EDGE_INTERNAL_TOKEN: ${{ secrets.REND_EDGE_INTERNAL_TOKEN }}
       REND_SSH_PRIVATE_KEY: ${{ secrets.REND_SSH_PRIVATE_KEY }}
@@ -214,6 +231,53 @@ jobs:
           : "${REND_CONTROL_PLANE_SSH_HOST:?REND_CONTROL_PLANE_SSH_HOST is required}"
           : "${REND_CONTROL_PLANE_SSH_USER:?REND_CONTROL_PLANE_SSH_USER is required}"
 
+          mkdir -p .rend/deploy
+          monitor_file=".rend/deploy/public-readyz-monitor-${GITHUB_RUN_ID}.jsonl"
+          monitor_stop_file="${RUNNER_TEMP}/rend-public-readyz-stop"
+          monitor_failed_file="${RUNNER_TEMP}/rend-public-readyz-failed"
+          rm -f "$monitor_stop_file" "$monitor_failed_file"
+
+          probe_public_readyz() {
+            local attempt http_status last_status
+            last_status="000"
+            for attempt in 1 2 3; do
+              http_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$REND_API_BASE_URL/readyz" 2>/dev/null || true)"
+              last_status="${http_status:-000}"
+              if [[ "$last_status" == "200" ]]; then
+                printf '%s\t%s\n' "$last_status" "$attempt"
+                return 0
+              fi
+              sleep 1
+            done
+            printf '%s\t3\n' "$last_status"
+            return 1
+          }
+
+          monitor_public_readyz() {
+            local attempts http_status
+            while [[ ! -f "$monitor_stop_file" ]]; do
+              ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+              IFS=$'\t' read -r http_status attempts < <(probe_public_readyz)
+              if [[ "$http_status" == "200" ]]; then
+                printf '{"ts":"%s","ok":true,"http_status":"%s","attempts":%s}\n' "$ts" "$http_status" "$attempts" >> "$monitor_file"
+              else
+                printf '{"ts":"%s","ok":false,"http_status":"%s","attempts":%s}\n' "$ts" "${http_status:-000}" "$attempts" >> "$monitor_file"
+                touch "$monitor_failed_file"
+              fi
+              sleep 2
+            done
+          }
+
+          stop_monitor() {
+            touch "$monitor_stop_file"
+            wait "$monitor_pid" 2>/dev/null || true
+          }
+
+          monitor_public_readyz &
+          monitor_pid="$!"
+          trap stop_monitor EXIT
+
+          export REND_CONTROL_PLANE_POST_PROMOTION_READY_URL="$REND_API_BASE_URL/readyz"
           scripts/deploy-release-over-ssh.sh \
             --role control-plane \
             --host "$REND_CONTROL_PLANE_SSH_HOST" \
@@ -223,16 +287,64 @@ jobs:
             --remote-dir "/tmp/rend-deploy-${GITHUB_RUN_ID}-${GITHUB_SHA::12}-control-plane" \
             --manifest "${{ steps.manifest.outputs.path }}"
 
+          stop_monitor
+          trap - EXIT
+          if [[ -f "$monitor_failed_file" ]]; then
+            echo "public /readyz monitor observed at least one failed request during control-plane deploy" >&2
+            exit 1
+          fi
+
       - name: Deploy edge hosts
         if: env.DEPLOY_EDGES == 'true'
         run: |
           set -euo pipefail
+
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required for edge identity sync}"
+
+          IFS=',' read -r -a edge_entries <<< "$REND_READINESS_EDGES"
+          expected_edges=""
+          ash_edge_id=""
+          ash_edge_region=""
+          ash_edge_base=""
+          ams_edge_id=""
+          ams_edge_region=""
+          ams_edge_base=""
+          for entry in "${edge_entries[@]}"; do
+            IFS='=' read -r edge_id region public_base _private_base extra <<< "$entry"
+            if [[ -z "$edge_id" || -z "$region" || -z "$public_base" || -n "${extra:-}" ]]; then
+              echo "invalid REND_READINESS_EDGES entry for edge identity sync" >&2
+              exit 1
+            fi
+
+            expected_item="${edge_id}=${region}=${public_base}"
+            if [[ -z "$expected_edges" ]]; then
+              expected_edges="$expected_item"
+            else
+              expected_edges="${expected_edges},${expected_item}"
+            fi
+
+            case "$edge_id" in
+              rend-edge-ash-1)
+                ash_edge_id="$edge_id"
+                ash_edge_region="$region"
+                ash_edge_base="$public_base"
+                ;;
+              rend-edge-ams-1)
+                ams_edge_id="$edge_id"
+                ams_edge_region="$region"
+                ams_edge_base="$public_base"
+                ;;
+            esac
+          done
 
           deploy_edge() {
             local label="$1"
             local host="$2"
             local user="$3"
             local port="${4:-22}"
+            local edge_id="${5:-}"
+            local region="${6:-}"
+            local public_base="${7:-}"
 
             if [[ -z "$host" && -z "$user" ]]; then
               echo "Skipping $label edge: SSH host/user secrets are not configured"
@@ -242,8 +354,16 @@ jobs:
               echo "$label edge requires both host and user secrets" >&2
               return 1
             fi
+            if [[ -z "$edge_id" || -z "$region" || -z "$public_base" ]]; then
+              echo "$label edge has no matching REND_READINESS_EDGES identity entry" >&2
+              return 1
+            fi
 
-            scripts/sync-edge-deploy-env-over-ssh.sh \
+            REND_EDGE_ID="$edge_id" \
+              REND_EDGE_REGION="$region" \
+              REND_EDGE_BASE_URL="$public_base" \
+              REND_EXPECTED_EDGES="$expected_edges" \
+              scripts/sync-edge-deploy-env-over-ssh.sh \
               --host "$host" \
               --user "$user" \
               --port "${port:-22}"
@@ -260,11 +380,11 @@ jobs:
 
           deployed=0
           if [[ -n "$REND_EDGE_ASH_SSH_HOST$REND_EDGE_ASH_SSH_USER" ]]; then
-            deploy_edge "ash" "$REND_EDGE_ASH_SSH_HOST" "$REND_EDGE_ASH_SSH_USER" "${REND_EDGE_ASH_SSH_PORT:-22}"
+            deploy_edge "ash" "$REND_EDGE_ASH_SSH_HOST" "$REND_EDGE_ASH_SSH_USER" "${REND_EDGE_ASH_SSH_PORT:-22}" "$ash_edge_id" "$ash_edge_region" "$ash_edge_base"
             deployed=$((deployed + 1))
           fi
           if [[ -n "$REND_EDGE_AMS_SSH_HOST$REND_EDGE_AMS_SSH_USER" ]]; then
-            deploy_edge "ams" "$REND_EDGE_AMS_SSH_HOST" "$REND_EDGE_AMS_SSH_USER" "${REND_EDGE_AMS_SSH_PORT:-22}"
+            deploy_edge "ams" "$REND_EDGE_AMS_SSH_HOST" "$REND_EDGE_AMS_SSH_USER" "${REND_EDGE_AMS_SSH_PORT:-22}" "$ams_edge_id" "$ams_edge_region" "$ams_edge_base"
             deployed=$((deployed + 1))
           fi
 
@@ -293,18 +413,18 @@ jobs:
               ;;
           esac
 
-      - name: Install playback readiness dependencies
-        if: env.RUN_READINESS == 'true'
+      - name: Install deploy verification dependencies
+        if: env.RUN_READINESS == 'true' || env.RUN_FIRST_HOST_VERIFIER == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
       - name: Open edge readiness SSH tunnels
-        if: env.RUN_READINESS == 'true'
+        if: env.RUN_READINESS == 'true' || env.RUN_FIRST_HOST_VERIFIER == 'true'
         run: |
           set -euo pipefail
-          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required when RUN_READINESS=true}"
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required for deploy verification}"
 
           start_tunnel() {
             local label="$1"
@@ -362,6 +482,77 @@ jobs:
 
           echo "REND_READINESS_EDGES=$readiness_edges" >> "$GITHUB_ENV"
 
+      - name: Verify edge registry from control-plane host
+        if: env.RUN_FIRST_HOST_VERIFIER == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_CONTROL_PLANE_SSH_HOST:?REND_CONTROL_PLANE_SSH_HOST is required}"
+          : "${REND_CONTROL_PLANE_SSH_USER:?REND_CONTROL_PLANE_SSH_USER is required}"
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required when RUN_FIRST_HOST_VERIFIER=true}"
+
+          scripts/verify-edge-registry-over-ssh.sh \
+            --host "$REND_CONTROL_PLANE_SSH_HOST" \
+            --user "$REND_CONTROL_PLANE_SSH_USER" \
+            --port "${REND_CONTROL_PLANE_SSH_PORT:-22}" \
+            --expected-edges "$REND_READINESS_EDGES"
+
+      - name: Run first-host verifier
+        if: env.RUN_FIRST_HOST_VERIFIER == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_READINESS_API_KEY:?REND_READINESS_API_KEY is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${REND_EDGE_INTERNAL_TOKEN:?REND_EDGE_INTERNAL_TOKEN is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${REND_READINESS_EDGES:?REND_READINESS_EDGES repository/environment variable is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${CLICKHOUSE_URL:?CLICKHOUSE_URL Production secret or variable is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${CLICKHOUSE_DATABASE:?CLICKHOUSE_DATABASE Production secret or variable is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${CLICKHOUSE_USER:?CLICKHOUSE_USER Production secret or variable is required when RUN_FIRST_HOST_VERIFIER=true}"
+          : "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD Production secret is required when RUN_FIRST_HOST_VERIFIER=true}"
+
+          verifier_args=(
+            --api-base "$REND_API_BASE_URL"
+            --clickhouse-url "$CLICKHOUSE_URL"
+            --clickhouse-database "$CLICKHOUSE_DATABASE"
+            --clickhouse-user "$CLICKHOUSE_USER"
+            --clickhouse-password "$CLICKHOUSE_PASSWORD"
+            --dev-api-key "$REND_READINESS_API_KEY"
+            --edge-internal-token "$REND_EDGE_INTERNAL_TOKEN"
+            --rewrite-playback-base
+            --skip-registration
+          )
+
+          if [[ -n "${REND_VERIFY_ASSET_ID:-}" ]]; then
+            verifier_args+=(--asset-id "$REND_VERIFY_ASSET_ID")
+          else
+            if [[ "${RUN_READINESS:-}" != "true" ]]; then
+              echo "REND_VERIFY_ASSET_ID or RUN_READINESS=true is required for playback coverage" >&2
+              exit 1
+            fi
+            verifier_args+=(--skip-playback)
+          fi
+
+          IFS=',' read -r -a edge_entries <<< "$REND_READINESS_EDGES"
+          expected_edges=""
+          for entry in "${edge_entries[@]}"; do
+            IFS='=' read -r edge_id region public_base private_base extra <<< "$entry"
+            if [[ -z "$edge_id" || -z "$region" || -z "$public_base" || -n "${extra:-}" ]]; then
+              echo "invalid REND_READINESS_EDGES entry for first-host verifier" >&2
+              exit 1
+            fi
+            if [[ -z "$private_base" ]]; then
+              private_base="$public_base"
+            fi
+            expected_item="${edge_id}=${region}=${public_base}"
+            if [[ -z "$expected_edges" ]]; then
+              expected_edges="$expected_item"
+            else
+              expected_edges="${expected_edges},${expected_item}"
+            fi
+            verifier_args+=(--edge-base "$public_base" --edge-internal-base "$private_base")
+          done
+          verifier_args+=(--expected-edges "$expected_edges")
+
+          scripts/verify-first-host-deploy.sh "${verifier_args[@]}"
+
       - name: Run playback readiness gate
         if: env.RUN_READINESS == 'true'
         run: |
@@ -375,6 +566,96 @@ jobs:
             --skip-local-stack \
             --output ".rend/readiness/playback-readiness-${GITHUB_RUN_ID}.json" \
             --latest-output ".rend/readiness/playback-readiness-latest.json"
+
+      - name: Verify control-plane rollback drill
+        if: env.VERIFY_CONTROL_PLANE_ROLLBACK == 'true'
+        run: |
+          set -euo pipefail
+          : "${REND_CONTROL_PLANE_SSH_HOST:?REND_CONTROL_PLANE_SSH_HOST is required}"
+          : "${REND_CONTROL_PLANE_SSH_USER:?REND_CONTROL_PLANE_SSH_USER is required}"
+
+          mkdir -p .rend/deploy
+          monitor_file=".rend/deploy/public-readyz-monitor-rollback-${GITHUB_RUN_ID}.jsonl"
+          monitor_stop_file="${RUNNER_TEMP}/rend-rollback-readyz-stop"
+          monitor_failed_file="${RUNNER_TEMP}/rend-rollback-readyz-failed"
+          rm -f "$monitor_stop_file" "$monitor_failed_file"
+
+          probe_public_readyz() {
+            local attempt http_status last_status
+            last_status="000"
+            for attempt in 1 2 3; do
+              http_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$REND_API_BASE_URL/readyz" 2>/dev/null || true)"
+              last_status="${http_status:-000}"
+              if [[ "$last_status" == "200" ]]; then
+                printf '%s\t%s\n' "$last_status" "$attempt"
+                return 0
+              fi
+              sleep 1
+            done
+            printf '%s\t3\n' "$last_status"
+            return 1
+          }
+
+          monitor_public_readyz() {
+            local attempts http_status
+            while [[ ! -f "$monitor_stop_file" ]]; do
+              ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+              IFS=$'\t' read -r http_status attempts < <(probe_public_readyz)
+              if [[ "$http_status" == "200" ]]; then
+                printf '{"ts":"%s","phase":"rollback-drill","ok":true,"http_status":"%s","attempts":%s}\n' "$ts" "$http_status" "$attempts" >> "$monitor_file"
+              else
+                printf '{"ts":"%s","phase":"rollback-drill","ok":false,"http_status":"%s","attempts":%s}\n' "$ts" "${http_status:-000}" "$attempts" >> "$monitor_file"
+                touch "$monitor_failed_file"
+              fi
+              sleep 2
+            done
+          }
+
+          stop_monitor() {
+            touch "$monitor_stop_file"
+            wait "$monitor_pid" 2>/dev/null || true
+          }
+
+          monitor_public_readyz &
+          monitor_pid="$!"
+          trap stop_monitor EXIT
+
+          scripts/deploy-release-over-ssh.sh \
+            --role control-plane \
+            --host "$REND_CONTROL_PLANE_SSH_HOST" \
+            --user "$REND_CONTROL_PLANE_SSH_USER" \
+            --port "${REND_CONTROL_PLANE_SSH_PORT:-22}" \
+            --rollback
+
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "$REND_API_BASE_URL/readyz" >/dev/null
+
+          export REND_CONTROL_PLANE_POST_PROMOTION_READY_URL="$REND_API_BASE_URL/readyz"
+          scripts/deploy-release-over-ssh.sh \
+            --role control-plane \
+            --host "$REND_CONTROL_PLANE_SSH_HOST" \
+            --user "$REND_CONTROL_PLANE_SSH_USER" \
+            --port "${REND_CONTROL_PLANE_SSH_PORT:-22}" \
+            --expected-platform "$IMAGE_PLATFORM" \
+            --remote-dir "/tmp/rend-deploy-${GITHUB_RUN_ID}-${GITHUB_SHA::12}-control-plane-rollback-drill" \
+            --manifest "${{ steps.manifest.outputs.path }}"
+
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "$REND_API_BASE_URL/readyz" >/dev/null
+
+          stop_monitor
+          trap - EXIT
+          if [[ -f "$monitor_failed_file" ]]; then
+            echo "public /readyz monitor observed at least one failed request during control-plane rollback drill" >&2
+            exit 1
+          fi
+
+      - name: Upload deploy monitor artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rend-deploy-monitor
+          path: .rend/deploy/public-readyz-monitor-*.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload readiness artifact
         if: always() && env.RUN_READINESS == 'true'

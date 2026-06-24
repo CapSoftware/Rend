@@ -8,8 +8,11 @@ manifest="${REND_RELEASE_MANIFEST:-}"
 api_env="${REND_API_ENV_FILE:-/etc/rend/rend-api.env}"
 worker_env="${REND_MEDIA_WORKER_ENV_FILE:-/etc/rend/rend-media-worker.env}"
 compose_file="${REND_CONTROL_PLANE_COMPOSE_FILE:-/opt/rend/control-plane.compose.yml}"
-publish_addr="${REND_API_PUBLISH_ADDR:-127.0.0.1}"
-publish_port="${REND_API_PUBLISH_PORT:-4000}"
+caddyfile="${REND_CONTROL_PLANE_CADDYFILE:-/etc/caddy/Caddyfile}"
+caddy_upstream_file="${REND_CONTROL_PLANE_CADDY_UPSTREAM_FILE:-/etc/caddy/rend-control-plane-upstream.caddy}"
+caddy_command="${REND_CADDY_COMMAND:-caddy}"
+blue_port="${REND_API_BLUE_PUBLISH_PORT:-4001}"
+green_port="${REND_API_GREEN_PUBLISH_PORT:-4002}"
 expected_platform="${REND_EXPECTED_IMAGE_PLATFORM:-linux/amd64}"
 allow_dev_defaults=false
 allow_placeholders=false
@@ -29,13 +32,17 @@ Options:
   --api-env FILE              API env file. Default: /etc/rend/rend-api.env.
   --worker-env FILE           Worker env file. Default: /etc/rend/rend-media-worker.env.
   --compose-file FILE         Compose file. Default: /opt/rend/control-plane.compose.yml.
-  --publish-addr ADDR         Host publish address to probe. Default: 127.0.0.1.
-  --publish-port PORT         Host publish port to probe. Default: 4000.
+  --caddyfile FILE            Caddyfile that imports the managed upstream snippet.
+                              Default: /etc/caddy/Caddyfile.
+  --caddy-upstream-file FILE  Managed upstream snippet. Default:
+                              /etc/caddy/rend-control-plane-upstream.caddy.
+  --blue-port PORT            Host port for rend-api-blue. Default: 4001.
+  --green-port PORT           Host port for rend-api-green. Default: 4002.
   --expected-platform PLATFORM
                               Expected host image platform. Default: linux/amd64.
-  --dry-run                   Skip network and bind-port probes; validate local inputs only.
+  --dry-run                   Skip network probes; validate local inputs only.
   --skip-connectivity         Skip managed dependency connectivity probes.
-  --skip-bind-port-check      Skip bind-port probe.
+  --skip-bind-port-check      Compatibility no-op; blue/green deploys keep the active slot bound.
   --allow-dev-defaults        Permit local Docker/dev defaults.
   --allow-placeholders        Permit placeholder example values.
   --allow-local-image-refs    Permit manifest image_tag fallback when image_digest is absent.
@@ -47,6 +54,15 @@ Local example dry-run:
     --api-env .env.docker.example --worker-env .env.docker.example \
     --compose-file docs/templates/control-plane.compose.yml
 EOF
+}
+
+file_mode() {
+  local path="$1"
+  if stat -c '%a' "$path" >/dev/null 2>&1; then
+    stat -c '%a' "$path"
+  else
+    stat -f '%Lp' "$path"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -67,12 +83,24 @@ while [[ $# -gt 0 ]]; do
       compose_file="${2:?missing value for $1}"
       shift 2
       ;;
-    --publish-addr)
-      publish_addr="${2:?missing value for $1}"
+    --publish-addr | --publish-port)
+      operator_warn "$1 is ignored for blue/green control-plane preflight"
       shift 2
       ;;
-    --publish-port)
-      publish_port="${2:?missing value for $1}"
+    --caddyfile)
+      caddyfile="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --caddy-upstream-file)
+      caddy_upstream_file="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --blue-port)
+      blue_port="${2:?missing value for $1}"
+      shift 2
+      ;;
+    --green-port)
+      green_port="${2:?missing value for $1}"
       shift 2
       ;;
     --expected-platform)
@@ -122,8 +150,53 @@ done
 
 operator_require_command python3
 operator_require_command curl
+if [[ "$dry_run" != "true" ]]; then
+  operator_require_command "$caddy_command"
+fi
 operator_check_docker_compose
 operator_require_file "$compose_file"
+operator_require_file "$caddyfile"
+operator_require_file "$caddy_upstream_file"
+
+if [[ "$blue_port" =~ ^[0-9]+$ && "$blue_port" -ge 1 && "$blue_port" -le 65535 ]]; then
+  operator_ok "blue slot port is valid: $blue_port"
+else
+  operator_fail "blue slot port must be 1-65535"
+fi
+if [[ "$green_port" =~ ^[0-9]+$ && "$green_port" -ge 1 && "$green_port" -le 65535 ]]; then
+  operator_ok "green slot port is valid: $green_port"
+else
+  operator_fail "green slot port must be 1-65535"
+fi
+if [[ "$blue_port" == "$green_port" ]]; then
+  operator_fail "blue and green slot ports must differ"
+fi
+
+if grep -Fq "import rend_active_control_plane" "$caddyfile" &&
+  (grep -Fq "$caddy_upstream_file" "$caddyfile" ||
+    grep -Fq "/etc/caddy/rend-control-plane-upstream.caddy" "$caddyfile"); then
+  operator_ok "Caddyfile imports the managed control-plane upstream snippet"
+else
+  operator_fail "$caddyfile must import $caddy_upstream_file and use import rend_active_control_plane"
+fi
+if grep -Eq "reverse_proxy[[:space:]]+[^[:space:]]+" "$caddy_upstream_file"; then
+  operator_ok "control-plane upstream snippet contains a reverse_proxy target"
+else
+  operator_fail "$caddy_upstream_file must define rend_active_control_plane with reverse_proxy"
+fi
+upstream_mode="$(file_mode "$caddy_upstream_file")"
+if [[ "$upstream_mode" =~ ^[0-7]+$ ]] && (((8#$upstream_mode & 4) == 4)); then
+  operator_ok "control-plane upstream snippet is readable by the Caddy service"
+else
+  operator_fail "$caddy_upstream_file must be world-readable so the caddy service user can import it"
+fi
+if [[ "$dry_run" == "true" ]]; then
+  operator_warn "skipping Caddy config validation"
+elif "$caddy_command" validate --config "$caddyfile" >/dev/null; then
+  operator_ok "Caddy config validation passed"
+else
+  operator_fail "Caddy config validation failed"
+fi
 
 operator_info "validating control-plane env files"
 operator_validate_api_env "$api_env" "$allow_dev_defaults" "$allow_placeholders"
@@ -139,16 +212,10 @@ else
   operator_check_manifest_image_pulls "$manifest" "$allow_local_image_refs" "$expected_platform" rend-api rend-media-worker
 fi
 
-if [[ "$dry_run" == "true" || "$skip_bind_port_check" == "true" ]]; then
-  operator_warn "skipping bind-port check"
-else
-  if operator_check_bind_port_free "$publish_addr" "$publish_port" 2>/tmp/rend-bind-error.$$; then
-    operator_ok "$publish_addr:$publish_port is bindable"
-  else
-    operator_fail "$(cat /tmp/rend-bind-error.$$)"
-  fi
-  rm -f /tmp/rend-bind-error.$$
+if [[ "$skip_bind_port_check" == "true" ]]; then
+  operator_warn "--skip-bind-port-check is no longer needed for blue/green control-plane deploys"
 fi
+operator_warn "skipping bind-port check; active blue/green slots are expected to keep one API port bound"
 
 probe_postgres() {
   local database_url="$1"
