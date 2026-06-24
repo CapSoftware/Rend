@@ -8,17 +8,20 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { cn } from "@/components/ui/cn";
 
 /**
- * Global-bar workspace switcher. Rend has a single organization per session, so
- * this lists the active workspace and the viewer's role (no invented orgs).
+ * Workspace switcher. Rend has a single organization per session, so this lists
+ * the active workspace and the viewer's role (no invented orgs).
  */
 export function WorkspaceSwitcher({
   organizationName,
   role,
+  className,
 }: {
   organizationName: string;
   role: string;
+  className?: string;
 }) {
   const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
   const initial = (organizationName.trim()[0] ?? "R").toUpperCase();
@@ -26,7 +29,10 @@ export function WorkspaceSwitcher({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        className="group inline-flex max-w-[40vw] items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors hover:bg-bg-sunken focus-visible:ring-2 focus-visible:ring-ink/25 data-[state=open]:bg-bg-sunken sm:max-w-[260px]"
+        className={cn(
+          "group inline-flex max-w-[40vw] items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors hover:bg-bg-sunken focus-visible:ring-2 focus-visible:ring-ink/25 data-[state=open]:bg-bg-sunken sm:max-w-[260px]",
+          className,
+        )}
         aria-label="Switch workspace"
       >
         <span className="grid size-5 shrink-0 place-items-center rounded bg-bg-sunken text-faint">
