@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { RendMcpConfig } from "./config.js";
 import { createRendToolHandlers, type ToolResult } from "./tools.js";
 
-export const REND_MCP_VERSION = "0.1.0";
+export const REND_MCP_VERSION = "0.1.1";
 
 const assetIdSchema = z
   .string()
