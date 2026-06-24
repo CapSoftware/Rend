@@ -1726,12 +1726,7 @@ fn schedule_analytics_rollup_refresh(state: Arc<AppState>) {
 async fn refresh_recent_analytics_rollups(
     state: Arc<AppState>,
 ) -> std::result::Result<(), AppError> {
-    let ended_at = Utc::now() - ChronoDuration::seconds(ANALYTICS_ROLLUP_LAG_SECS);
-    let started_at = ended_at - ChronoDuration::seconds(ANALYTICS_ROLLUP_LOOKBACK_SECS);
-    let window = NormalizedPlaybackAnalyticsWindow {
-        started_at,
-        ended_at,
-    };
+    let window = analytics_rollup_refresh_window(Utc::now());
     let edge_query = clickhouse_edge_rollup_refresh_query(window);
     let player_query = clickhouse_player_rollup_refresh_query(window);
     clickhouse_post(
@@ -1749,6 +1744,21 @@ async fn refresh_recent_analytics_rollups(
     )
     .await?;
     Ok(())
+}
+
+fn analytics_rollup_refresh_window(now: DateTime<Utc>) -> NormalizedPlaybackAnalyticsWindow {
+    let ended_at = now - ChronoDuration::seconds(ANALYTICS_ROLLUP_LAG_SECS);
+    let lookback_started_at = ended_at - ChronoDuration::seconds(ANALYTICS_ROLLUP_LOOKBACK_SECS);
+    NormalizedPlaybackAnalyticsWindow {
+        started_at: floor_datetime_to_hour(lookback_started_at),
+        ended_at,
+    }
+}
+
+fn floor_datetime_to_hour(value: DateTime<Utc>) -> DateTime<Utc> {
+    let timestamp = value.timestamp();
+    let hour_start = timestamp - timestamp.rem_euclid(60 * 60);
+    DateTime::<Utc>::from_timestamp(hour_start, 0).unwrap_or(value)
 }
 
 fn clickhouse_datetime(value: DateTime<Utc>) -> String {
@@ -1955,6 +1965,27 @@ mod tests {
         assert!(player_query.contains(
             "GROUP BY rollup_organization_id, rollup_asset_id, rollup_playback_session_id"
         ));
+    }
+
+    #[test]
+    fn rollup_refresh_window_starts_on_full_hour() {
+        let now = DateTime::parse_from_rfc3339("2026-06-24T13:53:47.991Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let window = analytics_rollup_refresh_window(now);
+
+        assert_eq!(
+            window.started_at,
+            DateTime::parse_from_rfc3339("2026-06-24T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            window.ended_at,
+            DateTime::parse_from_rfc3339("2026-06-24T13:52:47.991Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
     }
 
     #[test]
