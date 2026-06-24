@@ -15,7 +15,14 @@ test("accepts safe player telemetry and stores only allowlisted fields", () => {
       events: [
         {
           playback_session_id: "session-1",
+          event_id: "evt-session-1",
+          organization_id: "00000000-0000-0000-0000-000000000001",
           asset_id: "asset-123",
+          viewer_id_hash: "sha256:abc123",
+          page_type: "watch",
+          page_host: "rend.so",
+          referrer_host: "example.com",
+          player_name: "rend-player",
           phase: "bootstrap_complete",
           event_time_ms: RECEIVED_AT_MS - 10,
           bootstrap_start_ms: 0,
@@ -27,6 +34,11 @@ test("accepts safe player telemetry and stores only allowlisted fields", () => {
             authorization: "Bearer should-not-store",
             "x-rend-region": "london",
           },
+          browser_name: "Chrome",
+          os_name: "macOS",
+          device_type: "desktop",
+          geo_country: "gb",
+          geo_city: "London",
           raw_url: "https://edge.example/v/asset-123/hls/master.m3u8?token=secret",
         },
       ],
@@ -39,6 +51,13 @@ test("accepts safe player telemetry and stores only allowlisted fields", () => {
 
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].bootstrap_end_ms, 42);
+  assert.equal(result.events[0].event_id, "evt-session-1");
+  assert.equal(result.events[0].organization_id, "00000000-0000-0000-0000-000000000001");
+  assert.equal(result.events[0].viewer_id_hash, "sha256:abc123");
+  assert.equal(result.events[0].page_type, "watch");
+  assert.equal(result.events[0].browser_name, "Chrome");
+  assert.equal(result.events[0].geo_country, "GB");
+  assert.equal(result.events[0].geo_city, "London");
   assert.equal(result.events[0].cache_headers?.["cache-control"], "public, max-age=60");
   assert.equal(result.events[0].cache_headers?.["x-rend-region"], "london");
   assert.equal("raw_url" in result.events[0], false);
