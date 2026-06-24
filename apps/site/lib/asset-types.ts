@@ -71,10 +71,25 @@ export type AnalyticsAssetSummary = {
   bytes_served: number;
 };
 
+export type AnalyticsBreakdownRow = {
+  value: string;
+  views: number;
+  unique_viewers: number;
+  watch_time_ms: number;
+  request_count: number;
+  bytes_served: number;
+};
+
+export type AnalyticsBreakdown = {
+  dimension: string;
+  rows: AnalyticsBreakdownRow[];
+};
+
 export type AnalyticsOverview = {
   window_started_at: string;
   window_ended_at: string;
   views: number;
+  unique_viewers: number;
   sessions: number;
   watch_time_ms: number;
   startup_success_rate: number;
@@ -85,6 +100,8 @@ export type AnalyticsOverview = {
   stall_count: number;
   stall_duration_ms: number;
   playback_failures: number;
+  exits_before_start: number;
+  completions: number;
   request_count: number;
   bytes_served: number;
   cache_hit_rate: number;
@@ -93,6 +110,7 @@ export type AnalyticsOverview = {
   request_p95_ms?: number;
   timeseries: AnalyticsTimeSeriesPoint[];
   top_assets: AnalyticsAssetSummary[];
+  breakdowns: AnalyticsBreakdown[];
 };
 
 export type AnalyticsOverviewResponse = {
@@ -101,8 +119,15 @@ export type AnalyticsOverviewResponse = {
 };
 
 export type AssetPlayerTelemetryEvent = {
+  event_id?: string;
+  organization_id?: string;
   playback_session_id: string;
   asset_id: string;
+  viewer_id_hash?: string;
+  page_type?: string;
+  page_host?: string;
+  referrer_host?: string;
+  player_name?: string;
   phase: string;
   event_time_ms: number;
   received_at_ms: number;
@@ -122,6 +147,20 @@ export type AssetPlayerTelemetryEvent = {
   region_label?: string;
   player_version?: string;
   app_version?: string;
+  browser_name?: string;
+  browser_version?: string;
+  os_name?: string;
+  os_version?: string;
+  device_type?: string;
+  autoplay?: boolean;
+  muted?: boolean;
+  preload?: string;
+  startup_mode?: string;
+  geo_country?: string;
+  geo_region?: string;
+  geo_city?: string;
+  geo_continent?: string;
+  geo_asn?: string;
 };
 
 export type AssetPlayerTelemetryResponse = {
