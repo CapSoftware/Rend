@@ -320,6 +320,18 @@ struct PlayerTelemetryEventInput {
     #[serde(default)]
     geo_asn: Option<String>,
     #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    utm_source: Option<String>,
+    #[serde(default)]
+    utm_medium: Option<String>,
+    #[serde(default)]
+    utm_campaign: Option<String>,
+    #[serde(default)]
+    utm_term: Option<String>,
+    #[serde(default)]
+    utm_content: Option<String>,
+    #[serde(default)]
     document_start_ms: Option<u32>,
     #[serde(default)]
     video_created_ms: Option<u32>,
@@ -438,6 +450,12 @@ struct NormalizedPlayerTelemetryEvent {
     geo_city: String,
     geo_continent: String,
     geo_asn: String,
+    channel: String,
+    utm_source: String,
+    utm_medium: String,
+    utm_campaign: String,
+    utm_term: String,
+    utm_content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -480,6 +498,12 @@ struct ClickHousePlayerEventRow {
     geo_city: String,
     geo_continent: String,
     geo_asn: String,
+    channel: String,
+    utm_source: String,
+    utm_medium: String,
+    utm_campaign: String,
+    utm_term: String,
+    utm_content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -527,6 +551,24 @@ struct AnalyticsOverviewResponse {
     timeseries: Vec<AnalyticsTimeSeriesPoint>,
     top_assets: Vec<AnalyticsAssetSummary>,
     breakdowns: Vec<AnalyticsBreakdown>,
+    previous: AnalyticsOverviewComparison,
+}
+
+/// Headline totals for the immediately-preceding window of equal length, used by
+/// the dashboard to render period-over-period deltas on the stat strip.
+#[derive(Debug, Serialize)]
+struct AnalyticsOverviewComparison {
+    views: u64,
+    unique_viewers: u64,
+    sessions: u64,
+    watch_time_ms: u64,
+    completions: u64,
+    request_count: u64,
+    bytes_served: u64,
+    startup_success_rate: f64,
+    rebuffer_ratio: f64,
+    error_rate: f64,
+    cache_hit_rate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -734,8 +776,31 @@ async fn get_analytics_overview_inner(
     )
     .await?;
 
+    let previous_window = previous_overview_window(window);
+    let previous_edge = query_clickhouse_edge_overview(
+        &state.http,
+        &state.config.playback_telemetry,
+        &organization_id,
+        previous_window,
+    )
+    .await?;
+    let previous_player = query_clickhouse_player_overview(
+        &state.http,
+        &state.config.playback_telemetry,
+        &organization_id,
+        previous_window,
+    )
+    .await?;
+
     Ok(analytics_overview_response(
-        window, edge, player, timeseries, top_assets, breakdowns,
+        window,
+        edge,
+        player,
+        timeseries,
+        top_assets,
+        breakdowns,
+        previous_edge,
+        previous_player,
     ))
 }
 
@@ -932,6 +997,14 @@ fn normalize_player_telemetry_event(
     let geo_city = optional_safe_dimension_text(event.geo_city.as_deref(), "geo_city", 160)?;
     let geo_continent = optional_geo_token(event.geo_continent.as_deref(), "geo_continent", 16)?;
     let geo_asn = optional_safe_token(event.geo_asn.as_deref(), "geo_asn", 32)?;
+    let channel = normalize_channel(event.channel.as_deref());
+    let utm_source = optional_safe_dimension_text(event.utm_source.as_deref(), "utm_source", 120)?;
+    let utm_medium = optional_safe_dimension_text(event.utm_medium.as_deref(), "utm_medium", 120)?;
+    let utm_campaign =
+        optional_safe_dimension_text(event.utm_campaign.as_deref(), "utm_campaign", 120)?;
+    let utm_term = optional_safe_dimension_text(event.utm_term.as_deref(), "utm_term", 120)?;
+    let utm_content =
+        optional_safe_dimension_text(event.utm_content.as_deref(), "utm_content", 120)?;
     let bootstrap_http_status = event.bootstrap_http_status.unwrap_or(0);
     if bootstrap_http_status != 0 && !(100..=599).contains(&bootstrap_http_status) {
         return Err(AppError::bad_request(
@@ -981,6 +1054,12 @@ fn normalize_player_telemetry_event(
         geo_city,
         geo_continent,
         geo_asn,
+        channel,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_term,
+        utm_content,
     })
 }
 
@@ -1066,6 +1145,19 @@ fn normalize_preload(value: Option<&str>) -> std::result::Result<String, AppErro
         Some(value @ ("auto" | "metadata" | "none")) => Ok(value.to_owned()),
         Some(_) => Err(AppError::bad_request("preload is not supported")),
         None => Ok(String::new()),
+    }
+}
+
+/// Canonical acquisition channel slug derived client-side from referrer + UTM
+/// tags. Unknown values are dropped (empty) rather than rejected so a stray
+/// channel string never fails an otherwise-valid telemetry batch.
+fn normalize_channel(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(
+            value @ ("direct" | "referral" | "organic_search" | "social" | "email" | "paid"
+            | "campaign"),
+        ) => value.to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -1306,6 +1398,12 @@ impl NormalizedPlayerTelemetryEvent {
             geo_city: self.geo_city,
             geo_continent: self.geo_continent,
             geo_asn: self.geo_asn,
+            channel: self.channel,
+            utm_source: self.utm_source,
+            utm_medium: self.utm_medium,
+            utm_campaign: self.utm_campaign,
+            utm_term: self.utm_term,
+            utm_content: self.utm_content,
         }
     }
 }
@@ -1354,7 +1452,7 @@ async fn insert_clickhouse_player_events(
 
     let query = "\
         INSERT INTO player_events \
-        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, viewer_id_hash, page_type, page_host, referrer_host, player_name, phase, selected_playback_mode, selected_artifact_path, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version, browser_name, browser_version, os_name, os_version, device_type, autoplay, muted, preload, startup_mode, geo_country, geo_region, geo_city, geo_continent, geo_asn) \
+        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, viewer_id_hash, page_type, page_host, referrer_host, player_name, phase, selected_playback_mode, selected_artifact_path, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version, browser_name, browser_version, os_name, os_version, device_type, autoplay, muted, preload, startup_mode, geo_country, geo_region, geo_city, geo_continent, geo_asn, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content) \
         FORMAT JSONEachRow";
 
     clickhouse_post(http, config, query, body).await.map(|_| ())
@@ -1877,11 +1975,17 @@ fn clickhouse_analytics_breakdowns_query(
 ) -> String {
     let selects = [
         clickhouse_player_breakdown_select(organization_id, window, "page_type", "page_type"),
+        clickhouse_player_breakdown_select(organization_id, window, "hostname", "page_host"),
+        clickhouse_player_breakdown_select(organization_id, window, "channel", "channel"),
+        clickhouse_player_breakdown_select(organization_id, window, "referrer", "referrer_host"),
+        clickhouse_player_breakdown_select(organization_id, window, "campaign", "utm_campaign"),
+        clickhouse_player_breakdown_select(organization_id, window, "keyword", "utm_term"),
         clickhouse_player_breakdown_select(organization_id, window, "country", "geo_country"),
+        clickhouse_player_breakdown_select(organization_id, window, "region", "geo_region"),
+        clickhouse_player_breakdown_select(organization_id, window, "city", "geo_city"),
         clickhouse_player_breakdown_select(organization_id, window, "browser", "browser_name"),
         clickhouse_player_breakdown_select(organization_id, window, "os", "os_name"),
         clickhouse_player_breakdown_select(organization_id, window, "device", "device_type"),
-        clickhouse_player_breakdown_select(organization_id, window, "referrer", "referrer_host"),
         clickhouse_player_breakdown_select(
             organization_id,
             window,
@@ -1972,6 +2076,36 @@ fn playback_analytics_response(
     }
 }
 
+fn previous_overview_window(
+    window: NormalizedPlaybackAnalyticsWindow,
+) -> NormalizedPlaybackAnalyticsWindow {
+    let duration = window.ended_at - window.started_at;
+    NormalizedPlaybackAnalyticsWindow {
+        started_at: window.started_at - duration,
+        ended_at: window.started_at,
+    }
+}
+
+fn analytics_overview_comparison(
+    edge: ClickHouseEdgeOverviewRow,
+    player: ClickHousePlayerOverviewRow,
+) -> AnalyticsOverviewComparison {
+    let startup_attempts = player.views.saturating_add(player.startup_failures);
+    AnalyticsOverviewComparison {
+        views: player.views,
+        unique_viewers: player.unique_viewers,
+        sessions: player.sessions,
+        watch_time_ms: player.watch_time_ms,
+        completions: player.completions,
+        request_count: edge.request_count,
+        bytes_served: edge.bytes_served,
+        startup_success_rate: ratio(player.views, startup_attempts),
+        rebuffer_ratio: ratio(player.stalled_sessions, player.views),
+        error_rate: ratio(edge.error_count, edge.request_count),
+        cache_hit_rate: ratio(edge.cache_hit_count, edge.request_count),
+    }
+}
+
 fn analytics_overview_response(
     window: NormalizedPlaybackAnalyticsWindow,
     edge: ClickHouseEdgeOverviewRow,
@@ -1979,12 +2113,15 @@ fn analytics_overview_response(
     timeseries: Vec<ClickHouseAnalyticsSeriesRow>,
     top_assets: Vec<ClickHouseAnalyticsAssetRow>,
     breakdown_rows: Vec<ClickHouseAnalyticsBreakdownRow>,
+    previous_edge: ClickHouseEdgeOverviewRow,
+    previous_player: ClickHousePlayerOverviewRow,
 ) -> AnalyticsOverviewResponse {
     let startup_attempts = player.views.saturating_add(player.startup_failures);
     let startup_success_rate = ratio(player.views, startup_attempts);
     let rebuffer_ratio = ratio(player.stalled_sessions, player.views);
     let cache_hit_rate = ratio(edge.cache_hit_count, edge.request_count);
     let error_rate = ratio(edge.error_count, edge.request_count);
+    let previous = analytics_overview_comparison(previous_edge, previous_player);
 
     AnalyticsOverviewResponse {
         window_started_at: rfc3339_millis(window.started_at),
@@ -2032,6 +2169,7 @@ fn analytics_overview_response(
             })
             .collect(),
         breakdowns: analytics_breakdowns_response(breakdown_rows),
+        previous,
     }
 }
 
@@ -2388,6 +2526,63 @@ mod tests {
             player_query
                 .contains("avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0)")
         );
+    }
+
+    #[test]
+    fn analytics_breakdowns_query_covers_acquisition_dimensions() {
+        let window = NormalizedPlaybackAnalyticsWindow {
+            started_at: DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ended_at: DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let query =
+            clickhouse_analytics_breakdowns_query("00000000-0000-0000-0000-000000000001", window);
+
+        for dimension in [
+            "channel", "referrer", "campaign", "keyword", "hostname", "country", "region", "city",
+            "browser", "os", "device", "page_type",
+        ] {
+            assert!(
+                query.contains(&format!("'{dimension}' AS dimension")),
+                "breakdown query is missing the {dimension} dimension"
+            );
+        }
+        // Dedupe-by-event_id must survive so retries never double-count views.
+        assert!(query.contains("GROUP BY event_id"));
+        assert!(query.contains("FORMAT JSONEachRow"));
+    }
+
+    #[test]
+    fn previous_overview_window_is_equal_length_and_adjacent() {
+        let window = NormalizedPlaybackAnalyticsWindow {
+            started_at: DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ended_at: DateTime::parse_from_rfc3339("2026-06-13T13:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let previous = previous_overview_window(window);
+
+        assert_eq!(previous.ended_at, window.started_at);
+        assert_eq!(
+            previous.started_at,
+            DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn normalize_channel_accepts_known_slugs_only() {
+        assert_eq!(normalize_channel(Some("organic_search")), "organic_search");
+        assert_eq!(normalize_channel(Some(" social ")), "social");
+        assert_eq!(normalize_channel(Some("paid")), "paid");
+        assert_eq!(normalize_channel(Some("bogus")), "");
+        assert_eq!(normalize_channel(None), "");
     }
 
     #[test]
