@@ -85,6 +85,20 @@ export type AnalyticsBreakdown = {
   rows: AnalyticsBreakdownRow[];
 };
 
+export type AnalyticsOverviewComparison = {
+  views: number;
+  unique_viewers: number;
+  sessions: number;
+  watch_time_ms: number;
+  completions: number;
+  request_count: number;
+  bytes_served: number;
+  startup_success_rate: number;
+  rebuffer_ratio: number;
+  error_rate: number;
+  cache_hit_rate: number;
+};
+
 export type AnalyticsOverview = {
   window_started_at: string;
   window_ended_at: string;
@@ -111,6 +125,7 @@ export type AnalyticsOverview = {
   timeseries: AnalyticsTimeSeriesPoint[];
   top_assets: AnalyticsAssetSummary[];
   breakdowns: AnalyticsBreakdown[];
+  previous?: AnalyticsOverviewComparison;
 };
 
 export type AnalyticsOverviewResponse = {
@@ -161,6 +176,12 @@ export type AssetPlayerTelemetryEvent = {
   geo_city?: string;
   geo_continent?: string;
   geo_asn?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  channel?: string;
 };
 
 export type AssetPlayerTelemetryResponse = {
