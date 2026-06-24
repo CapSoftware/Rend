@@ -4,6 +4,7 @@ import {
   AssetApiError,
   fetchAnalyticsOverview,
   fetchAssetDetail,
+  fetchAssetThumbnail,
   listAssets,
   uploadAsset,
 } from "./asset-api.ts";
@@ -77,6 +78,82 @@ test("asset client sends site internal auth headers and never bearer dev auth", 
       return Response.json({ assets: [] });
     }, async () => {
       assert.deepEqual(await listAssets(AUTH_CONTEXT), { status: "ok", assets: [] });
+    });
+  });
+});
+
+test("asset client preserves list asset duration metadata", async () => {
+  await withEnv(routeEnv(), async () => {
+    await withMockFetch(async () => {
+      return Response.json({
+        assets: [
+          {
+            asset_id: "00000000-0000-0000-0000-000000000001",
+            source_state: "uploaded",
+            playable_state: "hls_ready",
+            created_at: "2026-06-14T10:00:00.000Z",
+            updated_at: "2026-06-14T10:01:00.000Z",
+            source_byte_size: 428815,
+            duration_ms: 12000,
+            has_thumbnail: true,
+            artifact_count: 4,
+          },
+        ],
+      });
+    }, async () => {
+      assert.deepEqual(await listAssets(AUTH_CONTEXT), {
+        status: "ok",
+        assets: [
+          {
+            asset_id: "00000000-0000-0000-0000-000000000001",
+            source_state: "uploaded",
+            playable_state: "hls_ready",
+            created_at: "2026-06-14T10:00:00.000Z",
+            updated_at: "2026-06-14T10:01:00.000Z",
+            source_byte_size: 428815,
+            duration_ms: 12000,
+            has_thumbnail: true,
+            artifact_count: 4,
+            suspended_at: undefined,
+            suspension_reason: undefined,
+            organization_suspended_at: undefined,
+            organization_suspension_reason: undefined,
+          },
+        ],
+      });
+    });
+  });
+});
+
+test("asset thumbnail client streams binary thumbnail responses without playback bootstrap", async () => {
+  await withEnv(routeEnv(), async () => {
+    const calls: Array<{ url: string; accept: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      calls.push({
+        url: String(url),
+        accept: new Headers(init?.headers).get("accept"),
+      });
+      return new Response("jpeg", {
+        status: 200,
+        headers: {
+          "cache-control": "private, max-age=31536000, immutable",
+          "content-length": "4",
+          "content-type": "image/jpeg",
+        },
+      });
+    }, async () => {
+      const response = await fetchAssetThumbnail(
+        AUTH_CONTEXT,
+        "00000000-0000-0000-0000-000000000001"
+      );
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, "http://127.0.0.1:4000/internal/site/assets/00000000-0000-0000-0000-000000000001/thumbnail");
+      assert.equal(calls[0].accept, "image/jpeg,image/*;q=0.8,*/*;q=0.5");
+      assert.equal(response.headers.get("content-type"), "image/jpeg");
+      assert.equal(response.headers.get("cache-control"), "private, max-age=31536000, immutable");
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(await response.text(), "jpeg");
     });
   });
 });
