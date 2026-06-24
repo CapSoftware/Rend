@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -39,6 +39,7 @@ const ANALYTICS_ROLLUP_LAG_SECS: i64 = 60;
 const DEFAULT_OVERVIEW_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_OVERVIEW_WINDOW_SECS: u64 = 90 * 24 * 60 * 60;
 const PLAYER_WATCH_DELTA_MAX_MS: u32 = 60_000;
+const NIL_ORGANIZATION_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 static LAST_ANALYTICS_ROLLUP_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
@@ -145,6 +146,8 @@ struct PlaybackTelemetryEventInput {
     content_type: String,
     duration_ms: u32,
     #[serde(default)]
+    resolution_tier: Option<String>,
+    #[serde(default)]
     error_code: Option<String>,
 }
 
@@ -152,6 +155,7 @@ struct PlaybackTelemetryEventInput {
 pub(crate) struct NormalizedPlaybackTelemetryEvent {
     event_id: String,
     observed_at: DateTime<Utc>,
+    organization_id: Option<String>,
     asset_id: String,
     artifact_path: String,
     edge_id: String,
@@ -161,6 +165,7 @@ pub(crate) struct NormalizedPlaybackTelemetryEvent {
     bytes_served: u64,
     content_type: String,
     duration_ms: u32,
+    resolution_tier: Option<String>,
     error_code: Option<String>,
 }
 
@@ -205,15 +210,52 @@ pub(crate) struct PlayerTelemetryBatch {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct PlayerTelemetryEventInput {
+    #[serde(default)]
+    event_id: Option<String>,
+    #[serde(default)]
+    organization_id: Option<String>,
     playback_session_id: String,
     asset_id: String,
     phase: String,
     event_time_ms: i64,
     #[serde(default)]
+    bootstrap_start_ms: Option<u32>,
+    #[serde(default)]
+    bootstrap_end_ms: Option<u32>,
+    #[serde(default)]
+    viewer_id_hash: Option<String>,
+    #[serde(default)]
+    page_type: Option<String>,
+    #[serde(default)]
+    page_host: Option<String>,
+    #[serde(default)]
+    referrer_host: Option<String>,
+    #[serde(default)]
+    player_name: Option<String>,
+    #[serde(default)]
     selected_playback_mode: Option<String>,
     #[serde(default)]
     selected_artifact_path: Option<String>,
+    #[serde(default)]
+    previous_playback_mode: Option<String>,
+    #[serde(default)]
+    previous_artifact_path: Option<String>,
+    #[serde(default)]
+    selected_width: Option<u32>,
+    #[serde(default)]
+    selected_height: Option<u32>,
+    #[serde(default)]
+    selected_bitrate: Option<u32>,
+    #[serde(default)]
+    hls_level_index: Option<u32>,
+    #[serde(default)]
+    hls_fragment_index: Option<u32>,
+    #[serde(default)]
+    hls_fragment_duration_ms: Option<u32>,
+    #[serde(default)]
+    hls_fragment_load_ms: Option<u32>,
     #[serde(default)]
     first_frame_ms: Option<u32>,
     #[serde(default)]
@@ -221,11 +263,25 @@ struct PlayerTelemetryEventInput {
     #[serde(default)]
     bootstrap_http_status: Option<u16>,
     #[serde(default)]
+    stall_reason: Option<String>,
+    #[serde(default)]
+    stall_start_ms: Option<u32>,
+    #[serde(default)]
+    stall_end_ms: Option<u32>,
+    #[serde(default)]
     stall_duration_ms: Option<u32>,
     #[serde(default)]
     watch_delta_ms: Option<u32>,
     #[serde(default)]
+    metadata_loaded_ms: Option<u32>,
+    #[serde(default)]
+    canplay_ms: Option<u32>,
+    #[serde(default)]
     playback_failure_code: Option<String>,
+    #[serde(default)]
+    playback_failure_reason: Option<String>,
+    #[serde(default)]
+    cache_headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     edge_label: Option<String>,
     #[serde(default)]
@@ -234,6 +290,40 @@ struct PlayerTelemetryEventInput {
     player_version: Option<String>,
     #[serde(default)]
     app_version: Option<String>,
+    #[serde(default)]
+    browser_name: Option<String>,
+    #[serde(default)]
+    browser_version: Option<String>,
+    #[serde(default)]
+    os_name: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    autoplay: Option<bool>,
+    #[serde(default)]
+    muted: Option<bool>,
+    #[serde(default)]
+    preload: Option<String>,
+    #[serde(default)]
+    startup_mode: Option<String>,
+    #[serde(default)]
+    geo_country: Option<String>,
+    #[serde(default)]
+    geo_region: Option<String>,
+    #[serde(default)]
+    geo_city: Option<String>,
+    #[serde(default)]
+    geo_continent: Option<String>,
+    #[serde(default)]
+    geo_asn: Option<String>,
+    #[serde(default)]
+    document_start_ms: Option<u32>,
+    #[serde(default)]
+    video_created_ms: Option<u32>,
+    #[serde(default)]
+    src_assigned_ms: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,12 +356,15 @@ struct ClickHouseEdgeOverviewRow {
 struct ClickHousePlayerOverviewRow {
     sessions: u64,
     views: u64,
+    unique_viewers: u64,
     startup_failures: u64,
+    exits_before_start: u64,
     watch_time_ms: u64,
     stalled_sessions: u64,
     stall_count: u64,
     stall_duration_ms: u64,
     playback_failures: u64,
+    completions: u64,
     first_frame_p50_ms: f64,
     first_frame_p95_ms: f64,
 }
@@ -294,12 +387,29 @@ struct ClickHouseAnalyticsAssetRow {
     bytes_served: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClickHouseAnalyticsBreakdownRow {
+    dimension: String,
+    value: String,
+    views: u64,
+    unique_viewers: u64,
+    watch_time_ms: u64,
+    request_count: u64,
+    bytes_served: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NormalizedPlayerTelemetryEvent {
     event_id: String,
     observed_at: DateTime<Utc>,
+    organization_id: String,
     asset_id: String,
     playback_session_id: String,
+    viewer_id_hash: String,
+    page_type: String,
+    page_host: String,
+    referrer_host: String,
+    player_name: String,
     phase: String,
     selected_playback_mode: String,
     selected_artifact_path: String,
@@ -313,6 +423,20 @@ struct NormalizedPlayerTelemetryEvent {
     region_label: String,
     player_version: String,
     app_version: String,
+    browser_name: String,
+    browser_version: String,
+    os_name: String,
+    os_version: String,
+    device_type: String,
+    autoplay: u8,
+    muted: u8,
+    preload: String,
+    startup_mode: String,
+    geo_country: String,
+    geo_region: String,
+    geo_city: String,
+    geo_continent: String,
+    geo_asn: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,6 +447,11 @@ struct ClickHousePlayerEventRow {
     organization_id: String,
     asset_id: String,
     playback_session_id: String,
+    viewer_id_hash: String,
+    page_type: String,
+    page_host: String,
+    referrer_host: String,
+    player_name: String,
     phase: String,
     selected_playback_mode: String,
     selected_artifact_path: String,
@@ -336,20 +465,20 @@ struct ClickHousePlayerEventRow {
     region_label: String,
     player_version: String,
     app_version: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AssetPlaybackBillingMetadata {
-    organization_id: Option<String>,
-    duration_ms: Option<i64>,
-    max_resolution_tier: Option<String>,
-    artifacts: HashMap<String, ArtifactPlaybackBillingMetadata>,
-}
-
-#[derive(Clone, Debug)]
-struct ArtifactPlaybackBillingMetadata {
-    duration_ms: Option<i64>,
-    resolution_tier: Option<String>,
+    browser_name: String,
+    browser_version: String,
+    os_name: String,
+    os_version: String,
+    device_type: String,
+    autoplay: u8,
+    muted: u8,
+    preload: String,
+    startup_mode: String,
+    geo_country: String,
+    geo_region: String,
+    geo_city: String,
+    geo_continent: String,
+    geo_asn: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +504,7 @@ struct AnalyticsOverviewResponse {
     window_started_at: String,
     window_ended_at: String,
     views: u64,
+    unique_viewers: u64,
     sessions: u64,
     watch_time_ms: u64,
     startup_success_rate: f64,
@@ -385,6 +515,8 @@ struct AnalyticsOverviewResponse {
     stall_count: u64,
     stall_duration_ms: u64,
     playback_failures: u64,
+    exits_before_start: u64,
+    completions: u64,
     request_count: u64,
     bytes_served: u64,
     cache_hit_rate: f64,
@@ -393,6 +525,7 @@ struct AnalyticsOverviewResponse {
     request_p95_ms: Option<f64>,
     timeseries: Vec<AnalyticsTimeSeriesPoint>,
     top_assets: Vec<AnalyticsAssetSummary>,
+    breakdowns: Vec<AnalyticsBreakdown>,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,6 +541,22 @@ struct AnalyticsTimeSeriesPoint {
 struct AnalyticsAssetSummary {
     asset_id: String,
     views: u64,
+    watch_time_ms: u64,
+    request_count: u64,
+    bytes_served: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsBreakdown {
+    dimension: String,
+    rows: Vec<AnalyticsBreakdownRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsBreakdownRow {
+    value: String,
+    views: u64,
+    unique_viewers: u64,
     watch_time_ms: u64,
     request_count: u64,
     bytes_served: u64,
@@ -443,12 +592,16 @@ async fn post_playback_telemetry_inner(
         state.config.playback_telemetry.max_events_per_batch,
         ingested_at,
     )?;
-    let billing_metadata = fetch_asset_playback_billing_metadata(&state.db, &events).await?;
+    let ingest_lag_ms =
+        max_observed_lag_ms(ingested_at, events.iter().map(|event| &event.observed_at));
     let rows = events
         .into_iter()
-        .map(|event| event.into_clickhouse_row(ingested_at, &billing_metadata))
+        .map(|event| event.into_clickhouse_row(ingested_at))
         .collect::<Vec<_>>();
     insert_clickhouse_playback_events(&state.http, &state.config.playback_telemetry, &rows).await?;
+    state
+        .metrics
+        .record_telemetry_ingest(rows.len(), ingest_lag_ms);
     schedule_analytics_rollup_refresh(state.clone());
     billing::schedule_delivery_usage_sync(state);
 
@@ -467,15 +620,19 @@ async fn post_player_telemetry_inner(
         state.config.playback_telemetry.max_events_per_batch,
         received_at,
     )?;
-    let organizations = fetch_player_event_organizations(&state.db, &events).await?;
+    let ingest_lag_ms =
+        max_observed_lag_ms(received_at, events.iter().map(|event| &event.observed_at));
     let rows = events
         .into_iter()
-        .filter_map(|event| event.into_clickhouse_row(received_at, &organizations))
+        .map(|event| event.into_clickhouse_row(received_at))
         .collect::<Vec<_>>();
 
     if !rows.is_empty() {
         insert_clickhouse_player_events(&state.http, &state.config.playback_telemetry, &rows)
             .await?;
+        state
+            .metrics
+            .record_telemetry_ingest(rows.len(), ingest_lag_ms);
         schedule_analytics_rollup_refresh(state);
     }
 
@@ -568,9 +725,16 @@ async fn get_analytics_overview_inner(
         window,
     )
     .await?;
+    let breakdowns = query_clickhouse_analytics_breakdowns(
+        &state.http,
+        &state.config.playback_telemetry,
+        &organization_id,
+        window,
+    )
+    .await?;
 
     Ok(analytics_overview_response(
-        window, edge, player, timeseries, top_assets,
+        window, edge, player, timeseries, top_assets, breakdowns,
     ))
 }
 
@@ -659,9 +823,7 @@ fn normalize_playback_telemetry_event(
     }
 
     let event_id = normalize_safe_token(&event.event_id, "event_id", 128)?;
-    if let Some(organization_id) = event.organization_id.as_deref() {
-        validate_optional_uuid(organization_id, "organization_id")?;
-    }
+    let organization_id = optional_uuid(event.organization_id.as_deref(), "organization_id")?;
 
     let asset_id = normalize_asset_id(&event.asset_id)?;
     let artifact_path = normalize_artifact_path(&event.artifact_path)?;
@@ -677,6 +839,8 @@ fn normalize_playback_telemetry_event(
         ));
     }
     let content_type = normalize_safe_text(&event.content_type, "content_type", 128)?;
+    let resolution_tier =
+        optional_resolution_tier(event.resolution_tier.as_deref(), "resolution_tier")?;
     let error_code = match event.error_code {
         Some(value) if !value.trim().is_empty() => {
             Some(normalize_safe_token(&value, "error_code", 64)?)
@@ -687,6 +851,7 @@ fn normalize_playback_telemetry_event(
     Ok(NormalizedPlaybackTelemetryEvent {
         event_id,
         observed_at,
+        organization_id,
         asset_id,
         artifact_path,
         edge_id,
@@ -696,6 +861,7 @@ fn normalize_playback_telemetry_event(
         bytes_served: event.bytes_served,
         content_type,
         duration_ms: event.duration_ms,
+        resolution_tier,
         error_code,
     })
 }
@@ -715,15 +881,33 @@ fn normalize_player_telemetry_event(
     }
 
     let asset_id = normalize_asset_id(&event.asset_id)?;
+    let organization_id = optional_uuid(event.organization_id.as_deref(), "organization_id")?
+        .unwrap_or_else(|| NIL_ORGANIZATION_ID.to_owned());
     let playback_session_id =
         normalize_safe_token(&event.playback_session_id, "playback_session_id", 160)?;
     let phase = normalize_player_phase(&event.phase)?;
+    let viewer_id_hash =
+        optional_safe_token(event.viewer_id_hash.as_deref(), "viewer_id_hash", 96)?;
+    let page_type = normalize_page_type(event.page_type.as_deref())?;
+    let page_host = optional_safe_host(event.page_host.as_deref(), "page_host")?;
+    let referrer_host = optional_safe_host(event.referrer_host.as_deref(), "referrer_host")?;
+    let player_name = optional_safe_token(event.player_name.as_deref(), "player_name", 64)?;
     let selected_playback_mode = optional_safe_token(
         event.selected_playback_mode.as_deref(),
         "selected_playback_mode",
         32,
     )?;
     let selected_artifact_path = optional_artifact_path(event.selected_artifact_path.as_deref())?;
+    let event_id = match event.event_id.as_deref() {
+        Some(value) if !value.trim().is_empty() => normalize_safe_token(value, "event_id", 160)?,
+        _ => player_event_id(
+            &asset_id,
+            &playback_session_id,
+            &phase,
+            event.event_time_ms,
+            &selected_artifact_path,
+        ),
+    };
     let playback_failure_code = optional_safe_token(
         event.playback_failure_code.as_deref(),
         "playback_failure_code",
@@ -734,6 +918,19 @@ fn normalize_player_telemetry_event(
     let player_version =
         optional_safe_token(event.player_version.as_deref(), "player_version", 64)?;
     let app_version = optional_safe_token(event.app_version.as_deref(), "app_version", 64)?;
+    let browser_name = optional_safe_token(event.browser_name.as_deref(), "browser_name", 64)?;
+    let browser_version =
+        optional_safe_token(event.browser_version.as_deref(), "browser_version", 64)?;
+    let os_name = optional_safe_token(event.os_name.as_deref(), "os_name", 64)?;
+    let os_version = optional_safe_token(event.os_version.as_deref(), "os_version", 64)?;
+    let device_type = normalize_device_type(event.device_type.as_deref())?;
+    let preload = normalize_preload(event.preload.as_deref())?;
+    let startup_mode = optional_safe_token(event.startup_mode.as_deref(), "startup_mode", 32)?;
+    let geo_country = optional_geo_token(event.geo_country.as_deref(), "geo_country", 16)?;
+    let geo_region = optional_geo_token(event.geo_region.as_deref(), "geo_region", 32)?;
+    let geo_city = optional_safe_dimension_text(event.geo_city.as_deref(), "geo_city", 160)?;
+    let geo_continent = optional_geo_token(event.geo_continent.as_deref(), "geo_continent", 16)?;
+    let geo_asn = optional_safe_token(event.geo_asn.as_deref(), "geo_asn", 32)?;
     let bootstrap_http_status = event.bootstrap_http_status.unwrap_or(0);
     if bootstrap_http_status != 0 && !(100..=599).contains(&bootstrap_http_status) {
         return Err(AppError::bad_request(
@@ -746,16 +943,16 @@ fn normalize_player_telemetry_event(
         .min(PLAYER_WATCH_DELTA_MAX_MS);
 
     Ok(NormalizedPlayerTelemetryEvent {
-        event_id: player_event_id(
-            &asset_id,
-            &playback_session_id,
-            &phase,
-            event.event_time_ms,
-            &selected_artifact_path,
-        ),
+        event_id,
         observed_at,
+        organization_id,
         asset_id,
         playback_session_id,
+        viewer_id_hash,
+        page_type,
+        page_host,
+        referrer_host,
+        player_name,
         phase,
         selected_playback_mode,
         selected_artifact_path,
@@ -769,6 +966,20 @@ fn normalize_player_telemetry_event(
         region_label,
         player_version,
         app_version,
+        browser_name,
+        browser_version,
+        os_name,
+        os_version,
+        device_type,
+        autoplay: u8::from(event.autoplay.unwrap_or(false)),
+        muted: u8::from(event.muted.unwrap_or(false)),
+        preload,
+        startup_mode,
+        geo_country,
+        geo_region,
+        geo_city,
+        geo_continent,
+        geo_asn,
     })
 }
 
@@ -802,6 +1013,125 @@ fn optional_safe_token(
 ) -> std::result::Result<String, AppError> {
     match value {
         Some(value) if !value.trim().is_empty() => normalize_safe_token(value, field, max_len),
+        _ => Ok(String::new()),
+    }
+}
+
+fn optional_uuid(
+    value: Option<&str>,
+    field: &str,
+) -> std::result::Result<Option<String>, AppError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => {
+            let value = value.trim().to_ascii_lowercase();
+            validate_optional_uuid(&value, field)?;
+            Ok(Some(value))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn optional_resolution_tier(
+    value: Option<&str>,
+    field: &str,
+) -> std::result::Result<Option<String>, AppError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value @ ("720p" | "1080p" | "2k" | "4k")) => Ok(Some(value.to_owned())),
+        Some(_) => Err(AppError::bad_request(format!("{field} is not supported"))),
+        None => Ok(None),
+    }
+}
+
+fn normalize_page_type(value: Option<&str>) -> std::result::Result<String, AppError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value @ ("watch" | "embed" | "direct" | "custom")) => Ok(value.to_owned()),
+        Some(_) => Err(AppError::bad_request("page_type is not supported")),
+        None => Ok(String::new()),
+    }
+}
+
+fn normalize_device_type(value: Option<&str>) -> std::result::Result<String, AppError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value @ ("desktop" | "mobile" | "tablet" | "tv" | "bot" | "unknown")) => {
+            Ok(value.to_owned())
+        }
+        Some(_) => Err(AppError::bad_request("device_type is not supported")),
+        None => Ok(String::new()),
+    }
+}
+
+fn normalize_preload(value: Option<&str>) -> std::result::Result<String, AppError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value @ ("auto" | "metadata" | "none")) => Ok(value.to_owned()),
+        Some(_) => Err(AppError::bad_request("preload is not supported")),
+        None => Ok(String::new()),
+    }
+}
+
+fn optional_geo_token(
+    value: Option<&str>,
+    field: &str,
+    max_len: usize,
+) -> std::result::Result<String, AppError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => {
+            let value = value.trim().to_ascii_uppercase();
+            if value.len() > max_len
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(AppError::bad_request(format!(
+                    "{field} contains unsupported characters"
+                )));
+            }
+            Ok(value)
+        }
+        _ => Ok(String::new()),
+    }
+}
+
+fn optional_safe_host(value: Option<&str>, field: &str) -> std::result::Result<String, AppError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => {
+            let value = value.trim().to_ascii_lowercase();
+            if value.len() > 160
+                || value.contains("://")
+                || value.contains('?')
+                || value.contains('#')
+                || value.contains('@')
+                || value.bytes().any(|byte| {
+                    !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b':' | b'_'))
+                })
+            {
+                return Err(AppError::bad_request(format!("{field} is not allowed")));
+            }
+            Ok(value)
+        }
+        _ => Ok(String::new()),
+    }
+}
+
+fn optional_safe_dimension_text(
+    value: Option<&str>,
+    field: &str,
+    max_len: usize,
+) -> std::result::Result<String, AppError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => {
+            let value = value.trim();
+            if value.len() > max_len
+                || value.contains("://")
+                || value.contains('?')
+                || value.contains('#')
+                || value.bytes().any(|byte| byte.is_ascii_control())
+                || value.to_ascii_lowercase().contains("token")
+                || value.to_ascii_lowercase().contains("secret")
+            {
+                return Err(AppError::bad_request(format!("{field} is not allowed")));
+            }
+            Ok(value.to_owned())
+        }
         _ => Ok(String::new()),
     }
 }
@@ -905,137 +1235,10 @@ fn normalize_safe_text(
     Ok(value.to_owned())
 }
 
-async fn fetch_asset_playback_billing_metadata(
-    db: &sqlx::PgPool,
-    events: &[NormalizedPlaybackTelemetryEvent],
-) -> std::result::Result<HashMap<String, AssetPlaybackBillingMetadata>, AppError> {
-    let mut asset_ids = events
-        .iter()
-        .map(|event| event.asset_id.clone())
-        .collect::<Vec<_>>();
-    asset_ids.sort();
-    asset_ids.dedup();
-
-    let asset_rows: Vec<(String, Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
-        "
-        SELECT id::text,
-               organization_id::text,
-               duration_ms,
-               max_resolution_tier
-        FROM rend.assets
-        WHERE id::text = ANY($1::text[])
-        ",
-    )
-    .bind(&asset_ids)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::internal)?;
-
-    let mut metadata = asset_rows
-        .into_iter()
-        .map(
-            |(asset_id, organization_id, duration_ms, max_resolution_tier)| {
-                (
-                    asset_id,
-                    AssetPlaybackBillingMetadata {
-                        organization_id,
-                        duration_ms,
-                        max_resolution_tier,
-                        artifacts: HashMap::new(),
-                    },
-                )
-            },
-        )
-        .collect::<HashMap<_, _>>();
-
-    if metadata.is_empty() {
-        return Ok(metadata);
-    }
-
-    let artifact_rows: Vec<(String, String, Option<i64>, Option<String>)> = sqlx::query_as(
-        "
-        SELECT asset_id::text,
-               object_key,
-               duration_ms,
-               resolution_tier
-        FROM rend.artifacts
-        WHERE asset_id::text = ANY($1::text[])
-        ",
-    )
-    .bind(&asset_ids)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::internal)?;
-
-    for (asset_id, object_key, duration_ms, resolution_tier) in artifact_rows {
-        let Some(asset_metadata) = metadata.get_mut(&asset_id) else {
-            continue;
-        };
-        let prefix = format!("videos/{asset_id}/");
-        let Some(artifact_path) = object_key.strip_prefix(&prefix) else {
-            continue;
-        };
-        asset_metadata.artifacts.insert(
-            artifact_path.to_owned(),
-            ArtifactPlaybackBillingMetadata {
-                duration_ms,
-                resolution_tier,
-            },
-        );
-    }
-
-    Ok(metadata)
-}
-
-async fn fetch_player_event_organizations(
-    db: &sqlx::PgPool,
-    events: &[NormalizedPlayerTelemetryEvent],
-) -> std::result::Result<HashMap<String, String>, AppError> {
-    let mut asset_ids = events
-        .iter()
-        .map(|event| event.asset_id.clone())
-        .collect::<Vec<_>>();
-    asset_ids.sort();
-    asset_ids.dedup();
-    if asset_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "
-        SELECT id::text,
-               organization_id::text
-        FROM rend.assets
-        WHERE id::text = ANY($1::text[])
-          AND deleted_at IS NULL
-        ",
-    )
-    .bind(&asset_ids)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::internal)?;
-
-    Ok(rows.into_iter().collect())
-}
-
 impl NormalizedPlaybackTelemetryEvent {
-    fn into_clickhouse_row(
-        self,
-        ingested_at: DateTime<Utc>,
-        billing_metadata: &HashMap<String, AssetPlaybackBillingMetadata>,
-    ) -> ClickHousePlaybackEventRow {
-        let metadata = billing_metadata.get(&self.asset_id);
-        let artifact_metadata = metadata.and_then(|value| value.artifacts.get(&self.artifact_path));
-        let organization_id = metadata.and_then(|value| value.organization_id.clone());
-        let resolution_tier = artifact_metadata
-            .and_then(|value| value.resolution_tier.clone())
-            .or_else(|| metadata.and_then(|value| value.max_resolution_tier.clone()));
+    fn into_clickhouse_row(self, ingested_at: DateTime<Utc>) -> ClickHousePlaybackEventRow {
         let delivered_duration_ms = if (200..400).contains(&self.status_code) {
-            artifact_metadata
-                .and_then(|value| value.duration_ms)
-                .or_else(|| fallback_delivered_duration_ms(&self.artifact_path, metadata))
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(0)
+            fallback_delivered_duration_ms(&self.artifact_path)
         } else {
             0
         };
@@ -1045,7 +1248,7 @@ impl NormalizedPlaybackTelemetryEvent {
             observed_at: clickhouse_datetime(self.observed_at),
             ingested_at: clickhouse_datetime(ingested_at),
             asset_id: self.asset_id,
-            organization_id,
+            organization_id: self.organization_id,
             artifact_path: self.artifact_path,
             edge_id: self.edge_id,
             region: self.region,
@@ -1055,27 +1258,26 @@ impl NormalizedPlaybackTelemetryEvent {
             content_type: self.content_type,
             duration_ms: self.duration_ms,
             delivered_duration_ms,
-            resolution_tier,
+            resolution_tier: self.resolution_tier,
             error_code: self.error_code,
         }
     }
 }
 
 impl NormalizedPlayerTelemetryEvent {
-    fn into_clickhouse_row(
-        self,
-        received_at: DateTime<Utc>,
-        organizations: &HashMap<String, String>,
-    ) -> Option<ClickHousePlayerEventRow> {
-        let organization_id = organizations.get(&self.asset_id)?.clone();
-
-        Some(ClickHousePlayerEventRow {
+    fn into_clickhouse_row(self, received_at: DateTime<Utc>) -> ClickHousePlayerEventRow {
+        ClickHousePlayerEventRow {
             event_id: self.event_id,
             observed_at: clickhouse_datetime(self.observed_at),
             received_at: clickhouse_datetime(received_at),
-            organization_id,
+            organization_id: self.organization_id,
             asset_id: self.asset_id,
             playback_session_id: self.playback_session_id,
+            viewer_id_hash: self.viewer_id_hash,
+            page_type: self.page_type,
+            page_host: self.page_host,
+            referrer_host: self.referrer_host,
+            player_name: self.player_name,
             phase: self.phase,
             selected_playback_mode: self.selected_playback_mode,
             selected_artifact_path: self.selected_artifact_path,
@@ -1089,26 +1291,33 @@ impl NormalizedPlayerTelemetryEvent {
             region_label: self.region_label,
             player_version: self.player_version,
             app_version: self.app_version,
-        })
+            browser_name: self.browser_name,
+            browser_version: self.browser_version,
+            os_name: self.os_name,
+            os_version: self.os_version,
+            device_type: self.device_type,
+            autoplay: self.autoplay,
+            muted: self.muted,
+            preload: self.preload,
+            startup_mode: self.startup_mode,
+            geo_country: self.geo_country,
+            geo_region: self.geo_region,
+            geo_city: self.geo_city,
+            geo_continent: self.geo_continent,
+            geo_asn: self.geo_asn,
+        }
     }
 }
 
-fn fallback_delivered_duration_ms(
-    artifact_path: &str,
-    metadata: Option<&AssetPlaybackBillingMetadata>,
-) -> Option<i64> {
+fn fallback_delivered_duration_ms(artifact_path: &str) -> u32 {
     if !is_asset_playback_path(artifact_path) {
-        return None;
+        return 0;
     }
 
     match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
-        ["opener.mp4"] => metadata
-            .and_then(|value| value.duration_ms)
-            .map(|duration_ms| duration_ms.min(5_000)),
-        ["hls", "master.m3u8"] => Some(0),
-        ["hls", _, "index.m3u8"] => Some(0),
-        ["hls", _] | ["hls", _, _] => Some(2_000),
-        _ => None,
+        ["opener.mp4"] | ["hls", "master.m3u8"] | ["hls", _, "index.m3u8"] => 0,
+        ["hls", _] | ["hls", _, _] => 2_000,
+        _ => 0,
     }
 }
 
@@ -1144,7 +1353,7 @@ async fn insert_clickhouse_player_events(
 
     let query = "\
         INSERT INTO player_events \
-        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, phase, selected_playback_mode, selected_artifact_path, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version) \
+        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, viewer_id_hash, page_type, page_host, referrer_host, player_name, phase, selected_playback_mode, selected_artifact_path, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version, browser_name, browser_version, os_name, os_version, device_type, autoplay, muted, preload, startup_mode, geo_country, geo_region, geo_city, geo_continent, geo_asn) \
         FORMAT JSONEachRow";
 
     clickhouse_post(http, config, query, body).await.map(|_| ())
@@ -1202,6 +1411,16 @@ async fn query_clickhouse_analytics_top_assets(
     window: NormalizedPlaybackAnalyticsWindow,
 ) -> std::result::Result<Vec<ClickHouseAnalyticsAssetRow>, AppError> {
     let query = clickhouse_analytics_top_assets_query(organization_id, window);
+    query_clickhouse_rows(http, config, &query).await
+}
+
+async fn query_clickhouse_analytics_breakdowns(
+    http: &reqwest::Client,
+    config: &TelemetryConfig,
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+) -> std::result::Result<Vec<ClickHouseAnalyticsBreakdownRow>, AppError> {
+    let query = clickhouse_analytics_breakdowns_query(organization_id, window);
     query_clickhouse_rows(http, config, &query).await
 }
 
@@ -1336,18 +1555,22 @@ fn clickhouse_player_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWin
     format!(
         "\
         INSERT INTO analytics_player_hourly \
+          (organization_id, bucket_start, asset_id, sessions, views, unique_viewers, startup_failures, exits_before_start, watch_time_ms, stalled_sessions, stall_count, stall_duration_ms, playback_failures, completions, first_frame_p50_ms, first_frame_p95_ms, updated_at) \
         SELECT \
           rollup_organization_id AS organization_id, \
           bucket_start, \
           rollup_asset_id AS asset_id, \
           count() AS sessions, \
           countIf(reached_first_frame) AS views, \
+          uniqExactIf(session_viewer_id_hash, session_viewer_id_hash != '') AS unique_viewers, \
           countIf(startup_failed) AS startup_failures, \
+          countIf(NOT reached_first_frame AND NOT startup_failed) AS exits_before_start, \
           sum(session_watch_time_ms) AS watch_time_ms, \
           countIf(session_stall_duration_ms > 0) AS stalled_sessions, \
           sum(session_stall_count) AS stall_count, \
           sum(session_stall_duration_ms) AS stall_duration_ms, \
           sum(session_playback_failures) AS playback_failures, \
+          sum(session_completions) AS completions, \
           quantileTDigestIf(0.5)(first_frame_ms, first_frame_ms > 0) AS first_frame_p50_ms, \
           quantileTDigestIf(0.95)(first_frame_ms, first_frame_ms > 0) AS first_frame_p95_ms, \
           now64(3) AS updated_at \
@@ -1356,6 +1579,7 @@ fn clickhouse_player_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWin
             rollup_organization_id, \
             rollup_asset_id, \
             rollup_playback_session_id, \
+            any(session_viewer_id_hash) AS session_viewer_id_hash, \
             toStartOfHour(min(event_observed_at)) AS bucket_start, \
             countIf(phase = 'first_frame') > 0 AS reached_first_frame, \
             countIf(phase = 'bootstrap_failure') > 0 AS startup_failed, \
@@ -1363,20 +1587,23 @@ fn clickhouse_player_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWin
             sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS session_watch_time_ms, \
             countIf(phase = 'stall_end') AS session_stall_count, \
             sumIf(stall_duration_ms, phase = 'stall_end') AS session_stall_duration_ms, \
-            countIf(phase = 'playback_failure') AS session_playback_failures \
+            countIf(phase = 'playback_failure') AS session_playback_failures, \
+            countIf(phase = 'playback_ended') AS session_completions \
           FROM ( \
             SELECT \
               event_id, \
               any(organization_id) AS rollup_organization_id, \
               any(asset_id) AS rollup_asset_id, \
               any(playback_session_id) AS rollup_playback_session_id, \
+              any(viewer_id_hash) AS session_viewer_id_hash, \
               min(observed_at) AS event_observed_at, \
               any(phase) AS phase, \
               any(first_frame_ms) AS first_frame_ms, \
               any(stall_duration_ms) AS stall_duration_ms, \
               any(watch_delta_ms) AS watch_delta_ms \
             FROM player_events \
-            WHERE observed_at >= fromUnixTimestamp64Milli({}) \
+            WHERE organization_id != toUUID('{NIL_ORGANIZATION_ID}') \
+              AND observed_at >= fromUnixTimestamp64Milli({}) \
               AND observed_at < fromUnixTimestamp64Milli({}) \
             GROUP BY event_id \
           ) \
@@ -1432,12 +1659,15 @@ fn clickhouse_player_overview_query(
         SELECT \
           ifNull(sum(player_rollups.sessions), 0) AS sessions, \
           ifNull(sum(player_rollups.views), 0) AS views, \
+          ifNull(sum(player_rollups.unique_viewers), 0) AS unique_viewers, \
           ifNull(sum(player_rollups.startup_failures), 0) AS startup_failures, \
+          ifNull(sum(player_rollups.exits_before_start), 0) AS exits_before_start, \
           ifNull(sum(player_rollups.watch_time_ms), 0) AS watch_time_ms, \
           ifNull(sum(player_rollups.stalled_sessions), 0) AS stalled_sessions, \
           ifNull(sum(player_rollups.stall_count), 0) AS stall_count, \
           ifNull(sum(player_rollups.stall_duration_ms), 0) AS stall_duration_ms, \
           ifNull(sum(player_rollups.playback_failures), 0) AS playback_failures, \
+          ifNull(sum(player_rollups.completions), 0) AS completions, \
           if(isFinite(avgIf(player_rollups.first_frame_p50_ms, player_rollups.views > 0)), avgIf(player_rollups.first_frame_p50_ms, player_rollups.views > 0), 0) AS first_frame_p50_ms, \
           if(isFinite(avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0)), avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0), 0) AS first_frame_p95_ms \
         FROM ( \
@@ -1446,12 +1676,15 @@ fn clickhouse_player_overview_query(
             asset_id, \
             argMax(sessions, updated_at) AS sessions, \
             argMax(views, updated_at) AS views, \
+            argMax(unique_viewers, updated_at) AS unique_viewers, \
             argMax(startup_failures, updated_at) AS startup_failures, \
+            argMax(exits_before_start, updated_at) AS exits_before_start, \
             argMax(watch_time_ms, updated_at) AS watch_time_ms, \
             argMax(stalled_sessions, updated_at) AS stalled_sessions, \
             argMax(stall_count, updated_at) AS stall_count, \
             argMax(stall_duration_ms, updated_at) AS stall_duration_ms, \
             argMax(playback_failures, updated_at) AS playback_failures, \
+            argMax(completions, updated_at) AS completions, \
             argMax(first_frame_p50_ms, updated_at) AS first_frame_p50_ms, \
             argMax(first_frame_p95_ms, updated_at) AS first_frame_p95_ms \
           FROM analytics_player_hourly \
@@ -1553,6 +1786,118 @@ fn clickhouse_analytics_top_assets_query(
     )
 }
 
+fn clickhouse_player_breakdown_select(
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+    dimension: &str,
+    column: &str,
+) -> String {
+    format!(
+        "\
+        SELECT \
+          '{dimension}' AS dimension, \
+          value, \
+          countIf(reached_first_frame) AS views, \
+          uniqExactIf(session_viewer_id_hash, session_viewer_id_hash != '') AS unique_viewers, \
+          sum(session_watch_time_ms) AS watch_time_ms, \
+          0 AS request_count, \
+          0 AS bytes_served \
+        FROM ( \
+          SELECT \
+            value, \
+            session_id, \
+            any(session_viewer_id_hash) AS session_viewer_id_hash, \
+            countIf(phase = 'first_frame') > 0 AS reached_first_frame, \
+            sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS session_watch_time_ms \
+          FROM ( \
+            SELECT \
+              event_id, \
+              any({column}) AS value, \
+              any(playback_session_id) AS session_id, \
+              any(viewer_id_hash) AS session_viewer_id_hash, \
+              any(phase) AS phase, \
+              any(watch_delta_ms) AS watch_delta_ms \
+            FROM player_events \
+            WHERE organization_id = toUUID('{organization_id}') \
+              AND observed_at >= fromUnixTimestamp64Milli({}) \
+              AND observed_at < fromUnixTimestamp64Milli({}) \
+            GROUP BY event_id \
+          ) \
+          WHERE value != '' \
+          GROUP BY value, session_id \
+        ) \
+        GROUP BY value \
+        ORDER BY views DESC, unique_viewers DESC, watch_time_ms DESC \
+        LIMIT 8",
+        window.started_at.timestamp_millis(),
+        window.ended_at.timestamp_millis(),
+    )
+}
+
+fn clickhouse_edge_breakdown_select(
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+    dimension: &str,
+    expression: &str,
+) -> String {
+    format!(
+        "\
+        SELECT \
+          '{dimension}' AS dimension, \
+          value, \
+          0 AS views, \
+          0 AS unique_viewers, \
+          0 AS watch_time_ms, \
+          count() AS request_count, \
+          sum(bytes_served) AS bytes_served \
+        FROM ( \
+          SELECT \
+            event_id, \
+            {expression} AS value, \
+            any(bytes_served) AS bytes_served \
+          FROM playback_events \
+          WHERE organization_id = toUUID('{organization_id}') \
+            AND observed_at >= fromUnixTimestamp64Milli({}) \
+            AND observed_at < fromUnixTimestamp64Milli({}) \
+          GROUP BY event_id \
+        ) \
+        WHERE value != '' \
+        GROUP BY value \
+        ORDER BY request_count DESC, bytes_served DESC \
+        LIMIT 8",
+        window.started_at.timestamp_millis(),
+        window.ended_at.timestamp_millis(),
+    )
+}
+
+fn clickhouse_analytics_breakdowns_query(
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+) -> String {
+    let selects = [
+        clickhouse_player_breakdown_select(organization_id, window, "page_type", "page_type"),
+        clickhouse_player_breakdown_select(organization_id, window, "country", "geo_country"),
+        clickhouse_player_breakdown_select(organization_id, window, "browser", "browser_name"),
+        clickhouse_player_breakdown_select(organization_id, window, "os", "os_name"),
+        clickhouse_player_breakdown_select(organization_id, window, "device", "device_type"),
+        clickhouse_player_breakdown_select(organization_id, window, "referrer", "referrer_host"),
+        clickhouse_player_breakdown_select(
+            organization_id,
+            window,
+            "player_version",
+            "player_version",
+        ),
+        clickhouse_edge_breakdown_select(organization_id, window, "edge_region", "any(region)"),
+        clickhouse_edge_breakdown_select(
+            organization_id,
+            window,
+            "resolution_tier",
+            "ifNull(any(resolution_tier), '')",
+        ),
+    ];
+    format!("{} FORMAT JSONEachRow", selects.join(" UNION ALL "))
+}
+
 pub(crate) fn normalize_playback_analytics_window(
     query: PlaybackAnalyticsQuery,
     config: &TelemetryConfig,
@@ -1632,6 +1977,7 @@ fn analytics_overview_response(
     player: ClickHousePlayerOverviewRow,
     timeseries: Vec<ClickHouseAnalyticsSeriesRow>,
     top_assets: Vec<ClickHouseAnalyticsAssetRow>,
+    breakdown_rows: Vec<ClickHouseAnalyticsBreakdownRow>,
 ) -> AnalyticsOverviewResponse {
     let startup_attempts = player.views.saturating_add(player.startup_failures);
     let startup_success_rate = ratio(player.views, startup_attempts);
@@ -1643,6 +1989,7 @@ fn analytics_overview_response(
         window_started_at: rfc3339_millis(window.started_at),
         window_ended_at: rfc3339_millis(window.ended_at),
         views: player.views,
+        unique_viewers: player.unique_viewers,
         sessions: player.sessions,
         watch_time_ms: player.watch_time_ms,
         startup_success_rate,
@@ -1653,6 +2000,8 @@ fn analytics_overview_response(
         stall_count: player.stall_count,
         stall_duration_ms: player.stall_duration_ms,
         playback_failures: player.playback_failures,
+        exits_before_start: player.exits_before_start,
+        completions: player.completions,
         request_count: edge.request_count,
         bytes_served: edge.bytes_served,
         cache_hit_rate,
@@ -1681,7 +2030,32 @@ fn analytics_overview_response(
                 bytes_served: row.bytes_served,
             })
             .collect(),
+        breakdowns: analytics_breakdowns_response(breakdown_rows),
     }
+}
+
+fn analytics_breakdowns_response(
+    rows: Vec<ClickHouseAnalyticsBreakdownRow>,
+) -> Vec<AnalyticsBreakdown> {
+    let mut grouped: BTreeMap<String, Vec<AnalyticsBreakdownRow>> = BTreeMap::new();
+    for row in rows {
+        grouped
+            .entry(row.dimension)
+            .or_default()
+            .push(AnalyticsBreakdownRow {
+                value: row.value,
+                views: row.views,
+                unique_viewers: row.unique_viewers,
+                watch_time_ms: row.watch_time_ms,
+                request_count: row.request_count,
+                bytes_served: row.bytes_served,
+            });
+    }
+
+    grouped
+        .into_iter()
+        .map(|(dimension, rows)| AnalyticsBreakdown { dimension, rows })
+        .collect()
 }
 
 fn ratio(numerator: u64, denominator: u64) -> f64 {
@@ -1698,6 +2072,22 @@ fn nonzero_float(value: f64) -> Option<f64> {
     } else {
         None
     }
+}
+
+fn max_observed_lag_ms<'a, I>(received_at: DateTime<Utc>, observed_ats: I) -> u64
+where
+    I: IntoIterator<Item = &'a DateTime<Utc>>,
+{
+    observed_ats
+        .into_iter()
+        .map(|observed_at| {
+            received_at
+                .signed_duration_since(*observed_at)
+                .num_milliseconds()
+                .max(0) as u64
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn schedule_analytics_rollup_refresh(state: Arc<AppState>) {
@@ -1717,7 +2107,8 @@ fn schedule_analytics_rollup_refresh(state: Arc<AppState>) {
     }
 
     tokio::spawn(async move {
-        if let Err(error) = refresh_recent_analytics_rollups(state).await {
+        if let Err(error) = refresh_recent_analytics_rollups(state.clone()).await {
+            state.metrics.record_analytics_rollup_failure();
             tracing::warn!(?error, "analytics rollup refresh failed");
         }
     });
@@ -1726,7 +2117,8 @@ fn schedule_analytics_rollup_refresh(state: Arc<AppState>) {
 async fn refresh_recent_analytics_rollups(
     state: Arc<AppState>,
 ) -> std::result::Result<(), AppError> {
-    let window = analytics_rollup_refresh_window(Utc::now());
+    let now = Utc::now();
+    let window = analytics_rollup_refresh_window(now);
     let edge_query = clickhouse_edge_rollup_refresh_query(window);
     let player_query = clickhouse_player_rollup_refresh_query(window);
     clickhouse_post(
@@ -1743,6 +2135,9 @@ async fn refresh_recent_analytics_rollups(
         String::new(),
     )
     .await?;
+    state
+        .metrics
+        .record_analytics_rollup_success(max_observed_lag_ms(now, [&window.ended_at]));
     Ok(())
 }
 
@@ -1884,6 +2279,32 @@ mod tests {
     }
 
     #[test]
+    fn player_telemetry_without_org_uses_nil_org_for_clickhouse() {
+        let received_at = DateTime::parse_from_rfc3339("2026-06-13T12:00:01.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event_time_ms = received_at.timestamp_millis() - 1_000;
+        let batch = serde_json::from_value::<PlayerTelemetryBatch>(serde_json::json!({
+            "events": [{
+                "event_id": "player-evt-1",
+                "playback_session_id": "session-1",
+                "asset_id": "00000000-0000-0000-0000-000000000001",
+                "phase": "player_load",
+                "event_time_ms": event_time_ms,
+                "page_type": "watch"
+            }]
+        }))
+        .unwrap();
+        let event = normalize_player_telemetry_batch(batch, 2, received_at)
+            .unwrap()
+            .remove(0);
+        let row = event.into_clickhouse_row(received_at);
+
+        assert_eq!(row.organization_id, NIL_ORGANIZATION_ID);
+        assert_eq!(row.page_type, "watch");
+    }
+
+    #[test]
     fn playback_analytics_query_dedupes_by_event_id() {
         let now = DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
             .unwrap()
@@ -1959,9 +2380,17 @@ mod tests {
         assert!(player_query.contains("rollup_organization_id AS organization_id"));
         assert!(player_query.contains("rollup_asset_id AS asset_id"));
         assert!(player_query.contains("min(observed_at) AS event_observed_at"));
+        assert!(player_query.contains("uniqExactIf(session_viewer_id_hash"));
+        assert!(player_query.contains("countIf(NOT reached_first_frame AND NOT startup_failed)"));
         assert!(player_query.contains("sum(session_watch_time_ms) AS watch_time_ms"));
         assert!(player_query.contains("countIf(session_stall_duration_ms > 0)"));
         assert!(player_query.contains("sum(session_playback_failures) AS playback_failures"));
+        assert!(player_query.contains("countIf(phase = 'playback_ended')"));
+        assert!(
+            player_query.contains(
+                "WHERE organization_id != toUUID('00000000-0000-0000-0000-000000000000')"
+            )
+        );
         assert!(player_query.contains(
             "GROUP BY rollup_organization_id, rollup_asset_id, rollup_playback_session_id"
         ));
@@ -1989,7 +2418,7 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_rows_use_artifact_billing_metadata_for_delivery() {
+    fn clickhouse_rows_use_event_claims_without_postgres_metadata() {
         let ingested_at = DateTime::parse_from_rfc3339("2026-06-13T12:00:01.000Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1997,6 +2426,7 @@ mod tests {
             "events": [{
                 "event_id": "evt-1",
                 "observed_at": "2026-06-13T12:00:00.000Z",
+                "organization_id": "00000000-0000-0000-0000-000000000009",
                 "asset_id": "00000000-0000-0000-0000-000000000001",
                 "artifact_path": "hls/segment_00000.ts",
                 "edge_id": "edge-1",
@@ -2005,32 +2435,18 @@ mod tests {
                 "status_code": 200,
                 "bytes_served": 123,
                 "content_type": "video/mp2t",
-                "duration_ms": 9
+                "duration_ms": 9,
+                "resolution_tier": "720p"
             }]
         }))
         .unwrap();
         let event = normalize_playback_telemetry_batch(batch, 2, ingested_at)
             .unwrap()
             .remove(0);
-        let mut asset = AssetPlaybackBillingMetadata {
-            organization_id: Some("00000000-0000-0000-0000-000000000009".to_owned()),
-            duration_ms: Some(12_000),
-            max_resolution_tier: Some("1080p".to_owned()),
-            artifacts: HashMap::new(),
-        };
-        asset.artifacts.insert(
-            "hls/segment_00000.ts".to_owned(),
-            ArtifactPlaybackBillingMetadata {
-                duration_ms: Some(1_234),
-                resolution_tier: Some("720p".to_owned()),
-            },
-        );
-        let metadata = HashMap::from([("00000000-0000-0000-0000-000000000001".to_owned(), asset)]);
-
-        let row = event.into_clickhouse_row(ingested_at, &metadata);
+        let row = event.into_clickhouse_row(ingested_at);
 
         assert_eq!(row.duration_ms, 9);
-        assert_eq!(row.delivered_duration_ms, 1_234);
+        assert_eq!(row.delivered_duration_ms, 2_000);
         assert_eq!(row.resolution_tier.as_deref(), Some("720p"));
         assert_eq!(
             row.organization_id.as_deref(),
