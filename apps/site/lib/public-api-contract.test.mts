@@ -74,6 +74,8 @@ test("control-plane success response bodies match the public OpenAPI schemas", (
         created_at: "2026-06-14T10:00:00.000Z",
         updated_at: "2026-06-14T10:01:00.000Z",
         source_byte_size: 428815,
+        duration_ms: 12000,
+        has_thumbnail: true,
         artifact_count: 4,
       },
     ],
