@@ -79,6 +79,12 @@ export type RendPlayerTelemetryEvent = {
   geo_city?: string;
   geo_continent?: string;
   geo_asn?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  channel?: string;
   document_start_ms?: number;
   video_created_ms?: number;
   src_assigned_ms?: number;
@@ -97,6 +103,12 @@ export type RendPlayerTelemetryInput = Omit<
   | "player_name"
   | "event_time_ms"
   | "player_version"
+  | "utm_source"
+  | "utm_medium"
+  | "utm_campaign"
+  | "utm_term"
+  | "utm_content"
+  | "channel"
 >;
 
 export const REND_PLAYER_VERSION = "0.1.0";
