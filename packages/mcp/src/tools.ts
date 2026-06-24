@@ -183,6 +183,8 @@ function safeAssetSummary(asset: AssetSummary, config: RendMcpConfig) {
     created_at: asset.created_at,
     updated_at: asset.updated_at,
     source_byte_size: asset.source_byte_size,
+    duration_ms: asset.duration_ms,
+    has_thumbnail: asset.has_thumbnail,
     artifact_count: asset.artifact_count,
     suspended_at: asset.suspended_at,
     suspension_reason: asset.suspension_reason,
