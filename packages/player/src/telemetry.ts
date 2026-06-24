@@ -24,8 +24,15 @@ export type RendPlayerTelemetryPhase =
   | "playback_ended";
 
 export type RendPlayerTelemetryEvent = {
+  event_id?: string;
+  organization_id?: string;
   playback_session_id: string;
   asset_id: string;
+  viewer_id_hash?: string;
+  page_type?: "watch" | "embed" | "direct" | "custom";
+  page_host?: string;
+  referrer_host?: string;
+  player_name?: string;
   phase: RendPlayerTelemetryPhase;
   event_time_ms: number;
   bootstrap_start_ms?: number;
@@ -58,6 +65,20 @@ export type RendPlayerTelemetryEvent = {
   region_label?: string;
   player_version?: string;
   app_version?: string;
+  browser_name?: string;
+  browser_version?: string;
+  os_name?: string;
+  os_version?: string;
+  device_type?: "desktop" | "mobile" | "tablet" | "tv" | "bot" | "unknown";
+  autoplay?: boolean;
+  muted?: boolean;
+  preload?: "auto" | "metadata" | "none" | "";
+  startup_mode?: string;
+  geo_country?: string;
+  geo_region?: string;
+  geo_city?: string;
+  geo_continent?: string;
+  geo_asn?: string;
   document_start_ms?: number;
   video_created_ms?: number;
   src_assigned_ms?: number;
@@ -65,10 +86,21 @@ export type RendPlayerTelemetryEvent = {
 
 export type RendPlayerTelemetryInput = Omit<
   RendPlayerTelemetryEvent,
-  "playback_session_id" | "asset_id" | "event_time_ms" | "player_version"
+  | "event_id"
+  | "organization_id"
+  | "playback_session_id"
+  | "asset_id"
+  | "viewer_id_hash"
+  | "page_type"
+  | "page_host"
+  | "referrer_host"
+  | "player_name"
+  | "event_time_ms"
+  | "player_version"
 >;
 
 export const REND_PLAYER_VERSION = "0.1.0";
+export const REND_PLAYER_NAME = "rend-player";
 const TELEMETRY_SESSION_WINDOW_MS = 60_000;
 const TELEMETRY_MAX_EVENTS_PER_SESSION_WINDOW = 80;
 const TELEMETRY_BATCH_DELAY_MS = 1_000;
@@ -111,6 +143,10 @@ export function generatePlaybackSessionId() {
   }
 
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export function generateTelemetryEventId() {
+  return `evt-${generatePlaybackSessionId()}`;
 }
 
 function safeHeaderValue(value: string) {
