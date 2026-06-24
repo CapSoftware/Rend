@@ -1,6 +1,6 @@
 {
   "name": "@rend-sdk/client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for the Rend public API.",
   "license": "MIT",
   "type": "module",
