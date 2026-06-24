@@ -1,5 +1,7 @@
 import type {
   AnalyticsAssetSummary,
+  AnalyticsBreakdown,
+  AnalyticsBreakdownRow,
   AnalyticsOverview,
   AssetArtifact,
   AssetDetail,
@@ -554,11 +556,53 @@ function sanitizeAnalyticsAsset(value: unknown): AnalyticsAssetSummary | null {
   };
 }
 
+function sanitizeAnalyticsBreakdownRow(value: unknown): AnalyticsBreakdownRow | null {
+  if (!isRecord(value)) return null;
+  const rowValue = safeString(value.value, 180);
+  const views = safeOptionalPositiveInteger(value.views);
+  const uniqueViewers = safeOptionalPositiveInteger(value.unique_viewers);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const requestCount = safeOptionalPositiveInteger(value.request_count);
+  const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
+  if (
+    !rowValue ||
+    views === undefined ||
+    uniqueViewers === undefined ||
+    watchTimeMs === undefined ||
+    requestCount === undefined ||
+    bytesServed === undefined
+  ) {
+    return null;
+  }
+  return {
+    value: rowValue,
+    views,
+    unique_viewers: uniqueViewers,
+    watch_time_ms: watchTimeMs,
+    request_count: requestCount,
+    bytes_served: bytesServed,
+  };
+}
+
+function sanitizeAnalyticsBreakdown(value: unknown): AnalyticsBreakdown | null {
+  if (!isRecord(value)) return null;
+  const dimension = safeState(value.dimension);
+  if (!dimension || !Array.isArray(value.rows)) return null;
+  return {
+    dimension,
+    rows: value.rows.flatMap((row) => {
+      const safeRow = sanitizeAnalyticsBreakdownRow(row);
+      return safeRow ? [safeRow] : [];
+    }),
+  };
+}
+
 function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
   if (!isRecord(value)) return null;
   const windowStartedAt = safeTimestamp(value.window_started_at);
   const windowEndedAt = safeTimestamp(value.window_ended_at);
   const views = safeOptionalPositiveInteger(value.views);
+  const uniqueViewers = safeOptionalPositiveInteger(value.unique_viewers);
   const sessions = safeOptionalPositiveInteger(value.sessions);
   const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
   const startupSuccessRate = safeOptionalRatio(value.startup_success_rate);
@@ -567,6 +611,8 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
   const stallCount = safeOptionalPositiveInteger(value.stall_count);
   const stallDurationMs = safeOptionalPositiveInteger(value.stall_duration_ms);
   const playbackFailures = safeOptionalPositiveInteger(value.playback_failures);
+  const exitsBeforeStart = safeOptionalPositiveInteger(value.exits_before_start);
+  const completions = safeOptionalPositiveInteger(value.completions);
   const requestCount = safeOptionalPositiveInteger(value.request_count);
   const bytesServed = safeOptionalPositiveInteger(value.bytes_served);
   const cacheHitRate = safeOptionalRatio(value.cache_hit_rate);
@@ -575,6 +621,7 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
     !windowStartedAt ||
     !windowEndedAt ||
     views === undefined ||
+    uniqueViewers === undefined ||
     sessions === undefined ||
     watchTimeMs === undefined ||
     startupSuccessRate === undefined ||
@@ -583,6 +630,8 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
     stallCount === undefined ||
     stallDurationMs === undefined ||
     playbackFailures === undefined ||
+    exitsBeforeStart === undefined ||
+    completions === undefined ||
     requestCount === undefined ||
     bytesServed === undefined ||
     cacheHitRate === undefined ||
@@ -595,6 +644,7 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
     window_started_at: windowStartedAt,
     window_ended_at: windowEndedAt,
     views,
+    unique_viewers: uniqueViewers,
     sessions,
     watch_time_ms: watchTimeMs,
     startup_success_rate: startupSuccessRate,
@@ -605,6 +655,8 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
     stall_count: stallCount,
     stall_duration_ms: stallDurationMs,
     playback_failures: playbackFailures,
+    exits_before_start: exitsBeforeStart,
+    completions,
     request_count: requestCount,
     bytes_served: bytesServed,
     cache_hit_rate: cacheHitRate,
@@ -621,6 +673,12 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
       ? value.top_assets.flatMap((asset) => {
           const safeAsset = sanitizeAnalyticsAsset(asset);
           return safeAsset ? [safeAsset] : [];
+        })
+      : [],
+    breakdowns: Array.isArray(value.breakdowns)
+      ? value.breakdowns.flatMap((breakdown) => {
+          const safeBreakdown = sanitizeAnalyticsBreakdown(breakdown);
+          return safeBreakdown ? [safeBreakdown] : [];
         })
       : [],
   };
