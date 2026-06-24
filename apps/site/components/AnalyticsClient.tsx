@@ -90,6 +90,13 @@ function formatBucket(value: string) {
   }).format(date);
 }
 
+function formatDimension(value: string) {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function maxSeriesValue(points: AnalyticsTimeSeriesPoint[]) {
   return Math.max(1, ...points.map((point) => Math.max(point.views, point.request_count)));
 }
@@ -198,16 +205,18 @@ export default function AnalyticsClient({
         {analytics ? (
           <div className="flex flex-col gap-5">
             <StatGrid>
-              <Stat label="Views" value={formatNumber(analytics.views)} hint="Sessions with first frame" icon={Eye} />
+              <Stat label="Views" value={formatNumber(analytics.views)} hint="Playback sessions with first frame" icon={Eye} />
+              <Stat label="Unique viewers" value={formatNumber(analytics.unique_viewers)} hint="Pseudonymous viewer hashes" icon={Eye} />
               <Stat label="Watch time" value={formatWatchTime(analytics.watch_time_ms)} hint="Player heartbeat estimate" icon={Clock} />
               <Stat label="Startup" value={formatPercent(analytics.startup_success_rate)} hint={`p95 ${formatMs(analytics.startup_p95_ms)}`} icon={Gauge} />
               <Stat label="Rebuffer" value={formatPercent(analytics.rebuffer_ratio)} hint={`${formatNumber(analytics.stalled_sessions)} stalled sessions`} icon={Activity} />
             </StatGrid>
 
             <StatGrid>
-              <Stat label="Requests" value={formatCompact(analytics.request_count)} hint={`${formatBytes(analytics.bytes_served)} served`} icon={Database} />
+              <Stat label="Requests" value={formatCompact(analytics.request_count)} hint="Edge artifact requests" icon={Database} />
               <Stat label="Cache hit" value={formatPercent(analytics.cache_hit_rate)} hint="Edge request rollup" icon={Signal} />
               <Stat label="Errors" value={formatPercent(analytics.error_rate)} hint={`${formatNumber(analytics.playback_failures)} player failures`} icon={Activity} />
+              <Stat label="Completions" value={formatNumber(analytics.completions)} hint={`${formatNumber(analytics.exits_before_start)} exits before start`} icon={Activity} />
               <Stat label="Edge latency" value={formatMs(analytics.request_p95_ms)} hint={`p50 ${formatMs(analytics.request_p50_ms)}`} icon={Gauge} />
             </StatGrid>
 
@@ -275,6 +284,38 @@ export default function AnalyticsClient({
                     ))}
                   </TBody>
                 </Table>
+              )}
+            </Panel>
+
+            <Panel title="Breakdowns" flush={analytics.breakdowns.length > 0}>
+              {analytics.breakdowns.length === 0 ? (
+                <p className="text-[13.5px] text-muted">No breakdowns available yet.</p>
+              ) : (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {analytics.breakdowns.map((breakdown) => (
+                    <div key={breakdown.dimension} className="min-w-0">
+                      <p className="px-4 pb-2 pt-3 text-[12px] font-medium text-faint">
+                        {formatDimension(breakdown.dimension)}
+                      </p>
+                      <Table>
+                        <TBody>
+                          {breakdown.rows.map((row) => (
+                            <TR key={`${breakdown.dimension}:${row.value}`}>
+                              <TD className="max-w-[220px] truncate text-[12.5px] text-ink-soft">
+                                {row.value}
+                              </TD>
+                              <TD className="text-right font-mono text-[12px] tabular-nums text-muted">
+                                {row.request_count > 0
+                                  ? formatNumber(row.request_count)
+                                  : formatNumber(row.views)}
+                              </TD>
+                            </TR>
+                          ))}
+                        </TBody>
+                      </Table>
+                    </div>
+                  ))}
+                </div>
               )}
             </Panel>
           </div>
