@@ -225,6 +225,7 @@ const DEFAULT_MAX_PREFETCH_HINTS = 2;
 const HAVE_FUTURE_DATA = 3;
 const WATCH_HEARTBEAT_INTERVAL_MS = 10_000;
 const WATCH_HEARTBEAT_MAX_DELTA_MS = 30_000;
+const WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS = 1_000;
 const HLS_HANDOFF_MIN_PLAYED_SECONDS = 0.75;
 const HLS_HANDOFF_NEAR_OPENER_END_SECONDS = 1.25;
 
@@ -627,7 +628,7 @@ export function RendPlayer({
   const hlsStatsRef = useRef<HlsStats>({});
   const activeStallRef = useRef<{ reason: string; startMs: number } | null>(null);
   const lastWatchHeartbeatAtRef = useRef(0);
-  const lastWatchHeartbeatPositionMsRef = useRef(0);
+  const lastWatchHeartbeatPositionMsRef = useRef<number | null>(null);
   const initialLoadHandledRef = useRef(false);
   const [state, setState] = useState<RendPlayerState>(initialState);
   const [message, setMessage] = useState(initialMessageFromBootstrap(initialBootstrap, initialState));
@@ -806,6 +807,11 @@ export function RendPlayer({
       }
 
       if (observedTimings.firstFrameMs !== undefined) {
+        const video = videoRef.current;
+        if (video && lastWatchHeartbeatPositionMsRef.current === null) {
+          lastWatchHeartbeatPositionMsRef.current = roundedMs(video.currentTime * 1000);
+          lastWatchHeartbeatAtRef.current = Date.now();
+        }
         emitTelemetry({
           phase: "first_frame",
           first_frame_ms: observedTimings.firstFrameMs,
@@ -1583,25 +1589,30 @@ export function RendPlayer({
     [emitTelemetry]
   );
 
-  const emitWatchHeartbeat = useCallback(() => {
+  const emitWatchHeartbeat = useCallback((force = false) => {
     const video = videoRef.current;
-    if (!video || video.paused || video.ended) return;
+    if (!video) return;
+    if (!force && (video.paused || video.ended)) return;
     if (timingsRef.current.firstFrameMs === undefined) return;
 
     const now = Date.now();
-    if (now - lastWatchHeartbeatAtRef.current < WATCH_HEARTBEAT_INTERVAL_MS) return;
-
     const positionMs = roundedMs(video.currentTime * 1000);
     const previousPositionMs = lastWatchHeartbeatPositionMsRef.current;
-    lastWatchHeartbeatAtRef.current = now;
-    lastWatchHeartbeatPositionMsRef.current = positionMs;
-    if (previousPositionMs <= 0) return;
+    if (previousPositionMs === null || positionMs < previousPositionMs) {
+      lastWatchHeartbeatAtRef.current = now;
+      lastWatchHeartbeatPositionMsRef.current = positionMs;
+      return;
+    }
 
+    const minimumDeltaMs = force ? WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS : WATCH_HEARTBEAT_INTERVAL_MS;
     const deltaMs = Math.min(
       WATCH_HEARTBEAT_MAX_DELTA_MS,
       Math.max(0, positionMs - previousPositionMs)
     );
-    if (deltaMs <= 0) return;
+    if (deltaMs < minimumDeltaMs) return;
+
+    lastWatchHeartbeatAtRef.current = now;
+    lastWatchHeartbeatPositionMsRef.current = positionMs;
 
     emitTelemetry({
       phase: "watch_heartbeat",
@@ -1610,6 +1621,22 @@ export function RendPlayer({
       ...hlsStatsTelemetryFields(hlsStatsRef.current),
     });
   }, [emitTelemetry]);
+
+  useEffect(() => {
+    if (!telemetryActive) return;
+    const flush = () => emitWatchHeartbeat(true);
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      flush();
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  }, [emitWatchHeartbeat, telemetryActive]);
 
   useEffect(() => {
     if (!bootstrap || bootstrap.status !== "ready") return;
@@ -1743,6 +1770,11 @@ export function RendPlayer({
             updateObservedVideoStats();
             const firstFrameMs = recordTiming("firstFrameMs");
             if (firstFrameMs !== undefined) {
+              const video = videoRef.current;
+              if (video && lastWatchHeartbeatPositionMsRef.current === null) {
+                lastWatchHeartbeatPositionMsRef.current = roundedMs(video.currentTime * 1000);
+                lastWatchHeartbeatAtRef.current = Date.now();
+              }
               emitTelemetry({
                 phase: "first_frame",
                 first_frame_ms: firstFrameMs,
@@ -1757,6 +1789,7 @@ export function RendPlayer({
             updateObservedVideoStats();
             emitWatchHeartbeat();
           }}
+          onPause={() => emitWatchHeartbeat(true)}
           onProgress={() => {
             if ((videoRef.current?.readyState ?? 0) >= HAVE_FUTURE_DATA) {
               endStall("progress");
@@ -1767,6 +1800,7 @@ export function RendPlayer({
           onCanPlayThrough={() => endStall("canplaythrough")}
           onEnded={() => {
             endStall("ended");
+            emitWatchHeartbeat(true);
             emitTelemetry({
               phase: "playback_ended",
               ...selectionTelemetryFields(selectionRef.current),

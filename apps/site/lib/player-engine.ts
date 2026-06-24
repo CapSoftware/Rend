@@ -73,6 +73,32 @@ const HLS_STARTUP_CONFIG = {
   },
 };
 
+const WATCH_HEARTBEAT_INTERVAL_MS = 10_000;
+const WATCH_HEARTBEAT_MAX_DELTA_MS = 30_000;
+const WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS = 1_000;
+
+export function watchHeartbeatDelta(
+  previousPositionMs: number | null,
+  currentPositionMs: number,
+  force = false
+) {
+  const current = Math.max(0, Math.round(currentPositionMs));
+  if (previousPositionMs === null || current < previousPositionMs) {
+    return { nextPositionMs: current, deltaMs: null };
+  }
+
+  const deltaMs = Math.min(
+    WATCH_HEARTBEAT_MAX_DELTA_MS,
+    Math.max(0, current - previousPositionMs)
+  );
+  const minimumDeltaMs = force ? WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS : WATCH_HEARTBEAT_INTERVAL_MS;
+  if (deltaMs < minimumDeltaMs) {
+    return { nextPositionMs: previousPositionMs, deltaMs: null };
+  }
+
+  return { nextPositionMs: current, deltaMs };
+}
+
 export function readyBootstrap(data: WatchPlaybackBootstrapResponse | null | undefined) {
   return data?.status === "ready" ? data : null;
 }
@@ -327,6 +353,7 @@ function createRichTelemetry(
   let metadataSent = false;
   let canplaySent = false;
   let firstFrameSent = false;
+  let lastWatchHeartbeatPositionMs: number | null = null;
 
   const selectionFields = () =>
     lastSelection
@@ -335,6 +362,29 @@ function createRichTelemetry(
           selected_artifact_path: lastSelection.artifactPath,
         }
       : {};
+
+  const currentVideoPositionMs = () => Math.max(0, Math.round(video.currentTime * 1000));
+  const seedWatchHeartbeatPosition = () => {
+    if (lastWatchHeartbeatPositionMs !== null) return;
+    lastWatchHeartbeatPositionMs = currentVideoPositionMs();
+  };
+  const emitWatchHeartbeat = (force = false) => {
+    if (!firstFrameSent) return;
+    if (!force && (video.paused || video.ended)) return;
+
+    const result = watchHeartbeatDelta(
+      lastWatchHeartbeatPositionMs,
+      currentVideoPositionMs(),
+      force
+    );
+    lastWatchHeartbeatPositionMs = result.nextPositionMs;
+    if (result.deltaMs === null) return;
+
+    send("watch_heartbeat", {
+      watch_delta_ms: result.deltaMs,
+      ...selectionFields(),
+    });
+  };
 
   const emitMetadata = () => {
     if (metadataSent) return;
@@ -355,6 +405,7 @@ function createRichTelemetry(
   const emitFirstFrame = () => {
     if (firstFrameSent) return;
     firstFrameSent = true;
+    seedWatchHeartbeatPosition();
     send("first_frame", {
       first_frame_ms: numberAttribute(player, "data-rend-first-frame-ms") ?? perfNow(),
       ...selectionFields(),
@@ -364,9 +415,21 @@ function createRichTelemetry(
   const onMeta = () => emitMetadata();
   const onCan = () => emitCanplay();
   const onPlaying = () => emitFirstFrame();
+  const onTimeUpdate = () => emitWatchHeartbeat();
+  const onPause = () => emitWatchHeartbeat(true);
+  const onEnded = () => emitWatchHeartbeat(true);
+  const onPageHide = () => emitWatchHeartbeat(true);
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "hidden") emitWatchHeartbeat(true);
+  };
   video.addEventListener("loadedmetadata", onMeta);
   video.addEventListener("canplay", onCan);
   video.addEventListener("playing", onPlaying);
+  video.addEventListener("timeupdate", onTimeUpdate);
+  video.addEventListener("pause", onPause);
+  video.addEventListener("ended", onEnded);
+  window.addEventListener("pagehide", onPageHide);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   if (video.readyState >= 1) emitMetadata();
   if (video.readyState >= 3) emitCanplay();
   if (numberAttribute(player, "data-rend-first-frame-ms") !== undefined) emitFirstFrame();
@@ -402,9 +465,15 @@ function createRichTelemetry(
       });
     },
     dispose: () => {
+      emitWatchHeartbeat(true);
       video.removeEventListener("loadedmetadata", onMeta);
       video.removeEventListener("canplay", onCan);
       video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEnded);
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     },
   };
 }
