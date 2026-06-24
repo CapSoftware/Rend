@@ -24,6 +24,7 @@ const SEEK_STEP_SECONDS = 5;
 const SEEK_JUMP_SECONDS = 10;
 const VOLUME_STEP = 0.05;
 const INACTIVITY_MS = 2600;
+const HAVE_FUTURE_DATA = 3;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -190,6 +191,8 @@ export function mountControls(
     player.classList.add("is-active");
     scheduleHide();
   };
+  const hasPlayableBuffer = () => video.readyState >= HAVE_FUTURE_DATA;
+  const shouldShowBuffering = () => !video.paused && !video.ended && !hasPlayableBuffer();
   const setBuffering = (active: boolean) => {
     player.classList.toggle("is-buffering", active);
   };
@@ -287,10 +290,16 @@ export function mountControls(
   on(video, "volumechange", reflectVolume);
   on(video, "loadedmetadata", updateDuration);
   on(video, "durationchange", updateDuration);
-  on(video, "timeupdate", updateProgress);
-  on(video, "progress", updateBuffered);
-  on(video, "waiting", () => setBuffering(!video.paused));
-  on(video, "stalled", () => setBuffering(!video.paused));
+  on(video, "timeupdate", () => {
+    updateProgress();
+    if (!video.paused) setBuffering(false);
+  });
+  on(video, "progress", () => {
+    updateBuffered();
+    if (hasPlayableBuffer()) setBuffering(false);
+  });
+  on(video, "waiting", () => setBuffering(shouldShowBuffering()));
+  on(video, "stalled", () => setBuffering(shouldShowBuffering()));
   on(video, "seeking", () => setBuffering(true));
   on(video, "playing", () => setBuffering(false));
   on(video, "canplay", () => setBuffering(false));
