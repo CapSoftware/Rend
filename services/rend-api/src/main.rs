@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::{io::AsyncReadExt, net::TcpListener, sync::mpsc};
 use tower_http::cors::CorsLayer;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
@@ -72,6 +72,7 @@ const DEFAULT_ASSET_LIST_LIMIT: usize = 50;
 const MAX_ASSET_LIST_LIMIT: usize = 100;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
 const MAX_ASSET_EVENTS_LIMIT: usize = 100;
+const MAX_THUMBNAIL_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_EVENT_STREAM_BATCH_LIMIT: usize = 100;
 const EVENT_STREAM_CHANNEL_CAPACITY: usize = 16;
 const EVENT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -559,6 +560,13 @@ struct AssetArtifactSummary {
     byte_size: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssetThumbnailRecord {
+    object_key: String,
+    content_type: String,
+    byte_size: Option<i64>,
+}
+
 #[derive(Serialize)]
 struct AssetEventsResponse {
     asset_id: String,
@@ -988,6 +996,12 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             state.clone(),
             require_api_auth,
         ));
+    let site_internal_routes = Router::new()
+        .route("/assets/{asset_id}/thumbnail", get(get_asset_thumbnail))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_auth,
+        ));
     let telemetry_routes = Router::new()
         .route("/playback", post(telemetry::post_playback_telemetry))
         .route("/player", post(telemetry::post_player_telemetry))
@@ -1036,6 +1050,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/v1/readyz", get(readyz))
         .route("/player", get(player_harness))
         .merge(authenticated_routes)
+        .nest("/internal/site", site_internal_routes)
         .nest("/internal/edges", edge_routes)
         .nest("/internal/operator", operator_routes)
         .nest("/internal/telemetry", telemetry_routes)
@@ -1435,6 +1450,76 @@ async fn get_asset_current(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+async fn get_asset_thumbnail(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(asset_id): AxumPath<String>,
+) -> Response {
+    match get_asset_thumbnail_inner(state, auth, asset_id).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_asset_thumbnail_inner(
+    state: Arc<AppState>,
+    auth: RequestAuth,
+    asset_id: String,
+) -> Result<Response, AppError> {
+    if auth.credential != RequestCredential::SiteInternal {
+        return Err(AppError::forbidden("site internal auth required"));
+    }
+    require_scope(&auth, ApiScope::Read)?;
+    let thumbnail = fetch_asset_thumbnail_record(
+        &state.db,
+        &auth.organization_id,
+        &asset_id,
+        auth.allows_suspended_reads(),
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("thumbnail not found"))?;
+
+    let expected_size = thumbnail
+        .byte_size
+        .and_then(|value| usize::try_from(value).ok());
+    if expected_size.is_some_and(|value| value > MAX_THUMBNAIL_BYTES) {
+        return Err(AppError::internal("thumbnail artifact exceeds size limit"));
+    }
+
+    let object = state
+        .s3
+        .get_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&thumbnail.object_key)
+        .send()
+        .await
+        .map_err(AppError::internal)?;
+    let mut reader = object
+        .body
+        .into_async_read()
+        .take((MAX_THUMBNAIL_BYTES + 1) as u64);
+    let mut bytes = Vec::with_capacity(expected_size.unwrap_or(32 * 1024).min(MAX_THUMBNAIL_BYTES));
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(AppError::internal)?;
+    if bytes.len() > MAX_THUMBNAIL_BYTES {
+        return Err(AppError::internal("thumbnail artifact exceeds size limit"));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, thumbnail.content_type)
+        .header(
+            header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable",
+        )
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .header("x-content-type-options", "nosniff")
+        .body(Body::from(bytes))
+        .map_err(AppError::internal)
 }
 
 async fn get_asset_current_inner(
@@ -2043,6 +2128,47 @@ async fn fetch_asset_artifact_summaries(
             byte_size,
         })
         .collect())
+}
+
+async fn fetch_asset_thumbnail_record(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+    include_suspended: bool,
+) -> Result<Option<AssetThumbnailRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
+    let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
+        "
+        SELECT artifact.object_key, artifact.content_type, artifact.byte_size
+        FROM rend.artifacts artifact
+        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE artifact.asset_id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND asset.deleted_at IS NULL
+          AND ($3::boolean OR asset.suspended_at IS NULL)
+          AND ($3::boolean OR org.suspended_at IS NULL)
+          AND artifact.kind = 'thumbnail'
+          AND artifact.content_type = 'image/jpeg'
+        ORDER BY artifact.created_at DESC
+        LIMIT 1
+        ",
+    )
+    .bind(asset_id)
+    .bind(organization_id)
+    .bind(include_suspended)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(row.map(
+        |(object_key, content_type, byte_size)| AssetThumbnailRecord {
+            object_key,
+            content_type,
+            byte_size,
+        },
+    ))
 }
 
 fn normalize_asset_id(asset_id: &str) -> Result<String, AppError> {
