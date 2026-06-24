@@ -1,14 +1,11 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { DashboardSidebar } from "./DashboardSidebar";
-import { GlobalTopBar } from "./GlobalTopBar";
 
 /**
- * Two-tier dashboard chrome: a full-width global bar on top, then a flex row of
- * the collapsible sidebar and the content inset. The sidebar is offset to start
- * below the global bar via the `--sidebar-top` custom property.
+ * Dashboard chrome built around the shadcn sidebar shell.
  */
 export function DashboardShell({
   organizationName,
@@ -24,16 +21,9 @@ export function DashboardShell({
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-h-svh flex-col bg-bg">
-      <GlobalTopBar organizationName={organizationName} userEmail={userEmail} role={role} />
-      <SidebarProvider
-        defaultOpen={defaultOpen}
-        className="min-h-0 flex-1"
-        style={{ "--sidebar-top": "3.5rem" } as CSSProperties}
-      >
-        <DashboardSidebar />
-        <SidebarInset className="min-h-[calc(100svh-3.5rem)]">{children}</SidebarInset>
-      </SidebarProvider>
-    </div>
+    <SidebarProvider defaultOpen={defaultOpen}>
+      <DashboardSidebar organizationName={organizationName} userEmail={userEmail} role={role} />
+      <SidebarInset>{children}</SidebarInset>
+    </SidebarProvider>
   );
 }
