@@ -1,5 +1,9 @@
 export { RendPlayer } from "./rend-player";
-export { REND_PLAYER_VERSION } from "./telemetry";
+export {
+  generateTelemetryEventId,
+  REND_PLAYER_NAME,
+  REND_PLAYER_VERSION,
+} from "./telemetry";
 export type {
   PlaybackBootstrapReady,
   PlaybackBootstrapResponse,
