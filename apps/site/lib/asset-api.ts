@@ -669,6 +669,54 @@ export async function fetchAssetDetail(
   return asset;
 }
 
+export async function fetchAssetThumbnail(
+  auth: AssetApiAuthContext,
+  assetId: string
+): Promise<Response> {
+  const normalizedAssetId = normalizeAssetId(assetId);
+  if (!normalizedAssetId) {
+    throw new AssetApiError(400, {
+      status: "error",
+      error: "invalid_asset_id",
+      message: "Asset id is invalid",
+    });
+  }
+
+  const upstream = await controlPlaneFetch(
+    auth,
+    `/internal/site/assets/${encodeURIComponent(normalizedAssetId)}/thumbnail`,
+    {
+      headers: { accept: "image/jpeg,image/*;q=0.8,*/*;q=0.5" },
+    }
+  );
+  if (!upstream.ok) {
+    throw await upstreamError(upstream, { notFoundMessage: "Thumbnail is unavailable" });
+  }
+
+  const contentType = upstream.headers.get("content-type") || "image/jpeg";
+  if (!contentType.toLowerCase().startsWith("image/")) {
+    throw new AssetApiError(502, {
+      status: "error",
+      error: "rend_api_invalid_response",
+      message: "Rend API returned an invalid thumbnail",
+    });
+  }
+
+  const headers = new Headers();
+  headers.set("content-type", contentType);
+  headers.set("cache-control", upstream.headers.get("cache-control") || "private, max-age=31536000, immutable");
+  const contentLength = upstream.headers.get("content-length");
+  if (contentLength) headers.set("content-length", contentLength);
+  const contentEncoding = upstream.headers.get("content-encoding");
+  if (contentEncoding) headers.set("content-encoding", contentEncoding);
+  headers.set("x-content-type-options", "nosniff");
+
+  return new Response(upstream.body, {
+    status: 200,
+    headers,
+  });
+}
+
 export async function deleteAsset(
   auth: AssetApiAuthContext,
   assetId: string
