@@ -295,18 +295,6 @@ export async function GET(
     );
   }
 
-  const organizationId = await assetOrganizationId(normalizedAssetId).catch(() => null);
-  if (!organizationId) {
-    return jsonResponse(
-      {
-        status: "unavailable",
-        asset_id: normalizedAssetId,
-        message: "Asset is unavailable",
-      },
-      { status: 404 }
-    );
-  }
-
   let playbackDecision: PlaybackBaseUrlDecision;
   try {
     playbackDecision = playbackBaseUrlDecisionForRequest(request);
@@ -347,6 +335,18 @@ export async function GET(
     return jsonResponse(cached.safeResponse, { headers });
   }
 
+  const organizationId = await assetOrganizationId(normalizedAssetId).catch(() => null);
+  if (!organizationId) {
+    return jsonResponse(
+      {
+        status: "unavailable",
+        asset_id: normalizedAssetId,
+        message: "Asset is unavailable",
+      },
+      { status: 404 }
+    );
+  }
+
   const upstream = await fetchControlPlane(
     `/v1/assets/${encodeURIComponent(normalizedAssetId)}/playback`,
     organizationId,
@@ -382,7 +382,12 @@ export async function GET(
   const data = (await upstream.json().catch(() => null)) as UpstreamPlaybackResponse | null;
   const responsePlaybackBaseUrl = directPlaybackEnabled ? playbackBaseUrl : null;
   const safeResponse = data
-    ? safePlaybackBootstrapResponse(normalizedAssetId, data, responsePlaybackBaseUrl)
+    ? safePlaybackBootstrapResponse(
+        normalizedAssetId,
+        data,
+        responsePlaybackBaseUrl,
+        organizationId
+      )
     : null;
 
   if (!safeResponse) {
@@ -411,12 +416,16 @@ export async function GET(
   );
   if (typeof playbackToken === "string") {
     rememberBootstrapResponse(cacheKey, {
+      assetId: normalizedAssetId,
       cachedAtMs: Date.now(),
       directCookieDomain,
       directPlaybackEnabled,
+      organizationId,
       playbackBaseUrl,
       playbackToken,
+      requestOrigin: new URL(request.url).origin.toLowerCase(),
       safeResponse,
+      upstreamResponse: data ?? undefined,
     });
   }
 
