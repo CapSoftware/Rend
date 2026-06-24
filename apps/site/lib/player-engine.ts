@@ -23,6 +23,8 @@ export type AttachPlaybackOptions = {
   startupMode: StartupMode;
   telemetryAppVersion: string;
   telemetryEnabled: boolean;
+  telemetryOrganizationId?: string;
+  telemetryPageType?: "watch" | "embed" | "direct" | "custom";
   telemetryUrl: string;
   richTelemetry?: boolean;
 };
@@ -240,9 +242,106 @@ function numberAttribute(player: HTMLElement, name: string) {
   return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
 }
 
+function selectionFromAttributes(player: HTMLElement, video: HTMLVideoElement): SourceSelection | null {
+  const label = player.getAttribute("data-rend-player-selected");
+  const artifactPath = player.getAttribute("data-rend-player-artifact");
+  if (
+    label !== "native_hls" &&
+    label !== "hls_js" &&
+    label !== "opener" &&
+    label !== "primary"
+  ) {
+    return null;
+  }
+  if (!artifactPath) return null;
+  return {
+    label,
+    artifactPath,
+    url: video.currentSrc || video.getAttribute("src") || "",
+  };
+}
+
 function playbackSessionId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function telemetryEventId() {
+  return `evt-${playbackSessionId()}`;
+}
+
+const VIEWER_ID_STORAGE_KEY = "rend.viewer.v1";
+
+function stableViewerId() {
+  const existing = window.localStorage.getItem(VIEWER_ID_STORAGE_KEY);
+  if (existing && /^[a-zA-Z0-9._:-]{8,160}$/.test(existing)) return existing;
+  const next = playbackSessionId();
+  window.localStorage.setItem(VIEWER_ID_STORAGE_KEY, next);
+  return next;
+}
+
+function safeTelemetryHost(value: string) {
+  try {
+    const host = new URL(value).host.toLowerCase();
+    return /^[a-z0-9._:-]{1,160}$/.test(host) ? host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function sha256Hex(value: string) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function browserNames(userAgent: string) {
+  for (const [browser_name, pattern] of [
+    ["Edge", /Edg\/([0-9.]+)/],
+    ["Chrome", /Chrome\/([0-9.]+)/],
+    ["Firefox", /Firefox\/([0-9.]+)/],
+    ["Safari", /Version\/([0-9.]+).*Safari/],
+  ] as const) {
+    const match = userAgent.match(pattern);
+    if (match?.[1]) return { browser_name, browser_version: match[1] };
+  }
+  return {};
+}
+
+function osName(userAgent: string) {
+  if (/iPhone|iPad|iPod/.test(userAgent)) return { os_name: "iOS" };
+  if (/Android/.test(userAgent)) return { os_name: "Android" };
+  if (/Mac OS X/.test(userAgent)) return { os_name: "macOS" };
+  if (/Windows NT/.test(userAgent)) return { os_name: "Windows" };
+  if (/Linux/.test(userAgent)) return { os_name: "Linux" };
+  return {};
+}
+
+function deviceType(userAgent: string) {
+  if (/bot|crawler|spider|preview/i.test(userAgent)) return "bot";
+  if (/iPad|Tablet|Android(?!.*Mobile)/i.test(userAgent)) return "tablet";
+  if (/Mobi|iPhone|Android/i.test(userAgent)) return "mobile";
+  if (/TV|SmartTV|AppleTV/i.test(userAgent)) return "tv";
+  return "desktop";
+}
+
+async function browserTelemetryContext() {
+  const userAgent = navigator.userAgent || "";
+  let viewer_id_hash: string | undefined;
+  try {
+    viewer_id_hash = `sha256:${await sha256Hex(stableViewerId())}`;
+  } catch {
+    viewer_id_hash = undefined;
+  }
+
+  return {
+    viewer_id_hash,
+    page_host: safeTelemetryHost(window.location.href),
+    referrer_host: document.referrer ? safeTelemetryHost(document.referrer) : undefined,
+    ...browserNames(userAgent),
+    ...osName(userAgent),
+    device_type: deviceType(userAgent),
+  };
 }
 
 function emitDeferredTelemetry(
@@ -257,49 +356,60 @@ function emitDeferredTelemetry(
   const sessionId = playbackSessionId();
   setAttribute(player, "data-rend-playback-session-id", sessionId);
   const eventTime = Date.now();
-  const base = {
-    playback_session_id: sessionId,
-    asset_id: options.assetId,
-    event_time_ms: eventTime,
-    player_version: "0.1.0",
-    app_version: options.telemetryAppVersion,
-    selected_playback_mode: selection?.label,
-    selected_artifact_path: selection?.artifactPath,
-    selected_width: numberAttribute(player, "data-rend-selected-width"),
-    selected_height: numberAttribute(player, "data-rend-selected-height"),
-  };
-  const events = [
-    {
-      ...base,
-      phase: "bootstrap_complete",
-      bootstrap_start_ms: 0,
-      bootstrap_end_ms: options.initialBootstrapMs,
-      bootstrap_duration_ms: options.initialBootstrapMs,
-      bootstrap_http_status: options.initialBootstrapMs === undefined ? undefined : 200,
-    },
-    {
-      ...base,
-      phase: "source_selected",
-    },
-    {
-      ...base,
-      phase: "first_frame",
-      first_frame_ms: numberAttribute(player, "data-rend-first-frame-ms"),
-    },
-  ];
+  void browserTelemetryContext()
+    .then((context) => {
+      const base = {
+        ...context,
+        organization_id: options.telemetryOrganizationId,
+        playback_session_id: sessionId,
+        asset_id: options.assetId,
+        page_type: options.telemetryPageType ?? "custom",
+        player_name: "rend-player",
+        event_time_ms: eventTime,
+        player_version: "0.1.0",
+        app_version: options.telemetryAppVersion,
+        autoplay: options.autoPlay,
+        muted: true,
+        preload: options.autoPlay ? "auto" : "metadata",
+        startup_mode: options.startupMode,
+        selected_playback_mode: selection?.label,
+        selected_artifact_path: selection?.artifactPath,
+        selected_width: numberAttribute(player, "data-rend-selected-width"),
+        selected_height: numberAttribute(player, "data-rend-selected-height"),
+      };
+      const events = [
+        {
+          ...base,
+          event_id: telemetryEventId(),
+          phase: "bootstrap_complete",
+          bootstrap_start_ms: 0,
+          bootstrap_end_ms: options.initialBootstrapMs,
+          bootstrap_duration_ms: options.initialBootstrapMs,
+          bootstrap_http_status: options.initialBootstrapMs === undefined ? undefined : 200,
+        },
+        {
+          ...base,
+          event_id: telemetryEventId(),
+          phase: "source_selected",
+        },
+        {
+          ...base,
+          event_id: telemetryEventId(),
+          phase: "first_frame",
+          first_frame_ms: numberAttribute(player, "data-rend-first-frame-ms"),
+        },
+      ];
 
-  try {
-    void fetch(options.telemetryUrl, {
-      method: "POST",
-      cache: "no-store",
-      credentials: "omit",
-      keepalive: true,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ events }),
-    }).catch(() => undefined);
-  } catch {
-    // Telemetry must not interfere with playback.
-  }
+      return fetch(options.telemetryUrl, {
+        method: "POST",
+        cache: "no-store",
+        credentials: "omit",
+        keepalive: true,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ events }),
+      });
+    })
+    .catch(() => undefined);
 }
 
 type RichTelemetry = {
@@ -322,16 +432,31 @@ function createRichTelemetry(
 ): RichTelemetry {
   const sessionId = playbackSessionId();
   setAttribute(player, "data-rend-playback-session-id", sessionId);
+  let context: Record<string, unknown> = {};
+  void browserTelemetryContext()
+    .then((nextContext) => {
+      context = nextContext;
+    })
+    .catch(() => undefined);
 
   const perfNow = () => Math.max(0, Math.round(performance.now()));
   const send = (phase: string, fields: Record<string, unknown>) => {
     const event = {
+      ...context,
+      event_id: telemetryEventId(),
+      organization_id: options.telemetryOrganizationId,
       playback_session_id: sessionId,
       asset_id: options.assetId,
+      page_type: options.telemetryPageType ?? "custom",
+      player_name: "rend-player",
       phase,
       event_time_ms: Date.now(),
       player_version: "0.1.0",
       app_version: options.telemetryAppVersion,
+      autoplay: options.autoPlay,
+      muted: true,
+      preload: options.autoPlay ? "auto" : "metadata",
+      startup_mode: options.startupMode,
       ...fields,
     };
     try {
@@ -348,7 +473,7 @@ function createRichTelemetry(
     }
   };
 
-  let lastSelection: SourceSelection | null = null;
+  let lastSelection: SourceSelection | null = selectionFromAttributes(player, video);
   let sourceSent = false;
   let metadataSent = false;
   let canplaySent = false;
@@ -411,13 +536,32 @@ function createRichTelemetry(
       ...selectionFields(),
     });
   };
+  const emitAvailableStartupEvents = () => {
+    if (
+      video.readyState >= 1 ||
+      numberAttribute(player, "data-rend-metadata-ms") !== undefined
+    ) {
+      emitMetadata();
+    }
+    if (video.readyState >= 3 || numberAttribute(player, "data-rend-canplay-ms") !== undefined) {
+      emitCanplay();
+    }
+    if (numberAttribute(player, "data-rend-first-frame-ms") !== undefined) {
+      emitFirstFrame();
+    }
+  };
 
   const onMeta = () => emitMetadata();
   const onCan = () => emitCanplay();
   const onPlaying = () => emitFirstFrame();
   const onTimeUpdate = () => emitWatchHeartbeat();
   const onPause = () => emitWatchHeartbeat(true);
-  const onEnded = () => emitWatchHeartbeat(true);
+  const onEnded = () => {
+    emitWatchHeartbeat(true);
+    send("playback_ended", {
+      ...selectionFields(),
+    });
+  };
   const onPageHide = () => emitWatchHeartbeat(true);
   const onVisibilityChange = () => {
     if (document.visibilityState === "hidden") emitWatchHeartbeat(true);
@@ -430,9 +574,7 @@ function createRichTelemetry(
   video.addEventListener("ended", onEnded);
   window.addEventListener("pagehide", onPageHide);
   document.addEventListener("visibilitychange", onVisibilityChange);
-  if (video.readyState >= 1) emitMetadata();
-  if (video.readyState >= 3) emitCanplay();
-  if (numberAttribute(player, "data-rend-first-frame-ms") !== undefined) emitFirstFrame();
+  emitAvailableStartupEvents();
 
   return {
     playerLoad: () => send("player_load", { bootstrap_start_ms: 0 }),
@@ -457,12 +599,14 @@ function createRichTelemetry(
     },
     sourceSelected: (selection) => {
       lastSelection = selection;
-      if (sourceSent) return;
-      sourceSent = true;
-      send("source_selected", {
-        selected_playback_mode: selection.label,
-        selected_artifact_path: selection.artifactPath,
-      });
+      if (!sourceSent) {
+        sourceSent = true;
+        send("source_selected", {
+          selected_playback_mode: selection.label,
+          selected_artifact_path: selection.artifactPath,
+        });
+      }
+      emitAvailableStartupEvents();
     },
     dispose: () => {
       emitWatchHeartbeat(true);
