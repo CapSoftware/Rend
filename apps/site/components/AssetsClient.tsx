@@ -172,10 +172,25 @@ async function uploadFile(file: File, onProgress: (progress: number | null) => v
   });
 }
 
-function AssetThumb() {
+function AssetThumb({ assetId, hasThumbnail }: { assetId: string; hasThumbnail: boolean }) {
+  const [showImage, setShowImage] = useState(true);
+  const thumbnailSrc = `/api/assets/${encodeURIComponent(assetId)}/thumbnail`;
+  const shouldLoadImage = hasThumbnail && showImage;
+
   return (
     <span className="grid aspect-video w-16 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-bg-sunken">
-      <Play className="size-3.5 fill-faint text-faint" />
+      {shouldLoadImage ? (
+        <img
+          src={thumbnailSrc}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="size-full object-cover"
+          onError={() => setShowImage(false)}
+        />
+      ) : (
+        <Play className="size-3.5 fill-faint text-faint" />
+      )}
     </span>
   );
 }
@@ -465,7 +480,7 @@ export default function AssetsClient({
                     <TR key={asset.asset_id}>
                       <TD className="pr-0">
                         <Link href={`/dashboard/assets/${asset.asset_id}`} aria-label={`Open ${asset.asset_id}`}>
-                          <AssetThumb />
+                          <AssetThumb assetId={asset.asset_id} hasThumbnail={asset.has_thumbnail === true} />
                         </Link>
                       </TD>
                       <TD>
