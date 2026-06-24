@@ -437,6 +437,12 @@ type BrowserTelemetryContext = Pick<
   | "browser_version"
   | "os_name"
   | "device_type"
+  | "utm_source"
+  | "utm_medium"
+  | "utm_campaign"
+  | "utm_term"
+  | "utm_content"
+  | "channel"
 >;
 
 const VIEWER_ID_STORAGE_KEY = "rend.viewer.v1";
@@ -448,6 +454,71 @@ function safeTelemetryHost(value: string) {
   } catch {
     return undefined;
   }
+}
+
+function safeUtmValue(value: string | null | undefined) {
+  if (!value) return undefined;
+  const normalized = value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+  if (!normalized) return undefined;
+  // Drop anything that smells like a URL, query injection, or secret.
+  if (/https?:\/\/|[?#]|\b(token|secret|authorization|cookie|api[_-]?key)\b/i.test(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
+const SEARCH_REFERRER_PATTERN =
+  /(^|\.)(google|bing|duckduckgo|yahoo|yandex|baidu|ecosia|brave|qwant|ask)\./;
+const SOCIAL_REFERRER_PATTERN =
+  /(^|\.)(facebook|fb|instagram|twitter|t\.co|x|linkedin|lnkd|youtube|youtu\.be|reddit|tiktok|pinterest|bsky|mastodon|threads|news\.ycombinator)\.?/;
+
+/**
+ * Maps the page URL's UTM tags plus document.referrer to a canonical acquisition
+ * channel slug. Mirrors the GA4/Plausible grouping so the dashboard can render a
+ * DataFast-style "Channel" breakdown. Returns a slug; the dashboard maps it to a
+ * display label.
+ */
+function deriveChannel(
+  params: URLSearchParams,
+  referrerHost: string | undefined,
+  currentHost: string | undefined
+): string {
+  const medium = (params.get("utm_medium") || "").toLowerCase();
+  const source = (params.get("utm_source") || "").toLowerCase();
+  const hasUtm = Boolean(source || medium || params.get("utm_campaign"));
+  const ref = referrerHost || "";
+  const internalReferrer = Boolean(ref && currentHost && ref === currentHost);
+
+  if (/cpc|ppc|paid|cpm|cpv|display/.test(medium)) return "paid";
+  if (medium === "email" || /email|newsletter|klaviyo|mailchimp|substack/.test(source)) {
+    return "email";
+  }
+  if (/social/.test(medium) || (ref && SOCIAL_REFERRER_PATTERN.test(ref))) return "social";
+  if (ref && SEARCH_REFERRER_PATTERN.test(ref)) return "organic_search";
+  if (hasUtm) return "campaign";
+  if (ref && !internalReferrer) return "referral";
+  return "direct";
+}
+
+function acquisitionContext(): Partial<BrowserTelemetryContext> {
+  if (typeof window === "undefined") return {};
+  let params: URLSearchParams;
+  try {
+    params = new URL(window.location.href).searchParams;
+  } catch {
+    params = new URLSearchParams();
+  }
+  const referrerHost = document.referrer ? safeTelemetryHost(document.referrer) : undefined;
+  const currentHost = safeTelemetryHost(window.location.href);
+
+  return {
+    utm_source: safeUtmValue(params.get("utm_source")),
+    utm_medium: safeUtmValue(params.get("utm_medium")),
+    utm_campaign: safeUtmValue(params.get("utm_campaign")),
+    utm_term: safeUtmValue(params.get("utm_term")),
+    utm_content: safeUtmValue(params.get("utm_content")),
+    channel: deriveChannel(params, referrerHost, currentHost),
+  };
 }
 
 function inferBrowser(userAgent: string) {
@@ -511,6 +582,7 @@ async function browserTelemetryContext(): Promise<BrowserTelemetryContext> {
     ...inferBrowser(userAgent),
     ...inferOs(userAgent),
     device_type: inferDeviceType(userAgent),
+    ...acquisitionContext(),
   };
 }
 
