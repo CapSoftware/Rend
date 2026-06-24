@@ -661,6 +661,8 @@
           "created_at": { "$ref": "#/components/schemas/IsoTimestamp" },
           "updated_at": { "$ref": "#/components/schemas/IsoTimestamp" },
           "source_byte_size": { "type": "integer", "minimum": 0 },
+          "duration_ms": { "type": "integer", "minimum": 0 },
+          "has_thumbnail": { "type": "boolean" },
           "artifact_count": { "type": "integer", "minimum": 0 },
           "suspended_at": { "$ref": "#/components/schemas/IsoTimestamp" },
           "suspension_reason": { "type": "string" },
