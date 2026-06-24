@@ -36,6 +36,8 @@ export function EmbedPlayerClient(props: EmbedPlayerClientProps) {
       startupMode: props.startupMode,
       telemetryAppVersion: props.telemetryAppVersion,
       telemetryEnabled: props.telemetryEnabled,
+      telemetryOrganizationId: props.telemetryOrganizationId,
+      telemetryPageType: props.telemetryPageType,
       telemetryUrl: props.telemetryUrl,
       richTelemetry: true,
     });

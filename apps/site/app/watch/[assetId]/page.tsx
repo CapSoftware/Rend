@@ -127,6 +127,10 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
           startupMode={playerStartupMode(query.startupMode, query.startup)}
           telemetryAppVersion={telemetryAppVersion()}
           telemetryEnabled={telemetryEnabled(query.telemetry)}
+          telemetryOrganizationId={
+            initialBootstrap?.status === "ready" ? initialBootstrap.organization_id : undefined
+          }
+          telemetryPageType="watch"
           telemetryUrl="/api/player/telemetry"
         />
       </section>

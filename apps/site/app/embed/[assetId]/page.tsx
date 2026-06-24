@@ -220,6 +220,8 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
         startupMode={startupMode}
         telemetryAppVersion={telemetryAppVersion()}
         telemetryEnabled={telemetryEnabled(query.telemetry)}
+        telemetryOrganizationId={ready?.organization_id}
+        telemetryPageType="embed"
         telemetryUrl="/api/player/telemetry"
       />
     </main>

@@ -20,6 +20,8 @@ type WatchInstantPlayerProps = {
   startupMode: StartupMode;
   telemetryAppVersion: string;
   telemetryEnabled: boolean;
+  telemetryOrganizationId?: string;
+  telemetryPageType: "watch" | "embed" | "direct" | "custom";
   telemetryUrl: string;
 };
 
@@ -33,6 +35,8 @@ export function WatchInstantPlayer({
   startupMode,
   telemetryAppVersion,
   telemetryEnabled,
+  telemetryOrganizationId,
+  telemetryPageType,
   telemetryUrl,
 }: WatchInstantPlayerProps) {
   const playerId = `rend-watch-${assetId}`;
@@ -99,7 +103,10 @@ export function WatchInstantPlayer({
         startupMode={startupMode}
         telemetryAppVersion={telemetryAppVersion}
         telemetryEnabled={telemetryEnabled}
+        telemetryOrganizationId={telemetryOrganizationId}
+        telemetryPageType={telemetryPageType}
         telemetryUrl={telemetryUrl}
+        richTelemetry
       />
     </>
   );
