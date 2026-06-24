@@ -85,7 +85,8 @@ function playbackArtifactUrl(assetId: string, artifactPath: string, playbackBase
 export function safePlaybackBootstrapResponse(
   assetId: string,
   data: UpstreamPlaybackResponse,
-  playbackBaseUrl: string | null
+  playbackBaseUrl: string | null,
+  organizationId?: string | null
 ) {
   const playbackPath = artifactPathFromPlaybackUrl(data.playback_url, assetId);
   const openerPath = artifactPathFromPlaybackUrl(data.opener_url, assetId);
@@ -122,6 +123,7 @@ export function safePlaybackBootstrapResponse(
   return {
     status: "ready",
     asset_id: safeString(data.asset_id) ?? assetId,
+    ...(organizationId ? { organization_id: organizationId } : {}),
     source_state: safeString(data.source_state) ?? "unknown",
     playable_state: safeString(data.playable_state) ?? "unknown",
     playback_url: playbackUrl,

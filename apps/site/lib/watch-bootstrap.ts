@@ -10,6 +10,7 @@ export type WatchPlaybackPrefetchHint = {
 export type WatchPlaybackBootstrapReady = {
   status: "ready";
   asset_id: string;
+  organization_id?: string;
   source_state: string;
   playable_state: "opener_ready" | "hls_ready" | string;
   playback_url?: string;
@@ -67,6 +68,13 @@ function safeAssetId(value: unknown) {
   const assetId = safeString(value, 64)?.toLowerCase();
   return assetId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(assetId)
     ? assetId
+    : undefined;
+}
+
+function safeUuid(value: unknown) {
+  const id = safeString(value, 64)?.toLowerCase();
+  return id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
+    ? id
     : undefined;
 }
 
@@ -139,6 +147,7 @@ export function safeWatchBootstrap(value: unknown): WatchPlaybackBootstrapRespon
     return {
       status,
       asset_id: assetId,
+      organization_id: safeUuid(value.organization_id),
       source_state: safeState(value.source_state) ?? "unknown",
       playable_state: safeState(value.playable_state) ?? "unknown",
       playback_url: playbackUrl,
