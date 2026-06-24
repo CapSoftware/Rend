@@ -7,8 +7,7 @@ import { DocsPill } from "./DocsPill";
 
 /**
  * Per-page sub-header inside the content column: sidebar collapse toggle, page
- * title (serif), a docs pill, and an optional right-aligned actions slot. Sticks
- * directly below the global top bar.
+ * title (serif), a docs pill, and an optional right-aligned actions slot.
  */
 export function SubHeader({
   title,
@@ -28,7 +27,7 @@ export function SubHeader({
   return (
     <div
       className={cn(
-        "sticky top-14 z-20 flex h-[52px] shrink-0 items-center gap-2.5 border-b border-line bg-bg/90 px-5 backdrop-blur-md sm:px-7 lg:px-8",
+        "sticky top-0 z-20 flex h-[52px] shrink-0 items-center gap-2.5 border-b border-line bg-bg/90 px-5 backdrop-blur-md sm:px-7 lg:px-8",
         className,
       )}
     >
