@@ -1299,9 +1299,9 @@ fn clickhouse_edge_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWindo
         "\
         INSERT INTO analytics_edge_hourly \
         SELECT \
-          organization_id, \
+          rollup_organization_id AS organization_id, \
           toStartOfHour(event_observed_at) AS bucket_start, \
-          asset_id, \
+          rollup_asset_id AS asset_id, \
           count() AS request_count, \
           sum(bytes_served) AS bytes_served, \
           countIf(cache_status = 'HIT') AS cache_hit_count, \
@@ -1312,8 +1312,8 @@ fn clickhouse_edge_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWindo
         FROM ( \
           SELECT \
             event_id, \
-            assumeNotNull(any(organization_id)) AS organization_id, \
-            any(asset_id) AS asset_id, \
+            assumeNotNull(any(organization_id)) AS rollup_organization_id, \
+            any(asset_id) AS rollup_asset_id, \
             min(observed_at) AS event_observed_at, \
             any(bytes_served) AS bytes_served, \
             any(cache_status) AS cache_status, \
@@ -1326,7 +1326,7 @@ fn clickhouse_edge_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWindo
             AND observed_at < fromUnixTimestamp64Milli({}) \
           GROUP BY event_id \
         ) \
-        GROUP BY organization_id, bucket_start, asset_id",
+        GROUP BY rollup_organization_id, bucket_start, rollup_asset_id",
         window.started_at.timestamp_millis(),
         window.ended_at.timestamp_millis(),
     )
@@ -1337,40 +1337,40 @@ fn clickhouse_player_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWin
         "\
         INSERT INTO analytics_player_hourly \
         SELECT \
-          organization_id, \
+          rollup_organization_id AS organization_id, \
           bucket_start, \
-          asset_id, \
+          rollup_asset_id AS asset_id, \
           count() AS sessions, \
           countIf(reached_first_frame) AS views, \
           countIf(startup_failed) AS startup_failures, \
-          sum(watch_time_ms) AS watch_time_ms, \
-          countIf(stall_duration_ms > 0) AS stalled_sessions, \
-          sum(stall_count) AS stall_count, \
-          sum(stall_duration_ms) AS stall_duration_ms, \
-          sum(playback_failures) AS playback_failures, \
+          sum(session_watch_time_ms) AS watch_time_ms, \
+          countIf(session_stall_duration_ms > 0) AS stalled_sessions, \
+          sum(session_stall_count) AS stall_count, \
+          sum(session_stall_duration_ms) AS stall_duration_ms, \
+          sum(session_playback_failures) AS playback_failures, \
           quantileTDigestIf(0.5)(first_frame_ms, first_frame_ms > 0) AS first_frame_p50_ms, \
           quantileTDigestIf(0.95)(first_frame_ms, first_frame_ms > 0) AS first_frame_p95_ms, \
           now64(3) AS updated_at \
         FROM ( \
           SELECT \
-            organization_id, \
-            asset_id, \
-            playback_session_id, \
-            toStartOfHour(min(observed_at)) AS bucket_start, \
+            rollup_organization_id, \
+            rollup_asset_id, \
+            rollup_playback_session_id, \
+            toStartOfHour(min(event_observed_at)) AS bucket_start, \
             countIf(phase = 'first_frame') > 0 AS reached_first_frame, \
             countIf(phase = 'bootstrap_failure') > 0 AS startup_failed, \
             minIf(first_frame_ms, phase = 'first_frame' AND first_frame_ms > 0) AS first_frame_ms, \
-            sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS watch_time_ms, \
-            countIf(phase = 'stall_end') AS stall_count, \
-            sumIf(stall_duration_ms, phase = 'stall_end') AS stall_duration_ms, \
-            countIf(phase = 'playback_failure') AS playback_failures \
+            sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS session_watch_time_ms, \
+            countIf(phase = 'stall_end') AS session_stall_count, \
+            sumIf(stall_duration_ms, phase = 'stall_end') AS session_stall_duration_ms, \
+            countIf(phase = 'playback_failure') AS session_playback_failures \
           FROM ( \
             SELECT \
               event_id, \
-              any(organization_id) AS organization_id, \
-              any(asset_id) AS asset_id, \
-              any(playback_session_id) AS playback_session_id, \
-              min(observed_at) AS observed_at, \
+              any(organization_id) AS rollup_organization_id, \
+              any(asset_id) AS rollup_asset_id, \
+              any(playback_session_id) AS rollup_playback_session_id, \
+              min(observed_at) AS event_observed_at, \
               any(phase) AS phase, \
               any(first_frame_ms) AS first_frame_ms, \
               any(stall_duration_ms) AS stall_duration_ms, \
@@ -1380,9 +1380,9 @@ fn clickhouse_player_rollup_refresh_query(window: NormalizedPlaybackAnalyticsWin
               AND observed_at < fromUnixTimestamp64Milli({}) \
             GROUP BY event_id \
           ) \
-          GROUP BY organization_id, asset_id, playback_session_id \
+          GROUP BY rollup_organization_id, rollup_asset_id, rollup_playback_session_id \
         ) \
-        GROUP BY organization_id, bucket_start, asset_id",
+        GROUP BY rollup_organization_id, bucket_start, rollup_asset_id",
         window.started_at.timestamp_millis(),
         window.ended_at.timestamp_millis(),
     )
@@ -1925,6 +1925,36 @@ mod tests {
             player_query
                 .contains("avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0)")
         );
+    }
+
+    #[test]
+    fn rollup_queries_do_not_reuse_source_column_names_for_aggregates() {
+        let window = NormalizedPlaybackAnalyticsWindow {
+            started_at: DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ended_at: DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+
+        let edge_query = clickhouse_edge_rollup_refresh_query(window);
+        assert!(edge_query.contains("rollup_organization_id AS organization_id"));
+        assert!(edge_query.contains("rollup_asset_id AS asset_id"));
+        assert!(
+            edge_query.contains("GROUP BY rollup_organization_id, bucket_start, rollup_asset_id")
+        );
+
+        let player_query = clickhouse_player_rollup_refresh_query(window);
+        assert!(player_query.contains("rollup_organization_id AS organization_id"));
+        assert!(player_query.contains("rollup_asset_id AS asset_id"));
+        assert!(player_query.contains("min(observed_at) AS event_observed_at"));
+        assert!(player_query.contains("sum(session_watch_time_ms) AS watch_time_ms"));
+        assert!(player_query.contains("countIf(session_stall_duration_ms > 0)"));
+        assert!(player_query.contains("sum(session_playback_failures) AS playback_failures"));
+        assert!(player_query.contains(
+            "GROUP BY rollup_organization_id, rollup_asset_id, rollup_playback_session_id"
+        ));
     }
 
     #[test]

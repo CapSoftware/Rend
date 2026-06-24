@@ -46,11 +46,18 @@ function telemetryAppVersion() {
   );
 }
 
+function telemetryDefaultEnabled() {
+  const configured = process.env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY?.trim().toLowerCase();
+  if (configured) return ["1", "true", "yes", "on"].includes(configured);
+  const profile = (process.env.REND_ENV_PROFILE || process.env.REND_ENV || process.env.NODE_ENV || "local").toLowerCase();
+  return profile === "production" || profile === "prod";
+}
+
 function telemetryEnabled(value: string | string[] | undefined) {
   const requested = Array.isArray(value) ? value[0] : value;
   if (requested === "0") return false;
   if (requested === "1") return true;
-  return process.env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY === "1";
+  return telemetryDefaultEnabled();
 }
 
 function playerStartupMode(

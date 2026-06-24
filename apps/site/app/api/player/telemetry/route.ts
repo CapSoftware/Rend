@@ -8,20 +8,29 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-function envBoolean(name: string) {
+function envBooleanOverride(name: string) {
   const value = (process.env[name] || "").trim().toLowerCase();
-  return ["1", "true", "yes", "on"].includes(value);
+  if (!value) return undefined;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return undefined;
 }
 
 function envString(name: string, fallback = "") {
   return (process.env[name] || fallback).trim();
 }
 
+function productionProfile() {
+  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "local";
+  return ["production", "prod"].includes(profile.toLowerCase());
+}
+
 function telemetryIngestEnabled() {
-  return (
-    envBoolean("REND_PLAYER_TELEMETRY_INGEST") ||
-    envBoolean("NEXT_PUBLIC_REND_PLAYER_TELEMETRY")
-  );
+  const ingestOverride = envBooleanOverride("REND_PLAYER_TELEMETRY_INGEST");
+  if (ingestOverride !== undefined) return ingestOverride;
+  const publicOverride = envBooleanOverride("NEXT_PUBLIC_REND_PLAYER_TELEMETRY");
+  if (publicOverride !== undefined) return publicOverride;
+  return productionProfile();
 }
 
 function controlPlaneUrl(path: string) {
@@ -33,8 +42,7 @@ function telemetryInternalToken() {
   const configured =
     envString("REND_INTERNAL_TELEMETRY_TOKEN") || envString("REND_EDGE_INTERNAL_TOKEN");
   if (configured) return configured;
-  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "local";
-  return ["production", "prod"].includes(profile.toLowerCase()) ? "" : "dev-internal-token";
+  return productionProfile() ? "" : "dev-internal-token";
 }
 
 function jsonResponse(body: unknown, init?: ResponseInit) {

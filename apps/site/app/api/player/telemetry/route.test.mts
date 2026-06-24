@@ -159,6 +159,54 @@ test("POST no-ops when telemetry ingest is disabled", async () => {
   }
 });
 
+test("POST enables telemetry ingest by default in production", async () => {
+  const env = process.env as Record<string, string | undefined>;
+  const previousNodeEnv = env.NODE_ENV;
+  const previousIngest = env.REND_PLAYER_TELEMETRY_INGEST;
+  const previousPublic = env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY;
+  const previousToken = env.REND_INTERNAL_TELEMETRY_TOKEN;
+  env.NODE_ENV = "production";
+  delete env.REND_PLAYER_TELEMETRY_INGEST;
+  delete env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY;
+  delete env.REND_INTERNAL_TELEMETRY_TOKEN;
+
+  try {
+    clearPlayerTelemetryEventsForTests();
+    const response = await POST(
+      telemetryRequest({
+        playback_session_id: "route-session-production-default",
+        asset_id: "asset-123",
+        phase: "player_load",
+        event_time_ms: EVENT_TIME_MS,
+      })
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await responseJson(response), { status: "ok", accepted: 1 });
+  } finally {
+    if (previousNodeEnv === undefined) {
+      delete env.NODE_ENV;
+    } else {
+      env.NODE_ENV = previousNodeEnv;
+    }
+    if (previousIngest === undefined) {
+      delete env.REND_PLAYER_TELEMETRY_INGEST;
+    } else {
+      env.REND_PLAYER_TELEMETRY_INGEST = previousIngest;
+    }
+    if (previousPublic === undefined) {
+      delete env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY;
+    } else {
+      env.NEXT_PUBLIC_REND_PLAYER_TELEMETRY = previousPublic;
+    }
+    if (previousToken === undefined) {
+      delete env.REND_INTERNAL_TELEMETRY_TOKEN;
+    } else {
+      env.REND_INTERNAL_TELEMETRY_TOKEN = previousToken;
+    }
+  }
+});
+
 test("recent endpoint is production-disabled unless telemetry debug is enabled", async () => {
   const env = process.env as Record<string, string | undefined>;
   const previousNodeEnv = process.env.NODE_ENV;
