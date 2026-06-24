@@ -156,15 +156,47 @@ fn test_state() -> Arc<AppState> {
         http: reqwest::Client::new(),
         s3,
         started_at: Instant::now(),
+        metrics: Arc::new(ApiMetrics::default()),
     })
 }
 
 fn asset_record(playable_state: &str) -> AssetPlaybackRecord {
     AssetPlaybackRecord {
         asset_id: "asset-123".to_owned(),
+        organization_id: LOCAL_ORG_ID.to_owned(),
         source_state: "uploaded".to_owned(),
         playable_state: playable_state.to_owned(),
     }
+}
+
+#[tokio::test]
+async fn metrics_include_telemetry_ingest_and_rollup_lag_series() {
+    let state = test_state();
+    state.metrics.record_telemetry_ingest(3, 1_234);
+    state.metrics.record_analytics_rollup_success(60_000);
+    state.metrics.record_analytics_rollup_failure();
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("x-rend-internal-token", "internal")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let metrics = String::from_utf8(body.to_vec()).unwrap();
+    assert!(metrics.contains("rend_api_telemetry_ingested_events_total 3"));
+    assert!(metrics.contains("rend_api_telemetry_ingest_lag_ms 1234"));
+    assert!(metrics.contains("rend_api_analytics_rollup_lag_ms 60000"));
+    assert!(metrics.contains("rend_api_analytics_rollup_last_success_unix_seconds"));
+    assert!(metrics.contains("rend_api_analytics_rollup_refresh_total{result=\"success\"} 1"));
+    assert!(metrics.contains("rend_api_analytics_rollup_refresh_total{result=\"failure\"} 1"));
 }
 
 fn asset_state_record(playable_state: &str) -> AssetStateRecord {
@@ -1357,6 +1389,7 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
     assert!(cookie.contains("; HttpOnly"));
     assert!(cookie.contains("; Secure"));
     assert_eq!(claims.asset_id, "asset-123");
+    assert_eq!(claims.organization_id.as_deref(), Some(LOCAL_ORG_ID));
     assert_eq!(claims.exp, NOW + 600);
     assert_eq!(claims.kid, "kid-a");
     assert_eq!(claims.policy, POLICY_ASSET_PLAYBACK_V1);
@@ -1848,6 +1881,7 @@ async fn upload_endpoint_rejects_content_length_over_limit_before_db() {
         http: reqwest::Client::new(),
         s3,
         started_at: Instant::now(),
+        metrics: Arc::new(ApiMetrics::default()),
     });
     let app = build_app(state, Duration::from_secs(10));
 
