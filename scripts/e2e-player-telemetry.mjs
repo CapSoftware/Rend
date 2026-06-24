@@ -630,6 +630,7 @@ function leakHits(value, options = {}) {
 function eventSummary(events) {
   return events.map((event) => ({
     phase: event.phase,
+    page_type: event.page_type,
     playback_session_id: event.playback_session_id,
     bootstrap_duration_ms: event.bootstrap_duration_ms,
     bootstrap_http_status: event.bootstrap_http_status,
@@ -654,7 +655,8 @@ async function scanPageAndBundles(siteBaseUrl, embedUrl) {
     const url = src.startsWith("http") ? src : `${siteBaseUrl}${src}`;
     const text = await fetch(url, { cache: "no-store" }).then((response) => response.text()).catch(() => "");
     const urlPath = new URL(url).pathname;
-    const frameworkChunk = /\/_next\/static\/chunks\/(?:1eet_next_|%5Bturbopack%5D)/.test(urlPath);
+    const frameworkChunk =
+      /\/_next\/static\/chunks\/(?:[^/]+_next_dist_|%5Bturbopack%5D)/.test(urlPath);
     bundleResults.push({
       url_path: urlPath,
       byte_length: text.length,
@@ -713,20 +715,34 @@ function validatePlaybackEvents(events) {
   };
 }
 
-async function runPlaybackScenario({ chromePort, siteBaseUrl, assetId, name, blockTelemetry = false }) {
+function validatePageType(events, pageType) {
+  return events
+    .filter((event) => event.phase !== "player_load")
+    .every((event) => event.page_type === pageType);
+}
+
+async function runPlaybackScenario({
+  chromePort,
+  siteBaseUrl,
+  assetId,
+  name,
+  route = "embed",
+  blockTelemetry = false,
+}) {
   const page = await newPage(chromePort);
   const capture = attachNetworkCapture(page);
   const blockedTelemetryCount = blockTelemetry ? await configureTelemetryBlock(page, siteBaseUrl) : () => 0;
-  const embedUrl = `${siteBaseUrl}/embed/${encodeURIComponent(assetId)}?autoplay=1&playbackBaseUrl=${encodeURIComponent(edgeBaseUrl)}`;
+  const playbackUrl = `${siteBaseUrl}/${route}/${encodeURIComponent(assetId)}?autoplay=1&playbackBaseUrl=${encodeURIComponent(edgeBaseUrl)}`;
 
-  await navigate(page, embedUrl);
+  await navigate(page, playbackUrl);
   const playback = await waitForPlayback(page);
   const telemetryPosts = capture.telemetryPosts(siteBaseUrl);
   page.close();
 
   return {
     name,
-    url: embedUrl,
+    route,
+    url: playbackUrl,
     playback,
     telemetry_posts: telemetryPosts.map((request) => ({
       url_path: new URL(request.url).pathname,
@@ -815,18 +831,19 @@ async function main() {
 
   try {
     log("driving browser playback through /embed");
-    const playback = await runPlaybackScenario({
+    const embedPlayback = await runPlaybackScenario({
       chromePort: chrome.port,
       siteBaseUrl: site.baseUrl,
       assetId,
-      name: "local_playback",
+      name: "local_embed_playback",
+      route: "embed",
     });
-    artifact.local.playback = playback;
+    artifact.local.embed_playback = embedPlayback;
 
-    assertCheck("browser video reached readyState and advanced", playback.playback.readyState >= 2 && playback.playback.currentTime > 0.1, playback.playback);
-    assertCheck("telemetry POST reached site endpoint", playback.telemetry_posts.some((post) => post.status === 200), playback.telemetry_posts);
+    assertCheck("embed video reached readyState and advanced", embedPlayback.playback.readyState >= 2 && embedPlayback.playback.currentTime > 0.1, embedPlayback.playback);
+    assertCheck("embed telemetry POST reached site endpoint", embedPlayback.telemetry_posts.some((post) => post.status === 200), embedPlayback.telemetry_posts);
 
-    const recent = await waitForRecentEvents(site.baseUrl, assetId, playback.playback.playbackSessionId, [
+    const embedRecent = await waitForRecentEvents(site.baseUrl, assetId, embedPlayback.playback.playbackSessionId, [
       "player_load",
       "bootstrap_complete",
       "source_selected",
@@ -834,23 +851,69 @@ async function main() {
       "canplay",
       "first_frame",
     ]);
-    artifact.local.recent = {
-      url: recent.url,
-      events: recent.events,
-      event_summary: eventSummary(recent.events),
+    artifact.local.embed_recent = {
+      url: embedRecent.url,
+      events: embedRecent.events,
+      event_summary: eventSummary(embedRecent.events),
     };
 
-    const eventQuality = validatePlaybackEvents(recent.events);
-    artifact.local.event_quality = eventQuality;
-    assertCheck("recent telemetry contains same playback_session_id", recent.events.every((event) => event.playback_session_id === playback.playback.playbackSessionId), {
-      playback_session_id: playback.playback.playbackSessionId,
-      count: recent.events.length,
+    const embedEventQuality = validatePlaybackEvents(embedRecent.events);
+    artifact.local.embed_event_quality = embedEventQuality;
+    assertCheck("embed telemetry contains same playback_session_id", embedRecent.events.every((event) => event.playback_session_id === embedPlayback.playback.playbackSessionId), {
+      playback_session_id: embedPlayback.playback.playbackSessionId,
+      count: embedRecent.events.length,
     });
-    assertCheck("bootstrap timing exists", eventQuality.bootstrap_timing, eventQuality);
-    assertCheck("selected playback mode and artifact exist", eventQuality.source_selection, eventQuality);
-    assertCheck("metadata/canplay/first-frame timing exists", eventQuality.metadata_timing && eventQuality.canplay_timing && eventQuality.first_frame_timing, eventQuality);
-    assertCheck("stored telemetry is sanitized", leakHits(recent.events, { noUrls: true }).length === 0, {
-      leak_hits: leakHits(recent.events, { noUrls: true }),
+    assertCheck("embed telemetry is labeled with page_type embed", validatePageType(embedRecent.events, "embed"), {
+      event_summary: eventSummary(embedRecent.events),
+    });
+    assertCheck("embed bootstrap timing exists", embedEventQuality.bootstrap_timing, embedEventQuality);
+    assertCheck("embed selected playback mode and artifact exist", embedEventQuality.source_selection, embedEventQuality);
+    assertCheck("embed metadata/canplay/first-frame timing exists", embedEventQuality.metadata_timing && embedEventQuality.canplay_timing && embedEventQuality.first_frame_timing, embedEventQuality);
+    assertCheck("embed stored telemetry is sanitized", leakHits(embedRecent.events, { noUrls: true }).length === 0, {
+      leak_hits: leakHits(embedRecent.events, { noUrls: true }),
+    });
+
+    log("driving browser playback through /watch");
+    const watchPlayback = await runPlaybackScenario({
+      chromePort: chrome.port,
+      siteBaseUrl: site.baseUrl,
+      assetId,
+      name: "local_watch_playback",
+      route: "watch",
+    });
+    artifact.local.watch_playback = watchPlayback;
+
+    assertCheck("watch video reached readyState and advanced", watchPlayback.playback.readyState >= 2 && watchPlayback.playback.currentTime > 0.1, watchPlayback.playback);
+    assertCheck("watch telemetry POST reached site endpoint", watchPlayback.telemetry_posts.some((post) => post.status === 200), watchPlayback.telemetry_posts);
+
+    const watchRecent = await waitForRecentEvents(site.baseUrl, assetId, watchPlayback.playback.playbackSessionId, [
+      "player_load",
+      "bootstrap_complete",
+      "source_selected",
+      "metadata_loaded",
+      "canplay",
+      "first_frame",
+    ]);
+    artifact.local.watch_recent = {
+      url: watchRecent.url,
+      events: watchRecent.events,
+      event_summary: eventSummary(watchRecent.events),
+    };
+
+    const watchEventQuality = validatePlaybackEvents(watchRecent.events);
+    artifact.local.watch_event_quality = watchEventQuality;
+    assertCheck("watch telemetry contains same playback_session_id", watchRecent.events.every((event) => event.playback_session_id === watchPlayback.playback.playbackSessionId), {
+      playback_session_id: watchPlayback.playback.playbackSessionId,
+      count: watchRecent.events.length,
+    });
+    assertCheck("watch telemetry is labeled with page_type watch", validatePageType(watchRecent.events, "watch"), {
+      event_summary: eventSummary(watchRecent.events),
+    });
+    assertCheck("watch bootstrap timing exists", watchEventQuality.bootstrap_timing, watchEventQuality);
+    assertCheck("watch selected playback mode and artifact exist", watchEventQuality.source_selection, watchEventQuality);
+    assertCheck("watch metadata/canplay/first-frame timing exists", watchEventQuality.metadata_timing && watchEventQuality.canplay_timing && watchEventQuality.first_frame_timing, watchEventQuality);
+    assertCheck("watch stored telemetry is sanitized", leakHits(watchRecent.events, { noUrls: true }).length === 0, {
+      leak_hits: leakHits(watchRecent.events, { noUrls: true }),
     });
 
     log("checking unavailable asset telemetry");
