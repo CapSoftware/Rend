@@ -43,6 +43,15 @@ const PLAYBACK_MODES = new Set<RendPlayerPlaybackMode>([
 const PAGE_TYPES = new Set(["watch", "embed", "direct", "custom"]);
 const DEVICE_TYPES = new Set(["desktop", "mobile", "tablet", "tv", "bot", "unknown"]);
 const PRELOAD_VALUES = new Set(["auto", "metadata", "none", ""]);
+const CHANNELS = new Set([
+  "direct",
+  "referral",
+  "organic_search",
+  "social",
+  "email",
+  "paid",
+  "campaign",
+]);
 
 const CACHE_HEADER_NAMES = new Set([
   "age",
@@ -157,6 +166,13 @@ function safeGeoLabel(value: unknown) {
   const label = stringValue(value, 160);
   if (!label || containsUnsafeUrlOrSecret(label)) return undefined;
   return /^[a-z0-9 ._:-]+$/i.test(label) ? label : undefined;
+}
+
+function safeUtm(value: unknown) {
+  const utm = stringValue(value, 120);
+  if (!utm || containsUnsafeUrlOrSecret(utm)) return undefined;
+  // Campaign tags are free-form but kept to printable, low-risk characters.
+  return /^[a-z0-9 _.\-+/:@%|]+$/i.test(utm) ? utm : undefined;
 }
 
 function safeArtifactPath(value: unknown) {
@@ -329,6 +345,12 @@ function sanitizeEvent(
   addOptional(event, "geo_city", safeGeoLabel(value.geo_city));
   addOptional(event, "geo_continent", safeGeoCode(value.geo_continent, 16));
   addOptional(event, "geo_asn", safeLabel(value.geo_asn));
+  addOptional(event, "utm_source", safeUtm(value.utm_source));
+  addOptional(event, "utm_medium", safeUtm(value.utm_medium));
+  addOptional(event, "utm_campaign", safeUtm(value.utm_campaign));
+  addOptional(event, "utm_term", safeUtm(value.utm_term));
+  addOptional(event, "utm_content", safeUtm(value.utm_content));
+  addOptional(event, "channel", safeEnum(value.channel, CHANNELS));
 
   return event;
 }
