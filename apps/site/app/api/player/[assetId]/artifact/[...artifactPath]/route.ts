@@ -1,17 +1,14 @@
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-import { and, eq, isNull } from "drizzle-orm";
-import { assets, organization } from "../../../../../../lib/db/schema.ts";
+import { cachedBootstrapForArtifactRequest } from "../../../../../../lib/player-bootstrap-cache.ts";
 import {
-  PLAYBACK_COOKIE_NAME,
   isHlsManifestArtifactPath,
   playbackCookieFromHeaders,
   playbackArtifactFetchHeaders,
   playbackArtifactResponseHeaders,
   playbackProxyCookieHeader,
 } from "../../../../../../lib/player-artifact-proxy.ts";
-import { getSiteDb } from "../../../../../../lib/server-db.ts";
 
 type UpstreamPlaybackResponse = {
   playback_url?: unknown;
@@ -29,8 +26,6 @@ type PlaybackBaseDecision = {
   playbackBaseUrl: string | null;
 };
 
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
-const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
 const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
@@ -41,22 +36,6 @@ function jsonResponse(body: unknown, init?: ResponseInit) {
 
 function envString(name: string, fallback = "") {
   return (process.env[name] || fallback).trim();
-}
-
-function isProductionProfile() {
-  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "local";
-  return ["production", "prod"].includes(profile.toLowerCase());
-}
-
-function siteInternalToken() {
-  const configured = envString("REND_SITE_INTERNAL_TOKEN");
-  if (configured) return configured;
-  return isProductionProfile() ? "" : LOCAL_SITE_INTERNAL_TOKEN;
-}
-
-function controlPlaneUrl(path: string) {
-  const baseUrl = envString("REND_API_BASE_URL", DEFAULT_API_BASE_URL).replace(/\/+$/, "");
-  return `${baseUrl}${path}`;
 }
 
 function normalizeAssetId(value: string) {
@@ -131,11 +110,6 @@ function encodeArtifactPath(artifactPath: string) {
 function proxiedArtifactUrl(assetId: string, artifactPath: string, playbackBaseUrl: string | null) {
   const path = `/api/player/${encodeURIComponent(assetId)}/artifact/${encodeArtifactPath(artifactPath)}`;
   return playbackBaseUrl ? `${path}?playbackBaseUrl=${encodeURIComponent(playbackBaseUrl)}` : path;
-}
-
-function playbackCookie(setCookie: string | null) {
-  const match = setCookie?.match(new RegExp(`(?:^|,\\s*)${PLAYBACK_COOKIE_NAME}=([^;,\\s]+)`));
-  return match?.[1];
 }
 
 function safePlaybackUrl(value: unknown) {
@@ -214,41 +188,6 @@ function targetUrlForArtifact(
   if (!manifest || !artifactPath.startsWith("hls/")) return undefined;
   manifest.pathname = `/v/${assetId}/${artifactPath}`;
   return rewritePlaybackBase(manifest, playbackBaseUrl);
-}
-
-async function assetOrganizationId(assetId: string) {
-  const [row] = await getSiteDb()
-    .select({ organizationId: assets.organization_id })
-    .from(assets)
-    .innerJoin(organization, eq(organization.id, assets.organization_id))
-    .where(
-      and(
-        eq(assets.id, assetId),
-        isNull(assets.deleted_at),
-        isNull(assets.suspended_at),
-        isNull(organization.suspended_at)
-      )
-    )
-    .limit(1);
-  return row?.organizationId ?? null;
-}
-
-async function fetchPlaybackBootstrap(assetId: string, organizationId: string, internalToken: string) {
-  const response = await fetch(controlPlaneUrl(`/v1/assets/${encodeURIComponent(assetId)}/playback`), {
-    cache: "no-store",
-    headers: {
-      "x-rend-site-token": internalToken,
-      "x-rend-organization-id": organizationId,
-      accept: "application/json",
-    },
-  });
-  if (!response.ok) return null;
-  const data = (await response.json().catch(() => null)) as UpstreamPlaybackResponse | null;
-  if (!data || typeof data !== "object") return null;
-  return {
-    cookie: playbackCookie(response.headers.get("set-cookie")),
-    data,
-  };
 }
 
 function rewriteManifest(manifest: string, assetId: string, manifestUrl: string, playbackBaseUrl: string | null) {
@@ -344,19 +283,9 @@ export async function GET(
     }
   }
 
-  const internalToken = siteInternalToken();
-  if (!internalToken) {
-    return jsonResponse({ status: "error", message: "Playback is not configured" }, { status: 500 });
-  }
-
-  const organizationId = await assetOrganizationId(normalizedAssetId).catch(() => null);
-  if (!organizationId) {
-    return jsonResponse({ status: "unavailable", message: "Artifact is unavailable" }, { status: 404 });
-  }
-
-  const bootstrap = await fetchPlaybackBootstrap(normalizedAssetId, organizationId, internalToken).catch(() => null);
+  const bootstrap = cachedBootstrapForArtifactRequest(normalizedAssetId, request);
   const targetUrl = bootstrap
-    ? targetUrlForArtifact(bootstrap.data, normalizedAssetId, normalizedArtifactPath, playbackBaseUrl)
+    ? targetUrlForArtifact(bootstrap.upstreamResponse, normalizedAssetId, normalizedArtifactPath, playbackBaseUrl)
     : undefined;
   if (!bootstrap || !targetUrl) {
     return jsonResponse({ status: "unavailable", message: "Artifact is unavailable" }, { status: 404 });
@@ -364,7 +293,7 @@ export async function GET(
 
   const edgeResponse = await fetch(targetUrl, {
     cache: "no-store",
-    headers: playbackArtifactFetchHeaders(request.headers, bootstrap.cookie, normalizedArtifactPath),
+    headers: playbackArtifactFetchHeaders(request.headers, bootstrap.playbackToken, normalizedArtifactPath),
   }).catch(() => null);
   if (!edgeResponse) {
     return jsonResponse({ status: "error", message: "Artifact fetch failed" }, { status: 502 });
@@ -379,8 +308,8 @@ export async function GET(
     playbackProxyCookieHeader(
       request.url,
       normalizedAssetId,
-      bootstrap.data.playback_token,
-      bootstrap.data.ttl_seconds
+      bootstrap.playbackToken,
+      bootstrap.safeResponse.ttl_seconds
     )
   );
 }
