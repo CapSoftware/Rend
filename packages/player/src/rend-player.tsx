@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  generateTelemetryEventId,
   generatePlaybackSessionId,
   readableTelemetryHeaders,
+  REND_PLAYER_NAME,
   REND_PLAYER_VERSION,
   sendPlayerTelemetryEvent,
   telemetryLabelsFromHeaders,
@@ -108,6 +110,8 @@ export type RendPlayerProps = {
   telemetryEnabled?: boolean;
   telemetryUrl?: string;
   telemetryAppVersion?: string;
+  telemetryOrganizationId?: string;
+  telemetryPageType?: "watch" | "embed" | "direct" | "custom";
   onTelemetryEvent?: (event: RendPlayerTelemetryEvent) => void;
   onStateChange?: (state: RendPlayerState) => void;
   onTimingsChange?: (timings: RendPlayerTimings) => void;
@@ -424,6 +428,92 @@ function initialTimingState(initialBootstrapMs: number | undefined): RendPlayerT
   return timings;
 }
 
+type BrowserTelemetryContext = Pick<
+  RendPlayerTelemetryEvent,
+  | "viewer_id_hash"
+  | "page_host"
+  | "referrer_host"
+  | "browser_name"
+  | "browser_version"
+  | "os_name"
+  | "device_type"
+>;
+
+const VIEWER_ID_STORAGE_KEY = "rend.viewer.v1";
+
+function safeTelemetryHost(value: string) {
+  try {
+    const host = new URL(value).host.toLowerCase();
+    return /^[a-z0-9._:-]{1,160}$/.test(host) ? host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferBrowser(userAgent: string) {
+  for (const [browser_name, pattern] of [
+    ["Edge", /Edg\/([0-9.]+)/],
+    ["Chrome", /Chrome\/([0-9.]+)/],
+    ["Firefox", /Firefox\/([0-9.]+)/],
+    ["Safari", /Version\/([0-9.]+).*Safari/],
+  ] as const) {
+    const match = userAgent.match(pattern);
+    if (match?.[1]) return { browser_name, browser_version: match[1] };
+  }
+  return {};
+}
+
+function inferOs(userAgent: string) {
+  if (/iPhone|iPad|iPod/.test(userAgent)) return { os_name: "iOS" };
+  if (/Android/.test(userAgent)) return { os_name: "Android" };
+  if (/Mac OS X/.test(userAgent)) return { os_name: "macOS" };
+  if (/Windows NT/.test(userAgent)) return { os_name: "Windows" };
+  if (/Linux/.test(userAgent)) return { os_name: "Linux" };
+  return {};
+}
+
+function inferDeviceType(userAgent: string): BrowserTelemetryContext["device_type"] {
+  if (/bot|crawler|spider|preview/i.test(userAgent)) return "bot";
+  if (/iPad|Tablet|Android(?!.*Mobile)/i.test(userAgent)) return "tablet";
+  if (/Mobi|iPhone|Android/i.test(userAgent)) return "mobile";
+  if (/TV|SmartTV|AppleTV/i.test(userAgent)) return "tv";
+  return "desktop";
+}
+
+function stableViewerId() {
+  const existing = window.localStorage.getItem(VIEWER_ID_STORAGE_KEY);
+  if (existing && /^[a-zA-Z0-9._:-]{8,160}$/.test(existing)) return existing;
+  const next = generatePlaybackSessionId();
+  window.localStorage.setItem(VIEWER_ID_STORAGE_KEY, next);
+  return next;
+}
+
+async function sha256Hex(value: string) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function browserTelemetryContext(): Promise<BrowserTelemetryContext> {
+  if (typeof window === "undefined") return {};
+  const userAgent = navigator.userAgent || "";
+  let viewer_id_hash: string | undefined;
+  try {
+    viewer_id_hash = `sha256:${await sha256Hex(stableViewerId())}`;
+  } catch {
+    viewer_id_hash = undefined;
+  }
+
+  return {
+    viewer_id_hash,
+    page_host: safeTelemetryHost(window.location.href),
+    referrer_host: document.referrer ? safeTelemetryHost(document.referrer) : undefined,
+    ...inferBrowser(userAgent),
+    ...inferOs(userAgent),
+    device_type: inferDeviceType(userAgent),
+  };
+}
+
 function documentStartedAtEpochMs() {
   if (typeof performance !== "undefined" && typeof performance.now === "function") {
     return Date.now() - performance.now();
@@ -590,6 +680,8 @@ export function RendPlayer({
   telemetryEnabled,
   telemetryUrl,
   telemetryAppVersion,
+  telemetryOrganizationId,
+  telemetryPageType = "custom",
   onTelemetryEvent,
   onStateChange,
   onTimingsChange,
@@ -637,9 +729,20 @@ export function RendPlayer({
   const [hlsStats, setHlsStats] = useState<HlsStats>({});
   const [timings, setTimings] = useState<RendPlayerTimings>(initialTimings);
   const [videoSrcAttr, setVideoSrcAttr] = useState<string | undefined>(initialVideoSrc);
+  const [browserContext, setBrowserContext] = useState<BrowserTelemetryContext>({});
   const playbackSessionIdRef = useRef("");
   const [playbackSessionId, setPlaybackSessionId] = useState("");
   const telemetryActive = telemetryEnabled ?? Boolean(telemetryUrl || onTelemetryEvent);
+
+  useEffect(() => {
+    let cancelled = false;
+    void browserTelemetryContext().then((context) => {
+      if (!cancelled) setBrowserContext(context);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const resolvedBootstrapUrl = useMemo(
     () => bootstrapUrl ?? `/api/player/${encodeURIComponent(assetId)}`,
@@ -660,11 +763,20 @@ export function RendPlayer({
       const sessionId = ensurePlaybackSessionId();
 
       const event: RendPlayerTelemetryEvent = {
+        event_id: generateTelemetryEventId(),
+        organization_id: telemetryOrganizationId,
         playback_session_id: sessionId,
         asset_id: assetId,
+        ...browserContext,
+        page_type: telemetryPageType,
+        player_name: REND_PLAYER_NAME,
         event_time_ms: Date.now(),
         player_version: REND_PLAYER_VERSION,
         app_version: telemetryAppVersion,
+        autoplay: autoPlay,
+        muted,
+        preload,
+        startup_mode: startupMode,
         ...input,
       };
 
@@ -678,10 +790,17 @@ export function RendPlayer({
     },
     [
       assetId,
+      autoPlay,
+      browserContext,
       ensurePlaybackSessionId,
+      muted,
       onTelemetryEvent,
+      preload,
+      startupMode,
       telemetryActive,
       telemetryAppVersion,
+      telemetryOrganizationId,
+      telemetryPageType,
       telemetryUrl,
     ]
   );
