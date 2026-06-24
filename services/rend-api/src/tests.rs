@@ -618,6 +618,30 @@ async fn list_assets_endpoint_requires_dev_api_key() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[test]
+fn asset_list_item_serializes_duration_and_thumbnail_presence() {
+    let item = AssetListItem {
+        asset_id: "asset-123".to_owned(),
+        source_state: "uploaded".to_owned(),
+        playable_state: "hls_ready".to_owned(),
+        created_at: "2026-06-14T10:00:00.000Z".to_owned(),
+        updated_at: "2026-06-14T10:01:00.000Z".to_owned(),
+        source_byte_size: Some(428_815),
+        duration_ms: Some(12_000),
+        has_thumbnail: true,
+        artifact_count: 4,
+        suspended_at: None,
+        suspension_reason: None,
+        organization_suspended_at: None,
+        organization_suspension_reason: None,
+    };
+
+    let value = serde_json::to_value(item).unwrap();
+
+    assert_eq!(value["duration_ms"], 12_000);
+    assert_eq!(value["has_thumbnail"], true);
+}
+
 #[tokio::test]
 async fn delete_asset_endpoint_requires_dev_api_key() {
     let app = build_app(test_state(), Duration::from_secs(10));
