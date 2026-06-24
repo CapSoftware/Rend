@@ -2,7 +2,7 @@
 
 import { Activity, Clock, Database, Eye, Gauge, RefreshCw, Signal } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AnalyticsOverview,
   AnalyticsOverviewResponse,
@@ -110,7 +110,7 @@ export default function AnalyticsClient({
     [analytics?.timeseries]
   );
 
-  async function refresh(nextWindowSeconds = windowSeconds) {
+  const refresh = useCallback(async (nextWindowSeconds: number) => {
     setLoading(true);
     setError("");
     try {
@@ -127,7 +127,27 @@ export default function AnalyticsClient({
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  const refreshCurrentWindow = useCallback(() => {
+    void refresh(windowSeconds);
+  }, [refresh, windowSeconds]);
+
+  useEffect(() => {
+    const onFocus = () => refreshCurrentWindow();
+    const onVisibilityChange = () => {
+      if (!document.hidden) refreshCurrentWindow();
+    };
+    const interval = window.setInterval(refreshCurrentWindow, 30_000);
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshCurrentWindow]);
 
   function selectWindow(nextWindowSeconds: number) {
     setWindowSeconds(nextWindowSeconds);
@@ -156,7 +176,7 @@ export default function AnalyticsClient({
         variant="secondary"
         size="sm"
         className="rounded-md"
-        onClick={() => refresh()}
+        onClick={refreshCurrentWindow}
         disabled={loading}
       >
         <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
