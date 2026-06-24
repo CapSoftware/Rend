@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context as TaskContext, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -397,6 +397,46 @@ struct AppState {
     http: reqwest::Client,
     s3: S3Client,
     started_at: Instant,
+    metrics: Arc<ApiMetrics>,
+}
+
+#[derive(Default)]
+struct ApiMetrics {
+    telemetry_ingested_events_total: AtomicU64,
+    telemetry_ingest_lag_ms: AtomicU64,
+    analytics_rollup_lag_ms: AtomicU64,
+    analytics_rollup_last_success_unix_seconds: AtomicU64,
+    analytics_rollup_success_total: AtomicU64,
+    analytics_rollup_failure_total: AtomicU64,
+}
+
+impl ApiMetrics {
+    fn record_telemetry_ingest(&self, accepted: usize, lag_ms: u64) {
+        self.telemetry_ingested_events_total.fetch_add(
+            u64::try_from(accepted).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.telemetry_ingest_lag_ms
+            .store(lag_ms, Ordering::Relaxed);
+    }
+
+    fn record_analytics_rollup_success(&self, lag_ms: u64) {
+        self.analytics_rollup_lag_ms
+            .store(lag_ms, Ordering::Relaxed);
+        self.analytics_rollup_success_total
+            .fetch_add(1, Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        self.analytics_rollup_last_success_unix_seconds
+            .store(now, Ordering::Relaxed);
+    }
+
+    fn record_analytics_rollup_failure(&self) {
+        self.analytics_rollup_failure_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -643,6 +683,7 @@ struct PlaybackPrefetchHint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AssetPlaybackRecord {
     asset_id: String,
+    organization_id: String,
     source_state: String,
     playable_state: String,
 }
@@ -899,6 +940,7 @@ async fn main() -> Result<()> {
         http: reqwest::Client::new(),
         s3,
         started_at: Instant::now(),
+        metrics: Arc::new(ApiMetrics::default()),
     });
 
     match command.as_slice() {
@@ -1054,6 +1096,13 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             state.clone(),
             require_operator_internal_auth,
         ));
+    let metrics_routes =
+        Router::new()
+            .route("/metrics", get(metrics))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_internal_edge_token,
+            ));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -1061,6 +1110,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .route("/v1/healthz", get(healthz))
         .route("/v1/readyz", get(readyz))
         .route("/player", get(player_harness))
+        .merge(metrics_routes)
         .merge(authenticated_routes)
         .merge(site_player_telemetry_routes)
         .nest("/internal/site", site_internal_routes)
@@ -1322,6 +1372,53 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthResponse<'sta
 
 async fn player_harness() -> Html<&'static str> {
     Html(PLAYER_HARNESS_HTML)
+}
+
+async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    let body = format!(
+        "# HELP rend_api_telemetry_ingested_events_total Telemetry events accepted into ClickHouse by rend-api.\n\
+         # TYPE rend_api_telemetry_ingested_events_total counter\n\
+         rend_api_telemetry_ingested_events_total {}\n\
+         # HELP rend_api_telemetry_ingest_lag_ms Latest accepted telemetry ingest lag in milliseconds.\n\
+         # TYPE rend_api_telemetry_ingest_lag_ms gauge\n\
+         rend_api_telemetry_ingest_lag_ms {}\n\
+         # HELP rend_api_analytics_rollup_lag_ms Latest successful analytics rollup lag in milliseconds.\n\
+         # TYPE rend_api_analytics_rollup_lag_ms gauge\n\
+         rend_api_analytics_rollup_lag_ms {}\n\
+         # HELP rend_api_analytics_rollup_last_success_unix_seconds Last successful analytics rollup refresh time.\n\
+         # TYPE rend_api_analytics_rollup_last_success_unix_seconds gauge\n\
+         rend_api_analytics_rollup_last_success_unix_seconds {}\n\
+         # HELP rend_api_analytics_rollup_refresh_total Analytics rollup refreshes by result.\n\
+         # TYPE rend_api_analytics_rollup_refresh_total counter\n\
+         rend_api_analytics_rollup_refresh_total{{result=\"success\"}} {}\n\
+         rend_api_analytics_rollup_refresh_total{{result=\"failure\"}} {}\n",
+        state
+            .metrics
+            .telemetry_ingested_events_total
+            .load(Ordering::Relaxed),
+        state
+            .metrics
+            .telemetry_ingest_lag_ms
+            .load(Ordering::Relaxed),
+        state
+            .metrics
+            .analytics_rollup_lag_ms
+            .load(Ordering::Relaxed),
+        state
+            .metrics
+            .analytics_rollup_last_success_unix_seconds
+            .load(Ordering::Relaxed),
+        state
+            .metrics
+            .analytics_rollup_success_total
+            .load(Ordering::Relaxed),
+        state
+            .metrics
+            .analytics_rollup_failure_total
+            .load(Ordering::Relaxed),
+    );
+
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
 async fn readyz(State(state): State<Arc<AppState>>) -> Response {
@@ -2604,9 +2701,12 @@ async fn fetch_asset_playback_record(
 ) -> Result<Option<AssetPlaybackRecord>, AppError> {
     let asset_id = normalize_asset_id(asset_id)?;
     let organization_id = normalize_org_id(organization_id)?;
-    let row: Option<(String, String, String)> = sqlx::query_as(
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
         "
-        SELECT asset.id::text, asset.source_state, asset.playable_state
+        SELECT asset.id::text,
+               asset.organization_id::text,
+               asset.source_state,
+               asset.playable_state
         FROM rend.assets asset
         INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
         WHERE asset.id = $1::uuid
@@ -2623,8 +2723,9 @@ async fn fetch_asset_playback_record(
     .map_err(AppError::internal)?;
 
     Ok(row.map(
-        |(asset_id, source_state, playable_state)| AssetPlaybackRecord {
+        |(asset_id, organization_id, source_state, playable_state)| AssetPlaybackRecord {
             asset_id,
+            organization_id,
             source_state,
             playable_state,
         },
@@ -2997,7 +3098,8 @@ fn playback_bootstrap_response(
         return Err(AppError::not_found("asset is not playable yet"));
     }
 
-    let token = issue_playback_token(issuer, &asset.asset_id, now).map_err(AppError::internal)?;
+    let token = issue_playback_token(issuer, &asset.asset_id, Some(&asset.organization_id), now)
+        .map_err(AppError::internal)?;
     let (playback_url, playback_content_type) =
         artifact_fields(playback_base_url, &asset.asset_id, primary_artifact);
     let (opener_url, opener_content_type) =
@@ -3304,13 +3406,15 @@ fn hls_segment_index(path: &str) -> Option<u32> {
 fn issue_playback_token(
     issuer: &PlaybackTokenIssuer,
     asset_id: &str,
+    organization_id: Option<&str>,
     now: u64,
 ) -> Result<IssuedPlaybackToken, PlaybackAuthError> {
     let ttl_seconds = issuer.ttl().as_secs();
     let expires_at = now
         .checked_add(ttl_seconds)
         .ok_or(PlaybackAuthError::InvalidTtl)?;
-    let token = issuer.issue_asset_playback_token(asset_id, now)?;
+    let token =
+        issuer.issue_asset_playback_token_with_organization(asset_id, organization_id, now)?;
 
     Ok(IssuedPlaybackToken {
         token,
@@ -4023,7 +4127,7 @@ fn playback_url(
     let Some(artifact_path) = playback_artifact_path(playable_state) else {
         return Ok(None);
     };
-    let _token = issue_playback_token(issuer, asset_id, now)?;
+    let _token = issue_playback_token(issuer, asset_id, None, now)?;
 
     Ok(Some(artifact_url(base_url, asset_id, artifact_path)))
 }
