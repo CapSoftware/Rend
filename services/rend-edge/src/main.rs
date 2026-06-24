@@ -31,8 +31,8 @@ use rend_config::{
     validate_required_url,
 };
 use rend_playback_auth::{
-    SingleKeyring, current_unix_timestamp, is_valid_hls_rendition_name, is_valid_hls_segment_name,
-    validate_playback_token,
+    PlaybackClaims, SingleKeyring, current_unix_timestamp, is_valid_hls_rendition_name,
+    is_valid_hls_segment_name, validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -1109,6 +1109,9 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
          rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"sent\"}} {}\n\
          rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"spooled\"}} {}\n\
          rend_edge_telemetry_events_total{{edge_id=\"{}\",region=\"{}\",state=\"dropped\"}} {}\n\
+         # HELP rend_edge_telemetry_queue_depth Current playback telemetry events queued locally before send or spool.\n\
+         # TYPE rend_edge_telemetry_queue_depth gauge\n\
+         rend_edge_telemetry_queue_depth{{edge_id=\"{}\",region=\"{}\"}} {}\n\
          # HELP rend_edge_telemetry_spool_bytes Current local telemetry spool file size.\n\
          # TYPE rend_edge_telemetry_spool_bytes gauge\n\
          rend_edge_telemetry_spool_bytes{{edge_id=\"{}\",region=\"{}\"}} {}\n",
@@ -1158,6 +1161,9 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         telemetry_counters.dropped,
         edge_id,
         region,
+        telemetry_counters.queue_depth,
+        edge_id,
+        region,
         telemetry_spool_bytes,
     );
 
@@ -1200,16 +1206,17 @@ async fn playback(
         range_header.as_deref(),
     )
     .await;
-    let (response, error_code) = match result {
-        Ok(response) => (response, None),
+    let (response, error_code, organization_id) = match result {
+        Ok(outcome) => (outcome.response, None, outcome.organization_id),
         Err(error) => {
             let error_code = error.telemetry_error_code();
-            (error.into_response(), Some(error_code))
+            (error.into_response(), Some(error_code), None)
         }
     };
 
     record_playback_telemetry(
         &state,
+        organization_id.as_deref(),
         &asset_id,
         &artifact_path,
         &response,
@@ -1278,15 +1285,16 @@ async fn playback_inner(
     token: Option<&str>,
     cors_origin: Option<&str>,
     range_header: Option<&str>,
-) -> std::result::Result<Response, PlaybackError> {
+) -> std::result::Result<PlaybackOutcome, PlaybackError> {
     let now = current_unix_timestamp().map_err(|error| PlaybackError::Io(error.to_string()))?;
-    validate_playback_request(
+    let claims = validate_playback_request(
         &state.config.playback_keyring,
         &path.asset_id,
         &path.artifact_path,
         token,
         now,
     )?;
+    let organization_id = claims.organization_id;
 
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
@@ -1301,14 +1309,22 @@ async fn playback_inner(
     )
     .await?
     {
-        return Ok(response);
+        return Ok(PlaybackOutcome {
+            response,
+            organization_id,
+        });
     }
 
     if let Some(range_header) = range_header.filter(|_| is_hls_segment_content_type(&artifact)) {
-        return stream_origin_range_response(state, artifact, range_header, cors_origin).await;
+        let response =
+            stream_origin_range_response(state, artifact, range_header, cors_origin).await?;
+        return Ok(PlaybackOutcome {
+            response,
+            organization_id,
+        });
     }
 
-    match state
+    let response = match state
         .in_flight_fills
         .acquire(&artifact.cache_key, state.config.max_in_flight_fills)?
     {
@@ -1340,7 +1356,17 @@ async fn playback_inner(
                 ))
             })
         }
-    }
+    }?;
+
+    Ok(PlaybackOutcome {
+        response,
+        organization_id,
+    })
+}
+
+struct PlaybackOutcome {
+    response: Response,
+    organization_id: Option<String>,
 }
 
 async fn cached_artifact_response(
@@ -1600,6 +1626,7 @@ fn byte_stream_body(
 
 fn record_playback_telemetry(
     state: &AppState,
+    organization_id: Option<&str>,
     asset_id: &str,
     artifact_path: &str,
     response: &Response,
@@ -1627,6 +1654,7 @@ fn record_playback_telemetry(
     state
         .telemetry
         .record_playback(telemetry::PlaybackTelemetryInput {
+            organization_id,
             asset_id,
             artifact_path,
             edge_id: &state.config.edge_id,
@@ -1636,8 +1664,20 @@ fn record_playback_telemetry(
             bytes_served,
             content_type,
             duration_ms,
+            resolution_tier: resolution_tier_from_artifact_path(artifact_path),
             error_code,
         });
+}
+
+fn resolution_tier_from_artifact_path(artifact_path: &str) -> Option<&str> {
+    match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
+        ["hls", rendition_name, "index.m3u8"] | ["hls", rendition_name, _]
+            if matches!(*rendition_name, "720p" | "1080p" | "2k" | "4k") =>
+        {
+            Some(*rendition_name)
+        }
+        _ => None,
+    }
 }
 
 async fn wait_for_coalesced_fill(
@@ -2516,10 +2556,9 @@ fn validate_playback_request(
     artifact_path: &str,
     token: Option<&str>,
     now: u64,
-) -> std::result::Result<(), PlaybackError> {
+) -> std::result::Result<PlaybackClaims, PlaybackError> {
     let token = token.ok_or(PlaybackError::Unauthorized)?;
     validate_playback_token(token, asset_id, artifact_path, now, keyring)
-        .map(|_| ())
         .map_err(|_| PlaybackError::Unauthorized)
 }
 

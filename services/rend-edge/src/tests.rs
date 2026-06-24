@@ -1537,6 +1537,7 @@ async fn metrics_include_cache_fill_and_telemetry_series() {
     assert!(metrics.contains("rend_edge_cache_evicted_bytes_total"));
     assert!(metrics.contains("rend_edge_cache_eviction_errors_total"));
     assert!(metrics.contains("rend_edge_telemetry_events_total"));
+    assert!(metrics.contains("rend_edge_telemetry_queue_depth"));
     assert!(metrics.contains("rend_edge_telemetry_spool_bytes"));
 }
 

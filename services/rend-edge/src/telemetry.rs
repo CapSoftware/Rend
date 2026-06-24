@@ -106,6 +106,8 @@ impl TelemetryConfig {
 pub(crate) struct PlaybackTelemetryEvent {
     pub(crate) event_id: String,
     pub(crate) observed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) organization_id: Option<String>,
     pub(crate) asset_id: String,
     pub(crate) artifact_path: String,
     pub(crate) edge_id: String,
@@ -116,10 +118,13 @@ pub(crate) struct PlaybackTelemetryEvent {
     pub(crate) content_type: String,
     pub(crate) duration_ms: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<String>,
 }
 
 pub(crate) struct PlaybackTelemetryInput<'a> {
+    pub(crate) organization_id: Option<&'a str>,
     pub(crate) asset_id: &'a str,
     pub(crate) artifact_path: &'a str,
     pub(crate) edge_id: &'a str,
@@ -129,6 +134,7 @@ pub(crate) struct PlaybackTelemetryInput<'a> {
     pub(crate) bytes_served: u64,
     pub(crate) content_type: &'a str,
     pub(crate) duration_ms: u32,
+    pub(crate) resolution_tier: Option<&'a str>,
     pub(crate) error_code: Option<&'a str>,
 }
 
@@ -138,6 +144,7 @@ pub(crate) struct TelemetryCounters {
     pub(crate) spooled: u64,
     pub(crate) sent: u64,
     pub(crate) dropped: u64,
+    pub(crate) queue_depth: u64,
 }
 
 #[derive(Clone)]
@@ -153,6 +160,7 @@ struct TelemetryInner {
     spooled: AtomicU64,
     sent: AtomicU64,
     dropped: AtomicU64,
+    queue_depth: AtomicU64,
     sequence: AtomicU64,
 }
 
@@ -185,6 +193,7 @@ impl TelemetryHandle {
             spooled: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            queue_depth: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
         });
 
@@ -212,6 +221,7 @@ impl TelemetryHandle {
         match inner.sender.try_send(event) {
             Ok(()) => {
                 inner.queued.fetch_add(1, Ordering::Relaxed);
+                inner.queue_depth.fetch_add(1, Ordering::Relaxed);
             }
             Err(mpsc::error::TrySendError::Full(event))
             | Err(mpsc::error::TrySendError::Closed(event)) => {
@@ -230,6 +240,7 @@ impl TelemetryHandle {
             spooled: inner.spooled.load(Ordering::Relaxed),
             sent: inner.sent.load(Ordering::Relaxed),
             dropped: inner.dropped.load(Ordering::Relaxed),
+            queue_depth: inner.queue_depth.load(Ordering::Relaxed),
         }
     }
 
@@ -256,6 +267,7 @@ impl TelemetryHandle {
             spooled: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            queue_depth: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
         });
 
@@ -493,6 +505,7 @@ pub(crate) fn shape_playback_event(
     PlaybackTelemetryEvent {
         event_id,
         observed_at: observed_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        organization_id: input.organization_id.map(str::to_owned),
         asset_id: input.asset_id.to_owned(),
         artifact_path: input.artifact_path.to_owned(),
         edge_id: input.edge_id.to_owned(),
@@ -502,6 +515,7 @@ pub(crate) fn shape_playback_event(
         bytes_served: input.bytes_served,
         content_type: input.content_type.to_owned(),
         duration_ms: input.duration_ms,
+        resolution_tier: input.resolution_tier.map(str::to_owned),
         error_code: input.error_code.map(str::to_owned),
     }
 }
@@ -550,9 +564,9 @@ async fn flush_pending_or_spool(
     let events = std::mem::take(pending);
     match send_batch(http, &inner.config, &events).await {
         Ok(()) => {
-            inner
-                .sent
-                .fetch_add(u64::try_from(events.len()).unwrap_or(0), Ordering::Relaxed);
+            let count = u64::try_from(events.len()).unwrap_or(0);
+            inner.sent.fetch_add(count, Ordering::Relaxed);
+            inner.queue_depth.fetch_sub(count, Ordering::Relaxed);
         }
         Err(error) => {
             tracing::warn!(
@@ -570,13 +584,16 @@ async fn append_batch_to_spool(inner: &Arc<TelemetryInner>, events: &[PlaybackTe
         match inner.spool.append_event(event).await {
             Ok(true) => {
                 inner.spooled.fetch_add(1, Ordering::Relaxed);
+                inner.queue_depth.fetch_sub(1, Ordering::Relaxed);
             }
             Ok(false) => {
                 inner.dropped.fetch_add(1, Ordering::Relaxed);
+                inner.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 tracing::warn!("playback telemetry spool is full; dropping event");
             }
             Err(error) => {
                 inner.dropped.fetch_add(1, Ordering::Relaxed);
+                inner.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 tracing::warn!(error = %error, "playback telemetry spool unavailable; dropping event");
             }
         }
@@ -862,6 +879,7 @@ mod tests {
 
     fn sample_input<'a>() -> PlaybackTelemetryInput<'a> {
         PlaybackTelemetryInput {
+            organization_id: Some("00000000-0000-0000-0000-000000000009"),
             asset_id: "00000000-0000-0000-0000-000000000001",
             artifact_path: "hls/master.m3u8",
             edge_id: "edge-1",
@@ -871,6 +889,7 @@ mod tests {
             bytes_served: 123,
             content_type: "application/vnd.apple.mpegurl",
             duration_ms: 12,
+            resolution_tier: None,
             error_code: None,
         }
     }
@@ -908,6 +927,25 @@ mod tests {
         }
         assert!(json.contains("hls/master.m3u8"));
         assert!(json.contains("miss"));
+    }
+
+    #[test]
+    fn playback_event_shape_carries_safe_analytics_claims() {
+        let mut input = sample_input();
+        input.resolution_tier = Some("720p");
+        let event = shape_playback_event(
+            input,
+            "evt-claims".to_owned(),
+            DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        assert_eq!(
+            event.organization_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000009")
+        );
+        assert_eq!(event.resolution_tier.as_deref(), Some("720p"));
     }
 
     #[tokio::test]
