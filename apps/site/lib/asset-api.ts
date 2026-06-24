@@ -270,7 +270,7 @@ async function controlPlaneFetch(
   const headers = new Headers(init.headers);
   headers.set("x-rend-site-token", internalToken);
   headers.set("x-rend-organization-id", auth.organizationId);
-  headers.set("accept", "application/json");
+  if (!headers.has("accept")) headers.set("accept", "application/json");
 
   let upstream: Response;
   try {
