@@ -1395,12 +1395,12 @@ fn clickhouse_edge_overview_query(
     format!(
         "\
         SELECT \
-          ifNull(sum(request_count), 0) AS request_count, \
-          ifNull(sum(bytes_served), 0) AS bytes_served, \
-          ifNull(sum(cache_hit_count), 0) AS cache_hit_count, \
-          ifNull(sum(error_count), 0) AS error_count, \
-          if(isFinite(avgIf(request_duration_p50_ms, request_count > 0)), avgIf(request_duration_p50_ms, request_count > 0), 0) AS request_duration_p50_ms, \
-          if(isFinite(avgIf(request_duration_p95_ms, request_count > 0)), avgIf(request_duration_p95_ms, request_count > 0), 0) AS request_duration_p95_ms \
+          ifNull(sum(edge_rollups.request_count), 0) AS request_count, \
+          ifNull(sum(edge_rollups.bytes_served), 0) AS bytes_served, \
+          ifNull(sum(edge_rollups.cache_hit_count), 0) AS cache_hit_count, \
+          ifNull(sum(edge_rollups.error_count), 0) AS error_count, \
+          if(isFinite(avgIf(edge_rollups.request_duration_p50_ms, edge_rollups.request_count > 0)), avgIf(edge_rollups.request_duration_p50_ms, edge_rollups.request_count > 0), 0) AS request_duration_p50_ms, \
+          if(isFinite(avgIf(edge_rollups.request_duration_p95_ms, edge_rollups.request_count > 0)), avgIf(edge_rollups.request_duration_p95_ms, edge_rollups.request_count > 0), 0) AS request_duration_p95_ms \
         FROM ( \
           SELECT \
             bucket_start, \
@@ -1416,7 +1416,7 @@ fn clickhouse_edge_overview_query(
             AND bucket_start >= fromUnixTimestamp64Milli({}) \
             AND bucket_start < fromUnixTimestamp64Milli({}) \
           GROUP BY bucket_start, asset_id \
-        ) \
+        ) AS edge_rollups \
         FORMAT JSONEachRow",
         window.started_at.timestamp_millis(),
         window.ended_at.timestamp_millis(),
@@ -1430,16 +1430,16 @@ fn clickhouse_player_overview_query(
     format!(
         "\
         SELECT \
-          ifNull(sum(sessions), 0) AS sessions, \
-          ifNull(sum(views), 0) AS views, \
-          ifNull(sum(startup_failures), 0) AS startup_failures, \
-          ifNull(sum(watch_time_ms), 0) AS watch_time_ms, \
-          ifNull(sum(stalled_sessions), 0) AS stalled_sessions, \
-          ifNull(sum(stall_count), 0) AS stall_count, \
-          ifNull(sum(stall_duration_ms), 0) AS stall_duration_ms, \
-          ifNull(sum(playback_failures), 0) AS playback_failures, \
-          if(isFinite(avgIf(first_frame_p50_ms, views > 0)), avgIf(first_frame_p50_ms, views > 0), 0) AS first_frame_p50_ms, \
-          if(isFinite(avgIf(first_frame_p95_ms, views > 0)), avgIf(first_frame_p95_ms, views > 0), 0) AS first_frame_p95_ms \
+          ifNull(sum(player_rollups.sessions), 0) AS sessions, \
+          ifNull(sum(player_rollups.views), 0) AS views, \
+          ifNull(sum(player_rollups.startup_failures), 0) AS startup_failures, \
+          ifNull(sum(player_rollups.watch_time_ms), 0) AS watch_time_ms, \
+          ifNull(sum(player_rollups.stalled_sessions), 0) AS stalled_sessions, \
+          ifNull(sum(player_rollups.stall_count), 0) AS stall_count, \
+          ifNull(sum(player_rollups.stall_duration_ms), 0) AS stall_duration_ms, \
+          ifNull(sum(player_rollups.playback_failures), 0) AS playback_failures, \
+          if(isFinite(avgIf(player_rollups.first_frame_p50_ms, player_rollups.views > 0)), avgIf(player_rollups.first_frame_p50_ms, player_rollups.views > 0), 0) AS first_frame_p50_ms, \
+          if(isFinite(avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0)), avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0), 0) AS first_frame_p95_ms \
         FROM ( \
           SELECT \
             bucket_start, \
@@ -1459,7 +1459,7 @@ fn clickhouse_player_overview_query(
             AND bucket_start >= fromUnixTimestamp64Milli({}) \
             AND bucket_start < fromUnixTimestamp64Milli({}) \
           GROUP BY bucket_start, asset_id \
-        ) \
+        ) AS player_rollups \
         FORMAT JSONEachRow",
         window.started_at.timestamp_millis(),
         window.ended_at.timestamp_millis(),
@@ -1891,6 +1891,40 @@ mod tests {
 
         assert!(query.contains("GROUP BY event_id"));
         assert!(query.contains("FORMAT JSONEachRow"));
+    }
+
+    #[test]
+    fn overview_queries_do_not_reuse_aggregate_aliases_in_avgif_conditions() {
+        let window = NormalizedPlaybackAnalyticsWindow {
+            started_at: DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ended_at: DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+
+        let edge_query =
+            clickhouse_edge_overview_query("00000000-0000-0000-0000-000000000001", window);
+        assert!(edge_query.contains("AS edge_rollups"));
+        assert!(edge_query.contains(
+            "avgIf(edge_rollups.request_duration_p50_ms, edge_rollups.request_count > 0)"
+        ));
+        assert!(edge_query.contains(
+            "avgIf(edge_rollups.request_duration_p95_ms, edge_rollups.request_count > 0)"
+        ));
+
+        let player_query =
+            clickhouse_player_overview_query("00000000-0000-0000-0000-000000000001", window);
+        assert!(player_query.contains("AS player_rollups"));
+        assert!(
+            player_query
+                .contains("avgIf(player_rollups.first_frame_p50_ms, player_rollups.views > 0)")
+        );
+        assert!(
+            player_query
+                .contains("avgIf(player_rollups.first_frame_p95_ms, player_rollups.views > 0)")
+        );
     }
 
     #[test]
