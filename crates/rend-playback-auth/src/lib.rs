@@ -39,6 +39,8 @@ pub struct PlaybackTokenIssuer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackClaims {
     pub asset_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     pub exp: u64,
     pub kid: String,
     pub policy: String,
@@ -125,11 +127,21 @@ impl PlaybackTokenIssuer {
         asset_id: &str,
         now: u64,
     ) -> Result<String, PlaybackAuthError> {
+        self.issue_asset_playback_token_with_organization(asset_id, None, now)
+    }
+
+    pub fn issue_asset_playback_token_with_organization(
+        &self,
+        asset_id: &str,
+        organization_id: Option<&str>,
+        now: u64,
+    ) -> Result<String, PlaybackAuthError> {
         let exp = now
             .checked_add(self.ttl.as_secs())
             .ok_or(PlaybackAuthError::InvalidTtl)?;
         let claims = PlaybackClaims {
             asset_id: asset_id.to_owned(),
+            organization_id: organization_id.map(str::to_owned),
             exp,
             kid: self.key.kid().to_owned(),
             policy: POLICY_ASSET_PLAYBACK_V1.to_owned(),
@@ -360,10 +372,30 @@ mod tests {
             claims,
             PlaybackClaims {
                 asset_id: "asset-123".to_owned(),
+                organization_id: None,
                 exp: NOW + 300,
                 kid: "kid-a".to_owned(),
                 policy: POLICY_ASSET_PLAYBACK_V1.to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn organization_claim_round_trips_when_issued() {
+        let token = issuer()
+            .issue_asset_playback_token_with_organization(
+                "asset-123",
+                Some("00000000-0000-0000-0000-000000000001"),
+                NOW,
+            )
+            .unwrap();
+        let claims =
+            validate_playback_token(&token, "asset-123", "hls/master.m3u8", NOW + 1, &keyring())
+                .unwrap();
+
+        assert_eq!(
+            claims.organization_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
         );
     }
 
@@ -458,6 +490,7 @@ mod tests {
         let unsupported_policy = sign_claims(
             &PlaybackClaims {
                 asset_id: "asset-123".to_owned(),
+                organization_id: None,
                 exp: NOW + 300,
                 kid: "kid-a".to_owned(),
                 policy: "thumbnail_only".to_owned(),
