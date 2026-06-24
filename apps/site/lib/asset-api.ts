@@ -369,6 +369,7 @@ function sanitizeAssetSummary(value: unknown): AssetSummary | null {
     updated_at: updatedAt,
     source_byte_size: safeOptionalPositiveInteger(value.source_byte_size),
     duration_ms: safeOptionalPositiveInteger(value.duration_ms),
+    has_thumbnail: value.has_thumbnail === true,
     artifact_count: artifactCount ?? 0,
     suspended_at: safeTimestamp(value.suspended_at),
     suspension_reason: safeString(value.suspension_reason, 1000),
