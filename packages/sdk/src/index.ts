@@ -17,6 +17,8 @@ export type AssetSummary = {
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
   source_byte_size?: number;
+  duration_ms?: number;
+  has_thumbnail?: boolean;
   artifact_count: number;
   suspended_at?: IsoTimestamp;
   suspension_reason?: string;
