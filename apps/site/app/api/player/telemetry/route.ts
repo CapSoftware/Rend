@@ -4,6 +4,7 @@ import {
   sanitizePlayerTelemetryPayload,
   type SanitizedPlayerTelemetryEvent,
 } from "../../../../lib/player-telemetry.ts";
+import { geolocation } from "@vercel/functions";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -57,6 +58,57 @@ function jsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("cache-control", "no-store");
   return Response.json(body, { ...init, headers });
+}
+
+function safeGeoCode(value: string | null | undefined, maxLength = 32) {
+  if (!value) return undefined;
+  const normalized = value.trim().toUpperCase();
+  return normalized && normalized.length <= maxLength && /^[A-Z0-9-]+$/.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function safeHost(value: string | null | undefined) {
+  if (!value) return undefined;
+  try {
+    const host = new URL(value).host.toLowerCase();
+    return /^[a-z0-9._:-]{1,160}$/.test(host) ? host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeGeoLabel(value: string | null | undefined) {
+  if (!value) return undefined;
+  const normalized = value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return normalized && normalized.length <= 160 && /^[a-z0-9 ._:-]+$/i.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function serverTelemetryDimensions(request: Request) {
+  const headers = request.headers;
+  const geo = geolocation(request);
+  return {
+    geo_country: safeGeoCode(geo.country || headers.get("x-vercel-ip-country"), 16),
+    geo_region: safeGeoCode(geo.countryRegion || headers.get("x-vercel-ip-country-region"), 32),
+    geo_city: safeGeoLabel(geo.city),
+    geo_continent: safeGeoCode(headers.get("x-vercel-ip-continent"), 16),
+    geo_asn: safeGeoCode(headers.get("x-vercel-ip-asn"), 32),
+    referrer_host: safeHost(headers.get("referer")),
+  };
+}
+
+function enrichPlayerTelemetryEvents(
+  request: Request,
+  events: SanitizedPlayerTelemetryEvent[]
+) {
+  const dimensions = serverTelemetryDimensions(request);
+  return events.map((event) => ({
+    ...event,
+    ...dimensions,
+    referrer_host: dimensions.referrer_host ?? event.referrer_host,
+  }));
 }
 
 function disabledIngestResponse() {
@@ -169,11 +221,12 @@ export async function POST(request: Request) {
     );
   }
 
-  recordPlayerTelemetryEvents(result.events);
-  await forwardDurablePlayerTelemetry(result.events).catch(() => undefined);
+  const events = enrichPlayerTelemetryEvents(request, result.events);
+  recordPlayerTelemetryEvents(events);
+  await forwardDurablePlayerTelemetry(events).catch(() => undefined);
 
   return jsonResponse({
     status: "ok",
-    accepted: result.events.length,
+    accepted: events.length,
   });
 }
