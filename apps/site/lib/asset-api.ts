@@ -797,7 +797,51 @@ function sanitizeAnalyticsLive(value: unknown): AnalyticsLive | null {
           return safeAsset ? [safeAsset] : [];
         })
       : [],
+    resolution: value.resolution === "hourly" ? "hourly" : "minute",
   };
+}
+
+export function buildLiveFromOverview(overview: AnalyticsOverview, windowSeconds: number): AnalyticsLive {
+  const windowEndMs = Date.parse(overview.window_ended_at);
+  const windowStartMs = windowEndMs - windowSeconds * 1000;
+  const points = overview.timeseries
+    .filter((point) => {
+      const bucketMs = Date.parse(point.bucket_start);
+      return Number.isFinite(bucketMs) && bucketMs >= windowStartMs && bucketMs < windowEndMs;
+    })
+    .map((point) => ({
+      bucket_start: point.bucket_start,
+      views: point.views,
+      watch_time_ms: point.watch_time_ms,
+    }));
+
+  let views = 0;
+  let watchTimeMs = 0;
+  for (const point of points) {
+    views += point.views;
+    watchTimeMs += point.watch_time_ms;
+  }
+
+  return {
+    window_started_at: new Date(windowStartMs).toISOString(),
+    window_ended_at: overview.window_ended_at,
+    fetched_at: new Date().toISOString(),
+    views,
+    watch_time_ms: watchTimeMs,
+    unique_viewers: overview.unique_viewers,
+    active_sessions: 0,
+    views_last_minute: 0,
+    timeseries: points,
+    recent_assets: overview.top_assets.slice(0, 5).map((asset) => ({
+      asset_id: asset.asset_id,
+      views: asset.views,
+    })),
+    resolution: "hourly",
+  };
+}
+
+function isLiveEndpointUnavailable(error: unknown) {
+  return error instanceof AssetApiError && [404, 502, 503].includes(error.status);
 }
 
 export async function listAssets(
@@ -982,23 +1026,30 @@ export async function fetchAnalyticsLive(
   windowSeconds = 60 * 60
 ): Promise<AnalyticsLive> {
   const boundedWindow = Math.min(Math.max(Math.trunc(windowSeconds) || 60 * 60, 60), 60 * 60);
-  const upstream = await controlPlaneFetch(
-    auth,
-    `/v1/analytics/live?window_seconds=${boundedWindow}`
-  );
-  const data = await readUpstreamJson(upstream, {
-    notFoundMessage: "Live analytics are unavailable",
-  });
-  const live = sanitizeAnalyticsLive(data);
-  if (!live) {
-    throw new AssetApiError(502, {
-      status: "error",
-      error: "rend_api_invalid_response",
-      message: "Rend API returned invalid live analytics",
+  try {
+    const upstream = await controlPlaneFetch(
+      auth,
+      `/v1/analytics/live?window_seconds=${boundedWindow}`
+    );
+    const data = await readUpstreamJson(upstream, {
+      notFoundMessage: "Live analytics are unavailable",
     });
-  }
+    const live = sanitizeAnalyticsLive(data);
+    if (!live) {
+      throw new AssetApiError(502, {
+        status: "error",
+        error: "rend_api_invalid_response",
+        message: "Rend API returned invalid live analytics",
+      });
+    }
 
-  return live;
+    return live;
+  } catch (error) {
+    if (isLiveEndpointUnavailable(error)) {
+      return buildLiveFromOverview(await fetchAnalyticsOverview(auth, boundedWindow), boundedWindow);
+    }
+    throw error;
+  }
 }
 
 export async function uploadAsset(

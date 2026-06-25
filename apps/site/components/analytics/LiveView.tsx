@@ -128,7 +128,11 @@ export default function LiveView({
             </span>
             <div>
               <p className="text-[13px] font-semibold tracking-wide text-white">Live</p>
-              <p className="text-[11.5px] text-white/45">Last 60 minutes, minute buckets</p>
+              <p className="text-[11.5px] text-white/45">
+                {live.resolution === "hourly"
+                  ? "Last hour, hourly buckets"
+                  : "Last 60 minutes, minute buckets"}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2 text-[11.5px] text-white/40">
@@ -194,7 +198,8 @@ export default function LiveView({
 
       <div className="border-t border-white/[0.06] px-4 py-2.5 sm:px-5">
         <p className="text-[11px] text-white/30">
-          {formatNumber(live.unique_viewers)} unique viewers in the last hour · lightweight poll, one query per refresh
+          {formatNumber(live.unique_viewers)} unique viewers in the last hour
+          {live.resolution === "minute" ? " · one lightweight query per refresh" : " · rollup data"}
         </p>
       </div>
     </div>

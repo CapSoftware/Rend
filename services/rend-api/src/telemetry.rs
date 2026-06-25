@@ -625,6 +625,7 @@ struct AnalyticsLiveResponse {
     views_last_minute: u64,
     timeseries: Vec<AnalyticsLiveMinutePoint>,
     recent_assets: Vec<AnalyticsLiveRecentAsset>,
+    resolution: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -871,15 +872,82 @@ async fn get_analytics_live_inner(
     let organization_id = normalize_org_id(&auth.organization_id)?;
     ensure_org_not_suspended(&state.db, &organization_id).await?;
     let window = normalize_live_window(query, Utc::now())?;
-    let rows = query_clickhouse_live_analytics(
+    let fetched_at = Utc::now();
+    match query_clickhouse_live_analytics(
         &state.http,
         &state.config.playback_telemetry,
         &organization_id,
         window,
     )
+    .await
+    {
+        Ok(rows) => Ok(analytics_live_response(window, fetched_at, rows)),
+        Err(error) => {
+            tracing::warn!(?error, "player_events live query failed; falling back to rollups");
+            analytics_live_from_rollups(state, &organization_id, window, fetched_at).await
+        }
+    }
+}
+
+async fn analytics_live_from_rollups(
+    state: Arc<AppState>,
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+    fetched_at: DateTime<Utc>,
+) -> std::result::Result<AnalyticsLiveResponse, AppError> {
+    let player = query_clickhouse_player_overview(
+        &state.http,
+        &state.config.playback_telemetry,
+        organization_id,
+        window,
+    )
+    .await?;
+    let series = query_clickhouse_analytics_series(
+        &state.http,
+        &state.config.playback_telemetry,
+        organization_id,
+        window,
+    )
+    .await?;
+    let top_assets = query_clickhouse_analytics_top_assets(
+        &state.http,
+        &state.config.playback_telemetry,
+        organization_id,
+        window,
+    )
     .await?;
 
-    Ok(analytics_live_response(window, Utc::now(), rows))
+    let timeseries = series
+        .into_iter()
+        .filter_map(|row| {
+            Some(AnalyticsLiveMinutePoint {
+                bucket_start: rfc3339_millis_from_unix_millis(row.bucket_start_ms)?,
+                views: row.views,
+                watch_time_ms: row.watch_time_ms,
+            })
+        })
+        .collect();
+
+    Ok(AnalyticsLiveResponse {
+        window_started_at: rfc3339_millis(window.started_at),
+        window_ended_at: rfc3339_millis(window.ended_at),
+        fetched_at: rfc3339_millis(fetched_at),
+        views: player.views,
+        watch_time_ms: player.watch_time_ms,
+        unique_viewers: player.unique_viewers,
+        active_sessions: 0,
+        views_last_minute: 0,
+        timeseries,
+        recent_assets: top_assets
+            .into_iter()
+            .take(5)
+            .map(|row| AnalyticsLiveRecentAsset {
+                asset_id: row.asset_id,
+                views: row.views,
+            })
+            .collect(),
+        resolution: "hourly".to_owned(),
+    })
 }
 
 pub(crate) async fn require_internal_telemetry_token(
@@ -2419,6 +2487,7 @@ fn analytics_live_response(
         views_last_minute,
         timeseries,
         recent_assets,
+        resolution: "minute".to_owned(),
     }
 }
 

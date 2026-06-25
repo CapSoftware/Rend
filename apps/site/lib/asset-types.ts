@@ -155,6 +155,7 @@ export type AnalyticsLive = {
   views_last_minute: number;
   timeseries: AnalyticsLiveMinutePoint[];
   recent_assets: AnalyticsLiveRecentAsset[];
+  resolution?: "minute" | "hourly";
 };
 
 export type AnalyticsLiveResponse = {

@@ -12,6 +12,7 @@ import type {
   AnalyticsOverviewResponse,
   AnalyticsTimeSeriesPoint,
 } from "../lib/asset-types.ts";
+import { buildLiveFromOverview } from "../lib/asset-api.ts";
 import { Button } from "@/components/ui/Button";
 import {
   Callout,
@@ -164,11 +165,16 @@ export default function AnalyticsClient({
       }
       setLive(body.live);
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Live analytics refresh failed");
+      if (analytics) {
+        setLive(buildLiveFromOverview(analytics, 60 * 60));
+        setError("");
+      } else {
+        setError(refreshError instanceof Error ? refreshError.message : "Live analytics refresh failed");
+      }
     } finally {
       setLiveLoading(false);
     }
-  }, []);
+  }, [analytics]);
 
   useEffect(() => {
     if (viewMode !== "overview") return;
@@ -208,7 +214,12 @@ export default function AnalyticsClient({
   function selectViewMode(nextMode: ViewMode) {
     setViewMode(nextMode);
     setError("");
-    if (nextMode === "live" && !live) void refreshLive();
+    if (nextMode === "live") {
+      if (analytics) {
+        setLive(buildLiveFromOverview(analytics, 60 * 60));
+      }
+      void refreshLive();
+    }
   }
 
   function selectWindow(nextWindowSeconds: number) {
@@ -388,7 +399,7 @@ export default function AnalyticsClient({
             <LiveView live={live} loading={liveLoading} />
           ) : liveLoading ? (
             <div className="h-[480px] animate-pulse rounded-2xl bg-bg-sunken/40" />
-          ) : (
+          ) : error ? null : (
             <Panel>
               <p className="text-[13.5px] text-muted">No live analytics available yet.</p>
             </Panel>
