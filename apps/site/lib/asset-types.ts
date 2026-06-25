@@ -133,6 +133,35 @@ export type AnalyticsOverviewResponse = {
   analytics: AnalyticsOverview;
 };
 
+export type AnalyticsLiveMinutePoint = {
+  bucket_start: string;
+  views: number;
+  watch_time_ms: number;
+};
+
+export type AnalyticsLiveRecentAsset = {
+  asset_id: string;
+  views: number;
+};
+
+export type AnalyticsLive = {
+  window_started_at: string;
+  window_ended_at: string;
+  fetched_at: string;
+  views: number;
+  watch_time_ms: number;
+  unique_viewers: number;
+  active_sessions: number;
+  views_last_minute: number;
+  timeseries: AnalyticsLiveMinutePoint[];
+  recent_assets: AnalyticsLiveRecentAsset[];
+};
+
+export type AnalyticsLiveResponse = {
+  status: "ok";
+  live: AnalyticsLive;
+};
+
 export type AssetPlayerTelemetryEvent = {
   event_id?: string;
   organization_id?: string;
