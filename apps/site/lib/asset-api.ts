@@ -2,6 +2,7 @@ import type {
   AnalyticsAssetSummary,
   AnalyticsBreakdown,
   AnalyticsBreakdownRow,
+  AnalyticsLive,
   AnalyticsOverview,
   AnalyticsOverviewComparison,
   AssetArtifact,
@@ -729,6 +730,74 @@ function sanitizeAnalyticsOverview(value: unknown): AnalyticsOverview | null {
   };
 }
 
+function sanitizeLiveMinutePoint(value: unknown): AnalyticsLiveMinutePoint | null {
+  if (!isRecord(value)) return null;
+  const bucketStart = safeTimestamp(value.bucket_start);
+  const views = safeOptionalPositiveInteger(value.views);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  if (!bucketStart || views === undefined || watchTimeMs === undefined) return null;
+  return {
+    bucket_start: bucketStart,
+    views,
+    watch_time_ms: watchTimeMs,
+  };
+}
+
+function sanitizeLiveRecentAsset(value: unknown): AnalyticsLiveRecentAsset | null {
+  if (!isRecord(value)) return null;
+  const assetId = safeState(value.asset_id);
+  const views = safeOptionalPositiveInteger(value.views);
+  if (!assetId || views === undefined) return null;
+  return { asset_id: assetId, views };
+}
+
+function sanitizeAnalyticsLive(value: unknown): AnalyticsLive | null {
+  if (!isRecord(value)) return null;
+  const windowStartedAt = safeTimestamp(value.window_started_at);
+  const windowEndedAt = safeTimestamp(value.window_ended_at);
+  const fetchedAt = safeTimestamp(value.fetched_at);
+  const views = safeOptionalPositiveInteger(value.views);
+  const watchTimeMs = safeOptionalPositiveInteger(value.watch_time_ms);
+  const uniqueViewers = safeOptionalPositiveInteger(value.unique_viewers);
+  const activeSessions = safeOptionalPositiveInteger(value.active_sessions);
+  const viewsLastMinute = safeOptionalPositiveInteger(value.views_last_minute);
+  if (
+    !windowStartedAt ||
+    !windowEndedAt ||
+    !fetchedAt ||
+    views === undefined ||
+    watchTimeMs === undefined ||
+    uniqueViewers === undefined ||
+    activeSessions === undefined ||
+    viewsLastMinute === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    window_started_at: windowStartedAt,
+    window_ended_at: windowEndedAt,
+    fetched_at: fetchedAt,
+    views,
+    watch_time_ms: watchTimeMs,
+    unique_viewers: uniqueViewers,
+    active_sessions: activeSessions,
+    views_last_minute: viewsLastMinute,
+    timeseries: Array.isArray(value.timeseries)
+      ? value.timeseries.flatMap((point) => {
+          const safePoint = sanitizeLiveMinutePoint(point);
+          return safePoint ? [safePoint] : [];
+        })
+      : [],
+    recent_assets: Array.isArray(value.recent_assets)
+      ? value.recent_assets.flatMap((asset) => {
+          const safeAsset = sanitizeLiveRecentAsset(asset);
+          return safeAsset ? [safeAsset] : [];
+        })
+      : [],
+  };
+}
+
 export async function listAssets(
   auth: AssetApiAuthContext,
   limit = 50
@@ -904,6 +973,30 @@ export async function fetchAnalyticsOverview(
   }
 
   return analytics;
+}
+
+export async function fetchAnalyticsLive(
+  auth: AssetApiAuthContext,
+  windowSeconds = 60 * 60
+): Promise<AnalyticsLive> {
+  const boundedWindow = Math.min(Math.max(Math.trunc(windowSeconds) || 60 * 60, 60), 60 * 60);
+  const upstream = await controlPlaneFetch(
+    auth,
+    `/v1/analytics/live?window_seconds=${boundedWindow}`
+  );
+  const data = await readUpstreamJson(upstream, {
+    notFoundMessage: "Live analytics are unavailable",
+  });
+  const live = sanitizeAnalyticsLive(data);
+  if (!live) {
+    throw new AssetApiError(502, {
+      status: "error",
+      error: "rend_api_invalid_response",
+      message: "Rend API returned invalid live analytics",
+    });
+  }
+
+  return live;
 }
 
 export async function uploadAsset(
