@@ -6,6 +6,8 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AnalyticsBreakdownRow,
+  AnalyticsLive,
+  AnalyticsLiveResponse,
   AnalyticsOverview,
   AnalyticsOverviewResponse,
   AnalyticsTimeSeriesPoint,
@@ -44,6 +46,15 @@ const OverviewChart = dynamic(() => import("./analytics/OverviewChart"), {
   ssr: false,
   loading: () => <div className="h-[300px] w-full animate-pulse rounded-lg bg-bg-sunken/40" />,
 });
+
+const LiveView = dynamic(() => import("./analytics/LiveView"), {
+  ssr: false,
+  loading: () => <div className="h-[480px] w-full animate-pulse rounded-2xl bg-bg-sunken/40" />,
+});
+
+type ViewMode = "overview" | "live";
+const LIVE_POLL_MS = 20_000;
+const OVERVIEW_POLL_MS = 30_000;
 
 type WindowOption = { label: string; seconds: number };
 const WINDOW_OPTIONS: WindowOption[] = [
@@ -111,9 +122,12 @@ export default function AnalyticsClient({
   initialError?: string;
 }) {
   const [analytics, setAnalytics] = useState(initialAnalytics);
+  const [live, setLive] = useState<AnalyticsLive | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [windowSeconds, setWindowSeconds] = useState(WINDOW_OPTIONS[0].seconds);
   const [granularity, setGranularity] = useState<Granularity>(defaultGranularity(WINDOW_OPTIONS[0].seconds));
   const [loading, setLoading] = useState(false);
+  const [liveLoading, setLiveLoading] = useState(false);
   const [error, setError] = useState(initialError);
 
   const refresh = useCallback(async (nextWindowSeconds: number) => {
@@ -139,12 +153,30 @@ export default function AnalyticsClient({
     void refresh(windowSeconds);
   }, [refresh, windowSeconds]);
 
+  const refreshLive = useCallback(async () => {
+    setLiveLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/analytics/live", { cache: "no-store" });
+      const body = (await response.json()) as AnalyticsLiveResponse | { message?: string };
+      if (!response.ok || !("live" in body)) {
+        throw new Error("message" in body && body.message ? body.message : "Live analytics refresh failed");
+      }
+      setLive(body.live);
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : "Live analytics refresh failed");
+    } finally {
+      setLiveLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
+    if (viewMode !== "overview") return;
     const onFocus = () => refreshCurrentWindow();
     const onVisibilityChange = () => {
       if (!document.hidden) refreshCurrentWindow();
     };
-    const interval = window.setInterval(refreshCurrentWindow, 30_000);
+    const interval = window.setInterval(refreshCurrentWindow, OVERVIEW_POLL_MS);
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
@@ -152,9 +184,35 @@ export default function AnalyticsClient({
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [refreshCurrentWindow]);
+  }, [refreshCurrentWindow, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "live") return;
+    void refreshLive();
+    const onFocus = () => refreshLive();
+    const onVisibilityChange = () => {
+      if (!document.hidden) refreshLive();
+    };
+    const interval = window.setInterval(() => {
+      if (!document.hidden) refreshLive();
+    }, LIVE_POLL_MS);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshLive, viewMode]);
+
+  function selectViewMode(nextMode: ViewMode) {
+    setViewMode(nextMode);
+    setError("");
+    if (nextMode === "live" && !live) void refreshLive();
+  }
 
   function selectWindow(nextWindowSeconds: number) {
+    setViewMode("overview");
     setWindowSeconds(nextWindowSeconds);
     setGranularity(defaultGranularity(nextWindowSeconds));
     void refresh(nextWindowSeconds);
@@ -179,6 +237,28 @@ export default function AnalyticsClient({
   const actions = (
     <>
       <div className="hidden items-center gap-1 rounded-lg border border-line bg-card p-1 sm:flex">
+        <button
+          type="button"
+          onClick={() => selectViewMode("live")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12.5px] font-medium transition-colors",
+            viewMode === "live"
+              ? "bg-[#0c1117] text-white shadow-[0_0_0_1px_rgba(20,184,166,0.35)]"
+              : "text-muted hover:bg-bg-sunken hover:text-ink"
+          )}
+        >
+          <span className="relative flex size-1.5">
+            {viewMode === "live" ? (
+              <>
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-[#14b8a6] opacity-50 motion-reduce:animate-none" />
+                <span className="relative inline-flex size-1.5 rounded-full bg-[#14b8a6]" />
+              </>
+            ) : (
+              <span className="inline-flex size-1.5 rounded-full bg-[#14b8a6]/70" />
+            )}
+          </span>
+          Live
+        </button>
         {WINDOW_OPTIONS.map((option) => (
           <button
             key={option.seconds}
@@ -186,7 +266,7 @@ export default function AnalyticsClient({
             onClick={() => selectWindow(option.seconds)}
             className={cn(
               "rounded-md px-2.5 py-1.5 text-[12.5px] font-medium transition-colors",
-              windowSeconds === option.seconds
+              viewMode === "overview" && windowSeconds === option.seconds
                 ? "bg-ink text-bg"
                 : "text-muted hover:bg-bg-sunken hover:text-ink"
             )}
@@ -195,9 +275,15 @@ export default function AnalyticsClient({
           </button>
         ))}
       </div>
-      <Button variant="secondary" size="sm" className="rounded-md" onClick={refreshCurrentWindow} disabled={loading}>
-        <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-        {loading ? "Refreshing" : "Refresh"}
+      <Button
+        variant="secondary"
+        size="sm"
+        className="rounded-md"
+        onClick={viewMode === "live" ? refreshLive : refreshCurrentWindow}
+        disabled={viewMode === "live" ? liveLoading : loading}
+      >
+        <RefreshCw className={cn("size-3.5", (viewMode === "live" ? liveLoading : loading) && "animate-spin")} />
+        {viewMode === "live" ? (liveLoading ? "Syncing" : "Sync") : loading ? "Refreshing" : "Refresh"}
       </Button>
     </>
   );
@@ -296,13 +382,26 @@ export default function AnalyticsClient({
       <SubHeader title="Analytics" docsHref="/docs" docsLabel="Analytics API" actions={actions} />
       <DashboardContent>
         {error ? <Callout tone="danger">{error}</Callout> : null}
-        {!analytics && !error ? (
+
+        {viewMode === "live" ? (
+          live ? (
+            <LiveView live={live} loading={liveLoading} />
+          ) : liveLoading ? (
+            <div className="h-[480px] animate-pulse rounded-2xl bg-bg-sunken/40" />
+          ) : (
+            <Panel>
+              <p className="text-[13.5px] text-muted">No live analytics available yet.</p>
+            </Panel>
+          )
+        ) : null}
+
+        {viewMode === "overview" && !analytics && !error ? (
           <Panel>
             <p className="text-[13.5px] text-muted">No analytics available yet.</p>
           </Panel>
         ) : null}
 
-        {analytics ? (
+        {viewMode === "overview" && analytics ? (
           <div className="flex flex-col gap-4">
             <StatStrip items={statItems} />
 
