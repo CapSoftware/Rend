@@ -1043,6 +1043,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             "/v1/analytics/overview",
             get(telemetry::get_analytics_overview),
         )
+        .route("/v1/analytics/live", get(telemetry::get_analytics_live))
         .route("/v1/assets", get(list_assets))
         .route(
             "/v1/assets/{asset_id}",

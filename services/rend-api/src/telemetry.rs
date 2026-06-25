@@ -39,6 +39,10 @@ const ANALYTICS_ROLLUP_LAG_SECS: i64 = 60;
 const ANALYTICS_ROLLUP_CATCHUP_BUFFER_SECS: u64 = 5;
 const DEFAULT_OVERVIEW_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_OVERVIEW_WINDOW_SECS: u64 = 90 * 24 * 60 * 60;
+const DEFAULT_LIVE_WINDOW_SECS: u64 = 60 * 60;
+const MAX_LIVE_WINDOW_SECS: u64 = 60 * 60;
+const LIVE_ACTIVE_SESSION_LOOKBACK_SECS: u64 = 5 * 60;
+const LIVE_RECENT_ASSET_LOOKBACK_SECS: u64 = 5 * 60;
 const PLAYER_WATCH_DELTA_MAX_MS: u32 = 60_000;
 const NIL_ORGANIZATION_ID: &str = "00000000-0000-0000-0000-000000000000";
 
@@ -202,6 +206,11 @@ pub(crate) struct PlaybackAnalyticsQuery {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AnalyticsOverviewQuery {
+    window_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AnalyticsLiveQuery {
     window_seconds: Option<u64>,
 }
 
@@ -580,6 +589,44 @@ struct AnalyticsTimeSeriesPoint {
     bytes_served: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClickHouseLiveAnalyticsRow {
+    row_kind: String,
+    bucket_start_ms: i64,
+    views: u64,
+    watch_time_ms: u64,
+    unique_viewers: u64,
+    active_sessions: u64,
+    asset_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsLiveMinutePoint {
+    bucket_start: String,
+    views: u64,
+    watch_time_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsLiveRecentAsset {
+    asset_id: String,
+    views: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsLiveResponse {
+    window_started_at: String,
+    window_ended_at: String,
+    fetched_at: String,
+    views: u64,
+    watch_time_ms: u64,
+    unique_viewers: u64,
+    active_sessions: u64,
+    views_last_minute: u64,
+    timeseries: Vec<AnalyticsLiveMinutePoint>,
+    recent_assets: Vec<AnalyticsLiveRecentAsset>,
+}
+
 #[derive(Debug, Serialize)]
 struct AnalyticsAssetSummary {
     asset_id: String,
@@ -707,6 +754,17 @@ pub(crate) async fn get_analytics_overview(
     }
 }
 
+pub(crate) async fn get_analytics_live(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    Query(query): Query<AnalyticsLiveQuery>,
+) -> Response {
+    match get_analytics_live_inner(state, auth, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn get_playback_analytics_inner(
     state: Arc<AppState>,
     auth: RequestAuth,
@@ -802,6 +860,26 @@ async fn get_analytics_overview_inner(
         previous_edge,
         previous_player,
     ))
+}
+
+async fn get_analytics_live_inner(
+    state: Arc<AppState>,
+    auth: RequestAuth,
+    query: AnalyticsLiveQuery,
+) -> std::result::Result<AnalyticsLiveResponse, AppError> {
+    require_scope(&auth, ApiScope::Analytics)?;
+    let organization_id = normalize_org_id(&auth.organization_id)?;
+    ensure_org_not_suspended(&state.db, &organization_id).await?;
+    let window = normalize_live_window(query, Utc::now())?;
+    let rows = query_clickhouse_live_analytics(
+        &state.http,
+        &state.config.playback_telemetry,
+        &organization_id,
+        window,
+    )
+    .await?;
+
+    Ok(analytics_live_response(window, Utc::now(), rows))
 }
 
 pub(crate) async fn require_internal_telemetry_token(
@@ -1503,6 +1581,16 @@ async fn query_clickhouse_analytics_series(
     query_clickhouse_rows(http, config, &query).await
 }
 
+async fn query_clickhouse_live_analytics(
+    http: &reqwest::Client,
+    config: &TelemetryConfig,
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+) -> std::result::Result<Vec<ClickHouseLiveAnalyticsRow>, AppError> {
+    let query = clickhouse_live_analytics_query(organization_id, window);
+    query_clickhouse_rows(http, config, &query).await
+}
+
 async fn query_clickhouse_analytics_top_assets(
     http: &reqwest::Client,
     config: &TelemetryConfig,
@@ -1841,6 +1929,84 @@ fn clickhouse_analytics_series_query(
     )
 }
 
+fn clickhouse_live_analytics_query(
+    organization_id: &str,
+    window: NormalizedPlaybackAnalyticsWindow,
+) -> String {
+    let start_ms = window.started_at.timestamp_millis();
+    let end_ms = window.ended_at.timestamp_millis();
+    let active_cutoff_ms = end_ms - (LIVE_ACTIVE_SESSION_LOOKBACK_SECS as i64) * 1000;
+    let recent_cutoff_ms = end_ms - (LIVE_RECENT_ASSET_LOOKBACK_SECS as i64) * 1000;
+    let last_minute_cutoff_ms = end_ms - 60_000;
+
+    format!(
+        "\
+        SELECT \
+          'bucket' AS row_kind, \
+          toUnixTimestamp64Milli(toStartOfMinute(observed_at)) AS bucket_start_ms, \
+          countIf(phase = 'first_frame') AS views, \
+          sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS watch_time_ms, \
+          toUInt64(0) AS unique_viewers, \
+          toUInt64(0) AS active_sessions, \
+          '' AS asset_id \
+        FROM player_events \
+        WHERE organization_id = toUUID('{organization_id}') \
+          AND observed_at >= fromUnixTimestamp64Milli({start_ms}) \
+          AND observed_at < fromUnixTimestamp64Milli({end_ms}) \
+        GROUP BY toStartOfMinute(observed_at) \
+        UNION ALL \
+        SELECT \
+          'totals' AS row_kind, \
+          toInt64(0) AS bucket_start_ms, \
+          countIf(phase = 'first_frame') AS views, \
+          sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS watch_time_ms, \
+          uniqExactIf(playback_session_id, phase = 'first_frame') AS unique_viewers, \
+          uniqExactIf( \
+            playback_session_id, \
+            observed_at >= fromUnixTimestamp64Milli({active_cutoff_ms}) \
+              AND phase IN ('watch_heartbeat', 'first_frame', 'stall_start') \
+          ) AS active_sessions, \
+          '' AS asset_id \
+        FROM player_events \
+        WHERE organization_id = toUUID('{organization_id}') \
+          AND observed_at >= fromUnixTimestamp64Milli({start_ms}) \
+          AND observed_at < fromUnixTimestamp64Milli({end_ms}) \
+        UNION ALL \
+        SELECT \
+          'last_minute' AS row_kind, \
+          toInt64(0) AS bucket_start_ms, \
+          countIf(phase = 'first_frame') AS views, \
+          toUInt64(0) AS watch_time_ms, \
+          toUInt64(0) AS unique_viewers, \
+          toUInt64(0) AS active_sessions, \
+          '' AS asset_id \
+        FROM player_events \
+        WHERE organization_id = toUUID('{organization_id}') \
+          AND observed_at >= fromUnixTimestamp64Milli({last_minute_cutoff_ms}) \
+          AND observed_at < fromUnixTimestamp64Milli({end_ms}) \
+        UNION ALL \
+        SELECT row_kind, bucket_start_ms, views, watch_time_ms, unique_viewers, active_sessions, asset_id \
+        FROM ( \
+          SELECT \
+            'recent' AS row_kind, \
+            toInt64(0) AS bucket_start_ms, \
+            countIf(phase = 'first_frame') AS views, \
+            toUInt64(0) AS watch_time_ms, \
+            toUInt64(0) AS unique_viewers, \
+            toUInt64(0) AS active_sessions, \
+            toString(asset_id) AS asset_id \
+          FROM player_events \
+          WHERE organization_id = toUUID('{organization_id}') \
+            AND observed_at >= fromUnixTimestamp64Milli({recent_cutoff_ms}) \
+            AND observed_at < fromUnixTimestamp64Milli({end_ms}) \
+          GROUP BY asset_id \
+          ORDER BY views DESC \
+          LIMIT 5 \
+        ) \
+        FORMAT JSONEachRow",
+    )
+}
+
 fn clickhouse_analytics_top_assets_query(
     organization_id: &str,
     window: NormalizedPlaybackAnalyticsWindow,
@@ -2038,6 +2204,23 @@ fn normalize_overview_window(
     })
 }
 
+fn normalize_live_window(
+    query: AnalyticsLiveQuery,
+    now: DateTime<Utc>,
+) -> std::result::Result<NormalizedPlaybackAnalyticsWindow, AppError> {
+    let window_seconds = query
+        .window_seconds
+        .unwrap_or(DEFAULT_LIVE_WINDOW_SECS)
+        .clamp(60, MAX_LIVE_WINDOW_SECS);
+    let duration = ChronoDuration::seconds(
+        i64::try_from(window_seconds).map_err(|_| AppError::bad_request("window is too large"))?,
+    );
+    Ok(NormalizedPlaybackAnalyticsWindow {
+        started_at: now - duration,
+        ended_at: now,
+    })
+}
+
 fn playback_analytics_response(
     asset_id: String,
     window: NormalizedPlaybackAnalyticsWindow,
@@ -2170,6 +2353,72 @@ fn analytics_overview_response(
             .collect(),
         breakdowns: analytics_breakdowns_response(breakdown_rows),
         previous,
+    }
+}
+
+fn analytics_live_response(
+    window: NormalizedPlaybackAnalyticsWindow,
+    fetched_at: DateTime<Utc>,
+    rows: Vec<ClickHouseLiveAnalyticsRow>,
+) -> AnalyticsLiveResponse {
+    let mut views = 0_u64;
+    let mut watch_time_ms = 0_u64;
+    let mut unique_viewers = 0_u64;
+    let mut active_sessions = 0_u64;
+    let mut views_last_minute = 0_u64;
+    let mut bucket_map = BTreeMap::new();
+    let mut recent_assets = Vec::new();
+
+    for row in rows {
+        match row.row_kind.as_str() {
+            "bucket" => {
+                bucket_map.insert(row.bucket_start_ms, (row.views, row.watch_time_ms));
+            }
+            "totals" => {
+                views = row.views;
+                watch_time_ms = row.watch_time_ms;
+                unique_viewers = row.unique_viewers;
+                active_sessions = row.active_sessions;
+            }
+            "last_minute" => {
+                views_last_minute = row.views;
+            }
+            "recent" if row.views > 0 && !row.asset_id.is_empty() => {
+                recent_assets.push(AnalyticsLiveRecentAsset {
+                    asset_id: row.asset_id,
+                    views: row.views,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let minute_ms = 60_000_i64;
+    let end_ms = window.ended_at.timestamp_millis();
+    let mut cursor = (window.started_at.timestamp_millis() / minute_ms) * minute_ms;
+    let mut timeseries = Vec::new();
+    while cursor < end_ms {
+        let (bucket_views, bucket_watch_time_ms) =
+            bucket_map.get(&cursor).copied().unwrap_or((0, 0));
+        timeseries.push(AnalyticsLiveMinutePoint {
+            bucket_start: rfc3339_millis_from_unix_millis(cursor).unwrap_or_default(),
+            views: bucket_views,
+            watch_time_ms: bucket_watch_time_ms,
+        });
+        cursor += minute_ms;
+    }
+
+    AnalyticsLiveResponse {
+        window_started_at: rfc3339_millis(window.started_at),
+        window_ended_at: rfc3339_millis(window.ended_at),
+        fetched_at: rfc3339_millis(fetched_at),
+        views,
+        watch_time_ms,
+        unique_viewers,
+        active_sessions,
+        views_last_minute,
+        timeseries,
+        recent_assets,
     }
 }
 
