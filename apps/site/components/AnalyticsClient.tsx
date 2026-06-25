@@ -3,7 +3,7 @@
 import { RefreshCw } from "lucide-react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AnalyticsBreakdownRow,
   AnalyticsLive,
@@ -12,7 +12,6 @@ import type {
   AnalyticsOverviewResponse,
   AnalyticsTimeSeriesPoint,
 } from "../lib/asset-types.ts";
-import { buildLiveFromOverview } from "../lib/asset-api.ts";
 import { Button } from "@/components/ui/Button";
 import {
   Callout,
@@ -33,6 +32,12 @@ import { StatStrip, type StatItem } from "./analytics/StatStrip";
 import BreakdownPanel, { type BreakdownTabConfig } from "./analytics/BreakdownPanel";
 import type { OverviewChartPoint } from "./analytics/OverviewChart";
 import {
+  LIVE_WINDOW_SECONDS,
+  liveMetaFromAnalytics,
+  overviewFromLiveAnalytics,
+  type LiveAnalyticsMeta,
+} from "./analytics/live-overview";
+import {
   computeDelta,
   formatBytes,
   formatCompact,
@@ -48,13 +53,8 @@ const OverviewChart = dynamic(() => import("./analytics/OverviewChart"), {
   loading: () => <div className="h-[300px] w-full animate-pulse rounded-lg bg-bg-sunken/40" />,
 });
 
-const LiveView = dynamic(() => import("./analytics/LiveView"), {
-  ssr: false,
-  loading: () => <div className="h-[480px] w-full animate-pulse rounded-2xl bg-bg-sunken/40" />,
-});
-
 type ViewMode = "overview" | "live";
-const LIVE_POLL_MS = 20_000;
+const LIVE_POLL_MS = 5_000;
 const OVERVIEW_POLL_MS = 30_000;
 
 type WindowOption = { label: string; seconds: number };
@@ -64,8 +64,9 @@ const WINDOW_OPTIONS: WindowOption[] = [
   { label: "30d", seconds: 30 * 24 * 60 * 60 },
 ];
 
-type Granularity = "hourly" | "daily";
+type Granularity = "minute" | "hourly" | "daily";
 
+const minuteFormatter = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" });
 const hourFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric" });
 const dayFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 
@@ -78,12 +79,13 @@ function dayKey(date: Date) {
 }
 
 function prepareSeries(points: AnalyticsTimeSeriesPoint[], granularity: Granularity): OverviewChartPoint[] {
-  if (granularity === "hourly") {
+  if (granularity === "minute" || granularity === "hourly") {
+    const formatter = granularity === "minute" ? minuteFormatter : hourFormatter;
     return points.map((point) => {
       const date = new Date(point.bucket_start);
       return {
         key: point.bucket_start,
-        label: hourFormatter.format(date),
+        label: formatter.format(date),
         views: point.views,
         watch_time_ms: point.watch_time_ms,
         request_count: point.request_count,
@@ -115,6 +117,36 @@ function prepareSeries(points: AnalyticsTimeSeriesPoint[], granularity: Granular
   return [...grouped.values()];
 }
 
+function formatUpdatedAgo(fetchedAt: string) {
+  const deltaMs = Date.now() - new Date(fetchedAt).getTime();
+  const seconds = Math.max(0, Math.round(deltaMs / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+async function requestOverview(windowSeconds: number): Promise<AnalyticsOverview> {
+  const response = await fetch(`/api/analytics/overview?windowSeconds=${windowSeconds}`, {
+    cache: "no-store",
+  });
+  const body = (await response.json()) as AnalyticsOverviewResponse | { message?: string };
+  if (!response.ok || !("analytics" in body)) {
+    throw new Error("message" in body && body.message ? body.message : "Analytics refresh failed");
+  }
+  return body.analytics;
+}
+
+async function requestLive(): Promise<AnalyticsLive> {
+  const response = await fetch(`/api/analytics/live?windowSeconds=${LIVE_WINDOW_SECONDS}`, {
+    cache: "no-store",
+  });
+  const body = (await response.json()) as AnalyticsLiveResponse | { message?: string };
+  if (!response.ok || !("live" in body)) {
+    throw new Error("message" in body && body.message ? body.message : "Live analytics refresh failed");
+  }
+  return body.live;
+}
+
 export default function AnalyticsClient({
   initialAnalytics,
   initialError = "",
@@ -123,26 +155,25 @@ export default function AnalyticsClient({
   initialError?: string;
 }) {
   const [analytics, setAnalytics] = useState(initialAnalytics);
-  const [live, setLive] = useState<AnalyticsLive | null>(null);
+  const [liveAnalytics, setLiveAnalytics] = useState<AnalyticsOverview | null>(null);
+  const [liveMeta, setLiveMeta] = useState<LiveAnalyticsMeta | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [windowSeconds, setWindowSeconds] = useState(WINDOW_OPTIONS[0].seconds);
   const [granularity, setGranularity] = useState<Granularity>(defaultGranularity(WINDOW_OPTIONS[0].seconds));
   const [loading, setLoading] = useState(false);
   const [liveLoading, setLiveLoading] = useState(false);
   const [error, setError] = useState(initialError);
+  const liveAnalyticsRef = useRef(liveAnalytics);
+
+  useEffect(() => {
+    liveAnalyticsRef.current = liveAnalytics;
+  }, [liveAnalytics]);
 
   const refresh = useCallback(async (nextWindowSeconds: number) => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`/api/analytics/overview?windowSeconds=${nextWindowSeconds}`, {
-        cache: "no-store",
-      });
-      const body = (await response.json()) as AnalyticsOverviewResponse | { message?: string };
-      if (!response.ok || !("analytics" in body)) {
-        throw new Error("message" in body && body.message ? body.message : "Analytics refresh failed");
-      }
-      setAnalytics(body.analytics);
+      setAnalytics(await requestOverview(nextWindowSeconds));
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Analytics refresh failed");
     } finally {
@@ -154,27 +185,45 @@ export default function AnalyticsClient({
     void refresh(windowSeconds);
   }, [refresh, windowSeconds]);
 
-  const refreshLive = useCallback(async () => {
-    setLiveLoading(true);
-    setError("");
+  const refreshLive = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
+    if (!background) setLiveLoading(true);
+    if (!background || !liveAnalyticsRef.current) setError("");
     try {
-      const response = await fetch("/api/analytics/live", { cache: "no-store" });
-      const body = (await response.json()) as AnalyticsLiveResponse | { message?: string };
-      if (!response.ok || !("live" in body)) {
-        throw new Error("message" in body && body.message ? body.message : "Live analytics refresh failed");
-      }
-      setLive(body.live);
-    } catch (refreshError) {
-      if (analytics) {
-        setLive(buildLiveFromOverview(analytics, 60 * 60));
+      const [liveResult, overviewResult] = await Promise.allSettled([
+        requestLive(),
+        requestOverview(LIVE_WINDOW_SECONDS),
+      ]);
+      const overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;
+
+      if (liveResult.status === "fulfilled") {
+        const live = liveResult.value;
+        setLiveAnalytics(overviewFromLiveAnalytics(live, overview ?? liveAnalyticsRef.current));
+        setLiveMeta(liveMetaFromAnalytics(live));
         setError("");
-      } else {
+        return;
+      }
+
+      if (overview) {
+        setLiveAnalytics(overview);
+        setLiveMeta({
+          activeSessions: 0,
+          fetchedAt: new Date().toISOString(),
+          resolution: "hourly",
+          viewsLastMinute: 0,
+        });
+        setError("");
+        return;
+      }
+
+      throw liveResult.reason;
+    } catch (refreshError) {
+      if (!background || !liveAnalyticsRef.current) {
         setError(refreshError instanceof Error ? refreshError.message : "Live analytics refresh failed");
       }
     } finally {
-      setLiveLoading(false);
+      if (!background) setLiveLoading(false);
     }
-  }, [analytics]);
+  }, []);
 
   useEffect(() => {
     if (viewMode !== "overview") return;
@@ -194,13 +243,13 @@ export default function AnalyticsClient({
 
   useEffect(() => {
     if (viewMode !== "live") return;
-    void refreshLive();
-    const onFocus = () => refreshLive();
+    void refreshLive({ background: Boolean(liveAnalyticsRef.current) });
+    const onFocus = () => refreshLive({ background: true });
     const onVisibilityChange = () => {
-      if (!document.hidden) refreshLive();
+      if (!document.hidden) refreshLive({ background: true });
     };
     const interval = window.setInterval(() => {
-      if (!document.hidden) refreshLive();
+      if (!document.hidden) refreshLive({ background: true });
     }, LIVE_POLL_MS);
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -211,15 +260,18 @@ export default function AnalyticsClient({
     };
   }, [refreshLive, viewMode]);
 
+  useEffect(() => {
+    if (viewMode !== "live") return;
+    const interval = window.setInterval(() => {
+      setLiveMeta((current) => (current ? { ...current } : current));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [viewMode]);
+
   function selectViewMode(nextMode: ViewMode) {
     setViewMode(nextMode);
     setError("");
-    if (nextMode === "live") {
-      if (analytics) {
-        setLive(buildLiveFromOverview(analytics, 60 * 60));
-      }
-      void refreshLive();
-    }
+    if (nextMode === "live" && viewMode === "live") void refreshLive();
   }
 
   function selectWindow(nextWindowSeconds: number) {
@@ -229,15 +281,20 @@ export default function AnalyticsClient({
     void refresh(nextWindowSeconds);
   }
 
+  const visibleAnalytics = viewMode === "live" ? liveAnalytics : analytics;
+  const effectiveGranularity =
+    viewMode === "live" ? (liveMeta?.resolution === "hourly" ? "hourly" : "minute") : granularity;
+  const activeLoading = viewMode === "live" ? liveLoading && !liveAnalytics : loading;
+
   const byDimension = useMemo(() => {
     const map = new Map<string, AnalyticsBreakdownRow[]>();
-    for (const breakdown of analytics?.breakdowns ?? []) map.set(breakdown.dimension, breakdown.rows);
+    for (const breakdown of visibleAnalytics?.breakdowns ?? []) map.set(breakdown.dimension, breakdown.rows);
     return map;
-  }, [analytics?.breakdowns]);
+  }, [visibleAnalytics?.breakdowns]);
 
   const series = useMemo(
-    () => prepareSeries(analytics?.timeseries ?? [], granularity),
-    [analytics?.timeseries, granularity]
+    () => prepareSeries(visibleAnalytics?.timeseries ?? [], effectiveGranularity),
+    [visibleAnalytics?.timeseries, effectiveGranularity]
   );
 
   const rowsFor = useCallback(
@@ -254,7 +311,7 @@ export default function AnalyticsClient({
           className={cn(
             "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12.5px] font-medium transition-colors",
             viewMode === "live"
-              ? "bg-[#0c1117] text-white shadow-[0_0_0_1px_rgba(20,184,166,0.35)]"
+              ? "bg-ink text-bg"
               : "text-muted hover:bg-bg-sunken hover:text-ink"
           )}
         >
@@ -290,37 +347,38 @@ export default function AnalyticsClient({
         variant="secondary"
         size="sm"
         className="rounded-md"
-        onClick={viewMode === "live" ? refreshLive : refreshCurrentWindow}
-        disabled={viewMode === "live" ? liveLoading : loading}
+        onClick={viewMode === "live" ? () => refreshLive() : refreshCurrentWindow}
+        disabled={activeLoading}
       >
-        <RefreshCw className={cn("size-3.5", (viewMode === "live" ? liveLoading : loading) && "animate-spin")} />
-        {viewMode === "live" ? (liveLoading ? "Syncing" : "Sync") : loading ? "Refreshing" : "Refresh"}
+        <RefreshCw className={cn("size-3.5", activeLoading && "animate-spin")} />
+        {activeLoading ? "Refreshing" : "Refresh"}
       </Button>
     </>
   );
 
   const statItems: StatItem[] = useMemo(() => {
-    if (!analytics) return [];
-    const prev = analytics.previous;
-    const avgWatch = analytics.views > 0 ? analytics.watch_time_ms / analytics.views : 0;
+    if (!visibleAnalytics) return [];
+    const prev = visibleAnalytics.previous;
+    const avgWatch = visibleAnalytics.views > 0 ? visibleAnalytics.watch_time_ms / visibleAnalytics.views : 0;
     const prevAvgWatch = prev && prev.views > 0 ? prev.watch_time_ms / prev.views : undefined;
-    const completionRate = analytics.views > 0 ? analytics.completions / analytics.views : 0;
+    const completionRate = visibleAnalytics.views > 0 ? visibleAnalytics.completions / visibleAnalytics.views : 0;
     const prevCompletionRate = prev && prev.views > 0 ? prev.completions / prev.views : undefined;
     return [
-      { label: "Views", value: formatNumber(analytics.views), delta: computeDelta(analytics.views, prev?.views) },
+      { label: "Views", value: formatNumber(visibleAnalytics.views), delta: computeDelta(visibleAnalytics.views, prev?.views) },
       {
         label: "Unique viewers",
-        value: formatNumber(analytics.unique_viewers),
-        delta: computeDelta(analytics.unique_viewers, prev?.unique_viewers),
+        value: formatNumber(visibleAnalytics.unique_viewers),
+        delta: computeDelta(visibleAnalytics.unique_viewers, prev?.unique_viewers),
+        hint: viewMode === "live" && liveMeta ? `${formatNumber(liveMeta.activeSessions)} watching now` : undefined,
       },
       {
         label: "Watch time",
-        value: formatWatchTime(analytics.watch_time_ms),
-        delta: computeDelta(analytics.watch_time_ms, prev?.watch_time_ms),
+        value: formatWatchTime(visibleAnalytics.watch_time_ms),
+        delta: computeDelta(visibleAnalytics.watch_time_ms, prev?.watch_time_ms),
       },
       {
         label: "Avg watch",
-        value: analytics.views > 0 ? formatWatchTime(avgWatch) : "-",
+        value: visibleAnalytics.views > 0 ? formatWatchTime(avgWatch) : "-",
         delta: computeDelta(avgWatch, prevAvgWatch),
       },
       {
@@ -330,17 +388,17 @@ export default function AnalyticsClient({
       },
       {
         label: "Startup",
-        value: formatPercent(analytics.startup_success_rate),
-        delta: computeDelta(analytics.startup_success_rate, prev?.startup_success_rate),
+        value: formatPercent(visibleAnalytics.startup_success_rate),
+        delta: computeDelta(visibleAnalytics.startup_success_rate, prev?.startup_success_rate),
       },
       {
         label: "Rebuffer",
-        value: formatPercent(analytics.rebuffer_ratio),
+        value: formatPercent(visibleAnalytics.rebuffer_ratio),
         invertDelta: true,
-        delta: computeDelta(analytics.rebuffer_ratio, prev?.rebuffer_ratio),
+        delta: computeDelta(visibleAnalytics.rebuffer_ratio, prev?.rebuffer_ratio),
       },
     ];
-  }, [analytics]);
+  }, [liveMeta, viewMode, visibleAnalytics]);
 
   const sourceTabs: BreakdownTabConfig[] = [
     { key: "channel", label: "Channel", kind: "channel", rows: rowsFor("channel") },
@@ -356,7 +414,7 @@ export default function AnalyticsClient({
     { key: "city", label: "City", kind: "geo", rows: rowsFor("city") },
   ];
 
-  const assetRows: AnalyticsBreakdownRow[] = (analytics?.top_assets ?? []).map((asset) => ({
+  const assetRows: AnalyticsBreakdownRow[] = (visibleAnalytics?.top_assets ?? []).map((asset) => ({
     value: asset.asset_id,
     views: asset.views,
     unique_viewers: 0,
@@ -394,25 +452,17 @@ export default function AnalyticsClient({
       <DashboardContent>
         {error ? <Callout tone="danger">{error}</Callout> : null}
 
-        {viewMode === "live" ? (
-          live ? (
-            <LiveView live={live} loading={liveLoading} />
-          ) : liveLoading ? (
-            <div className="h-[480px] animate-pulse rounded-2xl bg-bg-sunken/40" />
-          ) : error ? null : (
-            <Panel>
-              <p className="text-[13.5px] text-muted">No live analytics available yet.</p>
-            </Panel>
-          )
-        ) : null}
-
-        {viewMode === "overview" && !analytics && !error ? (
+        {activeLoading ? (
+          <div className="h-[480px] animate-pulse rounded-xl bg-bg-sunken/40" />
+        ) : !visibleAnalytics && !error ? (
           <Panel>
-            <p className="text-[13.5px] text-muted">No analytics available yet.</p>
+            <p className="text-[13.5px] text-muted">
+              {viewMode === "live" ? "No live analytics available yet." : "No analytics available yet."}
+            </p>
           </Panel>
         ) : null}
 
-        {viewMode === "overview" && analytics ? (
+        {visibleAnalytics ? (
           <div className="flex flex-col gap-4">
             <StatStrip items={statItems} />
 
@@ -428,23 +478,34 @@ export default function AnalyticsClient({
                     Watch time
                   </span>
                 </div>
-                <div className="flex items-center rounded-md border border-line bg-bg-sunken/60 p-0.5">
-                  {(["daily", "hourly"] as const).map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      onClick={() => setGranularity(option)}
-                      className={cn(
-                        "rounded px-2.5 py-1 text-[11.5px] font-medium capitalize transition-colors",
-                        granularity === option
-                          ? "bg-card text-ink shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-                          : "text-muted hover:text-ink"
-                      )}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
+                {viewMode === "live" && liveMeta ? (
+                  <div className="flex shrink-0 items-center gap-2 text-[11.5px] text-muted">
+                    <span className="relative flex size-2">
+                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-live/50 motion-reduce:animate-none" />
+                      <span className="relative inline-flex size-2 rounded-full bg-live" />
+                    </span>
+                    <span>Live</span>
+                    <span className="text-faint">Updated {formatUpdatedAgo(liveMeta.fetchedAt)}</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center rounded-md border border-line bg-bg-sunken/60 p-0.5">
+                    {(["daily", "hourly"] as const).map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => setGranularity(option)}
+                        className={cn(
+                          "rounded px-2.5 py-1 text-[11.5px] font-medium capitalize transition-colors",
+                          granularity === option
+                            ? "bg-card text-ink shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+                            : "text-muted hover:text-ink"
+                        )}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="px-2 py-3 sm:px-3">
                 {series.length === 0 ? (
@@ -513,24 +574,24 @@ export default function AnalyticsClient({
             </Panel>
 
             <StatGrid>
-              <Stat label="Requests" value={formatCompact(analytics.request_count)} hint="Edge artifact requests" />
-              <Stat label="Cache hit" value={formatPercent(analytics.cache_hit_rate)} hint="Edge request rollup" />
+              <Stat label="Requests" value={formatCompact(visibleAnalytics.request_count)} hint="Edge artifact requests" />
+              <Stat label="Cache hit" value={formatPercent(visibleAnalytics.cache_hit_rate)} hint="Edge request rollup" />
               <Stat
                 label="Errors"
-                value={formatPercent(analytics.error_rate)}
-                hint={`${formatNumber(analytics.playback_failures)} player failures`}
+                value={formatPercent(visibleAnalytics.error_rate)}
+                hint={`${formatNumber(visibleAnalytics.playback_failures)} player failures`}
               />
               <Stat
                 label="Edge latency"
-                value={formatMs(analytics.request_p95_ms)}
-                hint={`p50 ${formatMs(analytics.request_p50_ms)}`}
+                value={formatMs(visibleAnalytics.request_p95_ms)}
+                hint={`p50 ${formatMs(visibleAnalytics.request_p50_ms)}`}
               />
               <Stat
                 label="Startup p95"
-                value={formatMs(analytics.startup_p95_ms)}
-                hint={`p50 ${formatMs(analytics.startup_p50_ms)}`}
+                value={formatMs(visibleAnalytics.startup_p95_ms)}
+                hint={`p50 ${formatMs(visibleAnalytics.startup_p50_ms)}`}
               />
-              <Stat label="Delivered" value={formatBytes(analytics.bytes_served)} hint="Total bytes served" />
+              <Stat label="Delivered" value={formatBytes(visibleAnalytics.bytes_served)} hint="Total bytes served" />
             </StatGrid>
           </div>
         ) : null}
