@@ -3,6 +3,8 @@ import type {
   AnalyticsBreakdown,
   AnalyticsBreakdownRow,
   AnalyticsLive,
+  AnalyticsLiveMinutePoint,
+  AnalyticsLiveRecentAsset,
   AnalyticsOverview,
   AnalyticsOverviewComparison,
   AssetArtifact,
