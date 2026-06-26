@@ -17,6 +17,9 @@ const defaultProviderUrls = {
   mux: "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
   cloudfront: "https://v.cap.so/mezzanine.mp4",
   rend_edge_static: "http://127.0.0.1:8125/index.html",
+  rend_prod_embed: "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+  tigris_direct_mp4: "http://127.0.0.1:8125/tigris-direct-mp4/index.html",
+  tigris_direct_hls: "http://127.0.0.1:8125/tigris-direct-hls/index.html",
 };
 
 function providerUrl(providerId) {
@@ -57,11 +60,30 @@ const providerCatalog = {
     url: providerUrl("rend_edge_static"),
     playerHost: providerHost(providerUrl("rend_edge_static")),
   },
+  rend_prod_embed: {
+    id: "rend_prod_embed",
+    name: "Rend prod embed",
+    url: providerUrl("rend_prod_embed"),
+    playerHost: providerHost(providerUrl("rend_prod_embed")),
+  },
+  tigris_direct_mp4: {
+    id: "tigris_direct_mp4",
+    name: "Tigris direct MP4",
+    url: providerUrl("tigris_direct_mp4"),
+    playerHost: providerHost(providerUrl("tigris_direct_mp4")),
+  },
+  tigris_direct_hls: {
+    id: "tigris_direct_hls",
+    name: "Tigris direct HLS",
+    url: providerUrl("tigris_direct_hls"),
+    playerHost: providerHost(providerUrl("tigris_direct_hls")),
+  },
 };
 
 const metricLabels = {
   timeToPlayerReadyMs: "Navigation to player ready",
   timeToMetadataMs: "Time to metadata",
+  timeToLoadedDataMs: "Time to first loaded frame",
   timeToCanplayMs: "Time to canplay",
   timeToFirstFrameMs: "Time to first frame",
   totalDurationMs: "Total test duration",
