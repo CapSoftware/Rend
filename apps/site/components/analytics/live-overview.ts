@@ -113,3 +113,32 @@ export function liveMetaFromAnalytics(live: AnalyticsLive): LiveAnalyticsMeta {
     viewsLastMinute: live.views_last_minute,
   };
 }
+
+export function viewsInLastMinutes(
+  timeseries: AnalyticsTimeSeriesPoint[],
+  minutes: number,
+  nowMs = Date.now()
+) {
+  const cutoff = nowMs - minutes * 60_000;
+  let views = 0;
+  for (const point of timeseries) {
+    const bucketMs = pointMillis(point);
+    if (bucketMs !== null && bucketMs >= cutoff) views += point.views;
+  }
+  return views;
+}
+
+export function formatLiveActivityLabel(
+  meta: LiveAnalyticsMeta,
+  timeseries: AnalyticsTimeSeriesPoint[],
+  nowMs = Date.now()
+) {
+  const recentViews = viewsInLastMinutes(timeseries, 2, nowMs);
+  if (recentViews > 0) {
+    return `${recentViews.toLocaleString()} ${recentViews === 1 ? "view" : "views"} in the last 2 min`;
+  }
+  if (meta.activeSessions > 0) {
+    return `${meta.activeSessions.toLocaleString()} watching now`;
+  }
+  return "Quiet in the last 2 min";
+}
