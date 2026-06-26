@@ -716,7 +716,7 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
       providerOrderByRound,
     },
     source: {
-      urls: Object.fromEntries(providers.map((provider) => [provider.id, provider.url])),
+      urls: Object.fromEntries(providers.map((provider) => [provider.id, sanitizeUrl(provider.url)])),
       verification: sourceVerification,
     },
     fairness: {
@@ -748,7 +748,11 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
         bun: process.versions.bun || null,
       },
     },
-    providers,
+    providers: providers.map((provider) => ({
+      ...provider,
+      url: sanitizeUrl(provider.url),
+      ...(provider.preflightUrl ? { preflightUrl: sanitizeUrl(provider.preflightUrl) } : {}),
+    })),
     regions: [{ id: options.region, label: options.regionLabel, runnerKind: options.runnerKind }],
     summary: {
       result: sufficientForPublication
