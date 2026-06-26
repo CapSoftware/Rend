@@ -325,9 +325,14 @@ function sanitizeUrl(value) {
   if (value.startsWith("data:")) return "data:redacted";
   try {
     const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
+    return `${url.origin}${url.pathname}`.replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      "<asset-id>",
+    );
   } catch {
-    return value.slice(0, 180);
+    return value
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asset-id>")
+      .slice(0, 180);
   }
 }
 
