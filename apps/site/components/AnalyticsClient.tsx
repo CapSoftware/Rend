@@ -33,6 +33,7 @@ import BreakdownPanel, { type BreakdownTabConfig } from "./analytics/BreakdownPa
 import type { OverviewChartPoint } from "./analytics/OverviewChart";
 import {
   LIVE_WINDOW_SECONDS,
+  formatLiveActivityLabel,
   liveMetaFromAnalytics,
   overviewFromLiveAnalytics,
   type LiveAnalyticsMeta,
@@ -56,6 +57,11 @@ const OverviewChart = dynamic(() => import("./analytics/OverviewChart"), {
 type ViewMode = "overview" | "live";
 const LIVE_POLL_MS = 5_000;
 const OVERVIEW_POLL_MS = 30_000;
+const ANALYTICS_VIEW_STORAGE_KEY = "rend.analytics.view";
+
+type StoredAnalyticsView =
+  | { mode: "live" }
+  | { mode: "overview"; windowSeconds: number };
 
 type WindowOption = { label: string; seconds: number };
 const WINDOW_OPTIONS: WindowOption[] = [
@@ -117,12 +123,28 @@ function prepareSeries(points: AnalyticsTimeSeriesPoint[], granularity: Granular
   return [...grouped.values()];
 }
 
-function formatUpdatedAgo(fetchedAt: string) {
-  const deltaMs = Date.now() - new Date(fetchedAt).getTime();
-  const seconds = Math.max(0, Math.round(deltaMs / 1000));
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  return `${Math.round(seconds / 60)}m ago`;
+function readStoredAnalyticsView(): StoredAnalyticsView | null {
+  try {
+    const raw = localStorage.getItem(ANALYTICS_VIEW_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredAnalyticsView>;
+    if (parsed.mode === "live") return { mode: "live" };
+    if (parsed.mode === "overview" && typeof parsed.windowSeconds === "number") {
+      const valid = WINDOW_OPTIONS.some((option) => option.seconds === parsed.windowSeconds);
+      if (valid) return { mode: "overview", windowSeconds: parsed.windowSeconds };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function writeStoredAnalyticsView(view: StoredAnalyticsView) {
+  try {
+    localStorage.setItem(ANALYTICS_VIEW_STORAGE_KEY, JSON.stringify(view));
+  } catch {
+    return;
+  }
 }
 
 async function requestOverview(windowSeconds: number): Promise<AnalyticsOverview> {
@@ -164,26 +186,37 @@ export default function AnalyticsClient({
   const [liveLoading, setLiveLoading] = useState(false);
   const [error, setError] = useState(initialError);
   const liveAnalyticsRef = useRef(liveAnalytics);
+  const analyticsRef = useRef(analytics);
+  const restoredViewRef = useRef(false);
 
   useEffect(() => {
     liveAnalyticsRef.current = liveAnalytics;
   }, [liveAnalytics]);
 
-  const refresh = useCallback(async (nextWindowSeconds: number) => {
-    setLoading(true);
-    setError("");
+  useEffect(() => {
+    analyticsRef.current = analytics;
+  }, [analytics]);
+
+  const refresh = useCallback(async (nextWindowSeconds: number, { background = false }: { background?: boolean } = {}) => {
+    if (!background) setLoading(true);
+    if (!background || !analyticsRef.current) setError("");
     try {
       setAnalytics(await requestOverview(nextWindowSeconds));
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Analytics refresh failed");
+      if (!background || !analyticsRef.current) {
+        setError(refreshError instanceof Error ? refreshError.message : "Analytics refresh failed");
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, []);
 
-  const refreshCurrentWindow = useCallback(() => {
-    void refresh(windowSeconds);
-  }, [refresh, windowSeconds]);
+  const refreshCurrentWindow = useCallback(
+    ({ background = false }: { background?: boolean } = {}) => {
+      void refresh(windowSeconds, { background });
+    },
+    [refresh, windowSeconds]
+  );
 
   const refreshLive = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
     if (!background) setLiveLoading(true);
@@ -226,12 +259,35 @@ export default function AnalyticsClient({
   }, []);
 
   useEffect(() => {
+    if (restoredViewRef.current) return;
+    restoredViewRef.current = true;
+    const stored = readStoredAnalyticsView();
+    if (!stored) return;
+    if (stored.mode === "live") {
+      setViewMode("live");
+      return;
+    }
+    if (stored.windowSeconds !== WINDOW_OPTIONS[0].seconds) {
+      setWindowSeconds(stored.windowSeconds);
+      setGranularity(defaultGranularity(stored.windowSeconds));
+      void refresh(stored.windowSeconds, { background: Boolean(analyticsRef.current) });
+    }
+  }, [refresh]);
+
+  useEffect(() => {
+    writeStoredAnalyticsView(
+      viewMode === "live" ? { mode: "live" } : { mode: "overview", windowSeconds }
+    );
+  }, [viewMode, windowSeconds]);
+
+  useEffect(() => {
     if (viewMode !== "overview") return;
-    const onFocus = () => refreshCurrentWindow();
+    const refreshOnReturn = () => refreshCurrentWindow({ background: Boolean(analyticsRef.current) });
+    const onFocus = () => refreshOnReturn();
     const onVisibilityChange = () => {
-      if (!document.hidden) refreshCurrentWindow();
+      if (!document.hidden) refreshOnReturn();
     };
-    const interval = window.setInterval(refreshCurrentWindow, OVERVIEW_POLL_MS);
+    const interval = window.setInterval(refreshOnReturn, OVERVIEW_POLL_MS);
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
@@ -260,14 +316,6 @@ export default function AnalyticsClient({
     };
   }, [refreshLive, viewMode]);
 
-  useEffect(() => {
-    if (viewMode !== "live") return;
-    const interval = window.setInterval(() => {
-      setLiveMeta((current) => (current ? { ...current } : current));
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [viewMode]);
-
   function selectViewMode(nextMode: ViewMode) {
     setViewMode(nextMode);
     setError("");
@@ -278,13 +326,15 @@ export default function AnalyticsClient({
     setViewMode("overview");
     setWindowSeconds(nextWindowSeconds);
     setGranularity(defaultGranularity(nextWindowSeconds));
-    void refresh(nextWindowSeconds);
+    void refresh(nextWindowSeconds, { background: Boolean(analyticsRef.current) });
   }
 
   const visibleAnalytics = viewMode === "live" ? liveAnalytics : analytics;
   const effectiveGranularity =
     viewMode === "live" ? (liveMeta?.resolution === "hourly" ? "hourly" : "minute") : granularity;
-  const activeLoading = viewMode === "live" ? liveLoading && !liveAnalytics : loading;
+  const showInitialSkeleton =
+    viewMode === "live" ? liveLoading && !liveAnalytics : loading && !analytics;
+  const isRefreshing = viewMode === "live" ? liveLoading : loading;
 
   const byDimension = useMemo(() => {
     const map = new Map<string, AnalyticsBreakdownRow[]>();
@@ -347,11 +397,11 @@ export default function AnalyticsClient({
         variant="secondary"
         size="sm"
         className="rounded-md"
-        onClick={viewMode === "live" ? () => refreshLive() : refreshCurrentWindow}
-        disabled={activeLoading}
+        onClick={viewMode === "live" ? () => refreshLive() : () => refreshCurrentWindow()}
+        disabled={isRefreshing}
       >
-        <RefreshCw className={cn("size-3.5", activeLoading && "animate-spin")} />
-        {activeLoading ? "Refreshing" : "Refresh"}
+        <RefreshCw className={cn("size-3.5", isRefreshing && "animate-spin")} />
+        {isRefreshing ? "Refreshing" : "Refresh"}
       </Button>
     </>
   );
@@ -452,7 +502,7 @@ export default function AnalyticsClient({
       <DashboardContent>
         {error ? <Callout tone="danger">{error}</Callout> : null}
 
-        {activeLoading ? (
+        {showInitialSkeleton ? (
           <div className="h-[480px] animate-pulse rounded-xl bg-bg-sunken/40" />
         ) : !visibleAnalytics && !error ? (
           <Panel>
@@ -478,14 +528,19 @@ export default function AnalyticsClient({
                     Watch time
                   </span>
                 </div>
-                {viewMode === "live" && liveMeta ? (
+                <div className="flex min-h-8 min-w-[168px] shrink-0 items-center justify-end">
+                {viewMode === "live" ? (
                   <div className="flex shrink-0 items-center gap-2 text-[11.5px] text-muted">
                     <span className="relative flex size-2">
                       <span className="absolute inline-flex size-full animate-ping rounded-full bg-live/50 motion-reduce:animate-none" />
                       <span className="relative inline-flex size-2 rounded-full bg-live" />
                     </span>
                     <span>Live</span>
-                    <span className="text-faint">Updated {formatUpdatedAgo(liveMeta.fetchedAt)}</span>
+                    {liveMeta ? (
+                      <span className="text-faint">
+                        {formatLiveActivityLabel(liveMeta, visibleAnalytics.timeseries)}
+                      </span>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="flex items-center rounded-md border border-line bg-bg-sunken/60 p-0.5">
@@ -506,6 +561,7 @@ export default function AnalyticsClient({
                     ))}
                   </div>
                 )}
+                </div>
               </div>
               <div className="px-2 py-3 sm:px-3">
                 {series.length === 0 ? (
