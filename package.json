@@ -47,6 +47,7 @@
     "playback:readiness": "node scripts/playback-readiness-gate.mjs",
     "benchmark:providers": "node scripts/benchmark-providers.mjs",
     "benchmark:providers:daytona": "node scripts/run-daytona-provider-benchmark.mjs",
+    "benchmark:tigris-vs-edge:prod": "node scripts/run-prod-tigris-vs-edge-benchmark.mjs",
     "backend:benchmark:local": "scripts/benchmark-local-playback.sh",
     "backend:smoke:async-media": "scripts/smoke-async-media.sh",
     "backend:smoke:media": "scripts/smoke-media-artifacts.sh",
