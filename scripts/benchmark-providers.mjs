@@ -137,7 +137,7 @@ function parseArgs(argv) {
     regionLabel: process.env.BENCHMARK_REGION_LABEL || "Local machine",
     runnerKind: process.env.BENCHMARK_RUNNER_KIND || "local",
     runnerLabel: process.env.BENCHMARK_RUNNER_LABEL || os.hostname(),
-    browserChannel: process.env.BENCHMARK_BROWSER_CHANNEL || "chrome",
+    browserChannel: process.env.BENCHMARK_BROWSER_CHANNEL ?? "chrome",
     allowBundledChromium: process.env.BENCHMARK_ALLOW_BUNDLED_CHROMIUM === "1",
     publicCopy: process.env.BENCHMARK_PUBLIC_COPY !== "0",
     viewport: parseViewport(process.env.BENCHMARK_VIEWPORT || "1280x720"),
@@ -547,6 +547,7 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
     metrics: {
       timeToPlayerReadyMs,
       timeToMetadataMs: finiteOrNull(eventMetrics.loadedmetadataMs),
+      timeToLoadedDataMs: finiteOrNull(eventMetrics.loadeddataMs),
       timeToCanplayMs: finiteOrNull(eventMetrics.canplayMs),
       timeToFirstFrameMs,
       totalDurationMs: roundMs(sampleEnded - sampleStarted),
