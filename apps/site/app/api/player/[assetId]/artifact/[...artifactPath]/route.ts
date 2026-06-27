@@ -27,6 +27,7 @@ type PlaybackBaseDecision = {
 };
 
 const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
+const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -107,6 +108,21 @@ function playbackMode() {
   return envString("REND_PLAYBACK_MODE", "tigris").toLowerCase() === "edge"
     ? "edge"
     : "tigris";
+}
+
+function defaultTigrisPlaybackBaseUrl(request: Request) {
+  const host = new URL(request.url).hostname.toLowerCase();
+  return host === "rend.so" || host === "www.rend.so"
+    ? "https://api.rend.so"
+    : DEFAULT_API_BASE_URL;
+}
+
+function tigrisPlaybackBaseUrl(request: Request) {
+  return normalizePlaybackBaseUrl(
+    envString("REND_TIGRIS_PLAYBACK_BASE_URL") ||
+      envString("REND_API_BASE_URL") ||
+      defaultTigrisPlaybackBaseUrl(request),
+  );
 }
 
 function playbackBaseDecision(request: Request): PlaybackBaseDecision {
@@ -360,6 +376,35 @@ export async function GET(
     ) {
       return artifactResponseFromEdge(
         edgeResponse,
+        normalizedAssetId,
+        normalizedArtifactPath,
+        targetUrl,
+        linkPlaybackBaseUrl,
+      );
+    }
+  }
+  if (playbackCookie && playbackMode() !== "edge") {
+    const targetUrl = directArtifactUrl(
+      normalizedAssetId,
+      normalizedArtifactPath,
+      tigrisPlaybackBaseUrl(request),
+    );
+    const originResponse = await fetch(targetUrl, {
+      cache: "no-store",
+      headers: playbackArtifactFetchHeaders(
+        request.headers,
+        playbackCookie,
+        normalizedArtifactPath,
+      ),
+    }).catch(() => null);
+
+    if (
+      originResponse &&
+      originResponse.status !== 401 &&
+      originResponse.status !== 403
+    ) {
+      return artifactResponseFromEdge(
+        originResponse,
         normalizedAssetId,
         normalizedArtifactPath,
         targetUrl,

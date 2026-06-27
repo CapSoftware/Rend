@@ -186,6 +186,94 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
   }
 });
 
+test("artifact route uses Tigris origin with playback cookie when bootstrap cache is cold", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalPlaybackMode = process.env.REND_PLAYBACK_MODE;
+  const originalApiBaseUrl = process.env.REND_API_BASE_URL;
+  const originalTigrisPlaybackBaseUrl =
+    process.env.REND_TIGRIS_PLAYBACK_BASE_URL;
+  const fetches: Array<{ url: string; headers: Headers }> = [];
+  clearPlaybackBootstrapCache();
+  process.env.REND_PLAYBACK_MODE = "tigris";
+  process.env.REND_API_BASE_URL = "https://api.rend.so";
+  delete process.env.REND_TIGRIS_PLAYBACK_BASE_URL;
+
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    fetches.push({
+      url: String(url),
+      headers: new Headers(init?.headers),
+    });
+    return new Response("#EXTM3U\n#EXTINF:2.000000,\nsegment_00000.ts\n", {
+      status: 200,
+      headers: {
+        "content-type": "application/vnd.apple.mpegurl",
+        "x-rend-origin": "tigris",
+      },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await getPlaybackArtifact(
+      new Request(
+        `https://www.rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8`,
+        {
+          headers: {
+            cookie: "__rend_playback=v1.claims.signature",
+          },
+        },
+      ),
+      {
+        params: Promise.resolve({
+          assetId: ASSET_ID,
+          artifactPath: ["hls", "720p", "index.m3u8"],
+        }),
+      },
+    );
+
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(fetches.length, 1);
+    assert.equal(
+      fetches[0]?.url,
+      `https://api.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+    );
+    assert.equal(
+      fetches[0]?.headers.get("cookie"),
+      "__rend_playback=v1.claims.signature",
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts`,
+      ),
+    );
+    assert.doesNotMatch(body, /playbackBaseUrl=/);
+    assert.equal(response.headers.get("x-rend-origin"), "tigris");
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearPlaybackBootstrapCache();
+    if (originalPlaybackMode === undefined) {
+      delete process.env.REND_PLAYBACK_MODE;
+    } else {
+      process.env.REND_PLAYBACK_MODE = originalPlaybackMode;
+    }
+    if (originalApiBaseUrl === undefined) {
+      delete process.env.REND_API_BASE_URL;
+    } else {
+      process.env.REND_API_BASE_URL = originalApiBaseUrl;
+    }
+    if (originalTigrisPlaybackBaseUrl === undefined) {
+      delete process.env.REND_TIGRIS_PLAYBACK_BASE_URL;
+    } else {
+      process.env.REND_TIGRIS_PLAYBACK_BASE_URL =
+        originalTigrisPlaybackBaseUrl;
+    }
+  }
+});
+
 test("artifact route keeps playback base query for explicit allowlisted overrides", async () => {
   const originalFetch = globalThis.fetch;
   const originalPlaybackBaseUrl = process.env.REND_PLAYER_PLAYBACK_BASE_URL;
