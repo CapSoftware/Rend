@@ -14,8 +14,8 @@ export function GET() {
     "## Core facts",
     "- Rend is video infrastructure for developers: one API call to upload, and one playback URL that starts fast and plays anywhere.",
     "- Encoding, storage and delivery are handled for you. Encoding is included on every upload and never appears as a separate charge.",
-    "- Rend warms the opening seconds of each video onto edge-local RAM and NVMe, close to viewers, so playback starts fast even on a cold request to a video nobody has watched yet.",
-    "- Rend Cloud runs on bare-metal edge nodes in the regions we operate, not shared serverless functions.",
+    "- Rend Cloud currently serves generated HLS from Tigris-backed origin by default, without requiring active edge nodes.",
+    "- The bare-metal edge path remains in the codebase for future reactivation when regional coverage makes it worthwhile.",
     "- Rend is open source: the server is AGPL, the player and SDKs are MIT, and it is the exact code that runs Rend Cloud. Self-hosting is free forever, installs as one binary, and nothing phones home.",
     "- Pricing has two axes, both by resolution: delivery (per second streamed) and storage (per second-month kept). There are no per-minute fees and no surprise egress charges.",
     "- Plans run from pay as you go at $0 up to Enterprise, with monthly credits included on paid tiers and no lock-in.",
@@ -45,7 +45,9 @@ export function GET() {
   lines.push(`- Docs: ${siteOrigin}/docs`);
   lines.push(`- Agent setup: ${siteOrigin}/docs#agent-setup`);
   lines.push(`- OpenAPI contract: ${siteOrigin}/openapi.json`);
-  lines.push("- TypeScript SDK: https://github.com/CapSoftware/Rend/tree/main/packages/sdk");
+  lines.push(
+    "- TypeScript SDK: https://github.com/CapSoftware/Rend/tree/main/packages/sdk",
+  );
   lines.push(`- llms.txt index: ${siteOrigin}/llms.txt`);
   lines.push("");
 

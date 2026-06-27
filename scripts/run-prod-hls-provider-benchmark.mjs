@@ -11,12 +11,35 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const requireFromSite = createRequire(path.join(repoRoot, "apps", "site", "package.json"));
-const runId = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-const localOutDir = path.join(repoRoot, ".rend", "benchmarks", "providers", `prod-tigris-vs-edge-${runId}`);
-const publicOutDir = path.join(repoRoot, "apps", "site", "public", "benchmarks", "providers");
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+const requireFromSite = createRequire(
+  path.join(repoRoot, "apps", "site", "package.json"),
+);
+const runId = new Date()
+  .toISOString()
+  .replace(/[-:]/g, "")
+  .replace(/\.\d{3}Z$/, "Z");
+const localOutDir = path.join(
+  repoRoot,
+  ".rend",
+  "benchmarks",
+  "providers",
+  `prod-hls-providers-${runId}`,
+);
+const publicOutDir = path.join(
+  repoRoot,
+  "apps",
+  "site",
+  "public",
+  "benchmarks",
+  "providers",
+);
 const defaultVideoPath = "/Users/richie/Downloads/mezzanine.mp4";
+const defaultMuxUrl =
+  "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk";
 const defaultProdEnvPath = "/Users/richie/.rend/production/rend-api.env";
 const defaultAutumnApiUrl = "https://api.useautumn.com/v1";
 const defaultAutumnApiVersion = "2.3.0";
@@ -25,58 +48,94 @@ const emptyPayloadHash = sha256Hex(Buffer.alloc(0));
 
 let redactionValues = [];
 
+function envValue(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
 function printHelp() {
-  console.log(`Run a production Daytona benchmark comparing direct Tigris playback and Rend edge playback.
+  console.log(`Run a production Daytona HLS benchmark comparing Rend, Mux, and Rend-generated HLS served directly from Tigris.
 
 Usage:
-  node scripts/run-prod-tigris-vs-edge-benchmark.mjs --video /Users/richie/Downloads/mezzanine.mp4
-  node scripts/run-prod-tigris-vs-edge-benchmark.mjs --samples 5 --watch-ms 15000
+  node scripts/run-prod-hls-provider-benchmark.mjs --video /Users/richie/Downloads/mezzanine.mp4
+  node scripts/run-prod-hls-provider-benchmark.mjs --samples 5
 
 Defaults:
-  Direct Tigris baseline: original MP4 uploaded to Tigris and played from a presigned object URL.
-  Rend baseline: same source uploaded through Rend production, waited until hls_ready, then played through the real production embed route.
-  Cleanup: deletes the production test Rend asset and direct Tigris MP4 object after the run.
+  Rend baseline: source uploaded through Rend production, waited until hls_ready, then played through /watch/{asset_id}?autoplay=1.
+  Rend Tigris-only baseline: the same Rend-generated HLS master, variant playlists, and segments served directly from Tigris object storage.
+  Mux baseline: the benchmark-page Mux player URL unless --mux-url overrides it.
+  Cleanup: deletes the production test Rend asset after the run.
 
 Options:
   --video PATH                 Video file to upload. Defaults to ${defaultVideoPath}
+  --mux-url URL                Mux player URL. Defaults to ${defaultMuxUrl}
   --samples N                  Samples per provider. Defaults to 5.
-  --watch-ms N                 Watch window per sample. Defaults to 15000.
-  --delay-ms N                 Delay between samples. Defaults to 2000.
+  --watch-ms N                 Watch window per sample. Defaults to 30000.
+  --delay-ms N                 Delay between samples. Defaults to 3000.
   --startup-timeout-ms N       Startup timeout per sample. Defaults to 45000.
   --target-candidates CSV      Daytona targets to try. Defaults to us.
-  --edge-base-url URL          Override Rend edge base URL. Defaults to REND_PLAYBACK_BASE_URL.
   --api-base-url URL           Override Rend API base URL. Defaults to https://api.rend.so.
   --plan-id ID                 Autumn plan for auto-provisioned benchmark orgs. Defaults to ${defaultInternalTestPlanId}.
-  --include-direct-hls         Also test Rend-generated HLS artifacts served directly from Tigris.
   --keep-asset                 Do not delete the production Rend test asset after the run.
-  --keep-direct-object         Do not delete the direct Tigris MP4 object after the run.
   --public-copy                Also update apps/site/public/benchmarks/providers/latest*.json.
   --dry-run                    Validate env/options without uploading, creating a sandbox, or writing benchmark artifacts.
 `);
 }
 
 function parseArgs(argv) {
+  const keepAsset = envValue(
+    "REND_HLS_PROVIDER_KEEP_ASSET",
+    "REND_TIGRIS_EDGE_KEEP_ASSET",
+  );
+  const publicCopy = envValue(
+    "REND_HLS_PROVIDER_PUBLIC_COPY",
+    "REND_TIGRIS_EDGE_PUBLIC_COPY",
+  );
   const options = {
-    videoPath: process.env.REND_TIGRIS_EDGE_VIDEO || defaultVideoPath,
-    samples: Number(process.env.REND_TIGRIS_EDGE_SAMPLES || 5),
-    watchMs: Number(process.env.REND_TIGRIS_EDGE_WATCH_MS || 15_000),
-    delayMs: Number(process.env.REND_TIGRIS_EDGE_DELAY_MS || 2_000),
-    startupTimeoutMs: Number(process.env.REND_TIGRIS_EDGE_STARTUP_TIMEOUT_MS || 45_000),
+    videoPath:
+      envValue("REND_HLS_PROVIDER_VIDEO", "REND_TIGRIS_EDGE_VIDEO") ||
+      defaultVideoPath,
+    muxUrl:
+      envValue(
+        "REND_HLS_PROVIDER_MUX_URL",
+        "REND_TIGRIS_EDGE_MUX_URL",
+        "BENCHMARK_MUX_URL",
+      ) || defaultMuxUrl,
+    samples: Number(
+      envValue("REND_HLS_PROVIDER_SAMPLES", "REND_TIGRIS_EDGE_SAMPLES") || 5,
+    ),
+    watchMs: Number(
+      envValue("REND_HLS_PROVIDER_WATCH_MS", "REND_TIGRIS_EDGE_WATCH_MS") ||
+        30_000,
+    ),
+    delayMs: Number(
+      envValue("REND_HLS_PROVIDER_DELAY_MS", "REND_TIGRIS_EDGE_DELAY_MS") ||
+        3_000,
+    ),
+    startupTimeoutMs: Number(
+      envValue(
+        "REND_HLS_PROVIDER_STARTUP_TIMEOUT_MS",
+        "REND_TIGRIS_EDGE_STARTUP_TIMEOUT_MS",
+      ) || 45_000,
+    ),
     targetCandidates: (process.env.DAYTONA_TARGET_CANDIDATES || "us")
       .split(",")
       .map((target) => target.trim())
       .filter(Boolean),
     apiBaseUrl: process.env.REND_PROD_API_BASE_URL || "https://api.rend.so",
     siteBaseUrl: process.env.REND_PROD_SITE_BASE_URL || "https://www.rend.so",
-    edgeBaseUrl: process.env.REND_TIGRIS_EDGE_BASE_URL || "",
     planId:
-      process.env.REND_TIGRIS_EDGE_AUTUMN_PLAN_ID ||
+      envValue(
+        "REND_HLS_PROVIDER_AUTUMN_PLAN_ID",
+        "REND_TIGRIS_EDGE_AUTUMN_PLAN_ID",
+      ) ||
       process.env.REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID ||
       defaultInternalTestPlanId,
-    includeDirectHls: process.env.REND_TIGRIS_EDGE_INCLUDE_DIRECT_HLS === "1",
-    cleanupAsset: process.env.REND_TIGRIS_EDGE_KEEP_ASSET !== "1",
-    cleanupDirectObject: process.env.REND_TIGRIS_EDGE_KEEP_DIRECT_OBJECT !== "1",
-    publicCopy: process.env.REND_TIGRIS_EDGE_PUBLIC_COPY === "1",
+    cleanupAsset: keepAsset !== "1",
+    publicCopy: publicCopy === "1",
     dryRun: false,
   };
 
@@ -89,6 +148,11 @@ function parseArgs(argv) {
     }
     if (arg === "--video") {
       options.videoPath = next;
+      index += 1;
+      continue;
+    }
+    if (arg === "--mux-url") {
+      options.muxUrl = next;
       index += 1;
       continue;
     }
@@ -130,26 +194,13 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
-    if (arg === "--edge-base-url") {
-      options.edgeBaseUrl = next;
-      index += 1;
-      continue;
-    }
     if (arg === "--plan-id") {
       options.planId = next;
       index += 1;
       continue;
     }
-    if (arg === "--include-direct-hls") {
-      options.includeDirectHls = true;
-      continue;
-    }
     if (arg === "--keep-asset") {
       options.cleanupAsset = false;
-      continue;
-    }
-    if (arg === "--keep-direct-object") {
-      options.cleanupDirectObject = false;
       continue;
     }
     if (arg === "--public-copy") {
@@ -165,26 +216,43 @@ function parseArgs(argv) {
 
   validateOptions(options);
   options.videoPath = path.resolve(options.videoPath);
+  options.muxUrl = normalizeBaseUrl(options.muxUrl);
   options.apiBaseUrl = normalizeBaseUrl(options.apiBaseUrl);
   options.siteBaseUrl = normalizeBaseUrl(options.siteBaseUrl);
-  if (options.edgeBaseUrl) options.edgeBaseUrl = normalizeBaseUrl(options.edgeBaseUrl);
   return options;
 }
 
 function validateOptions(options) {
-  if (!Number.isFinite(options.samples) || options.samples < 1 || options.samples > 50) {
+  if (
+    !Number.isFinite(options.samples) ||
+    options.samples < 1 ||
+    options.samples > 50
+  ) {
     throw new Error("--samples must be between 1 and 50");
   }
-  if (!Number.isFinite(options.watchMs) || options.watchMs < 1_000 || options.watchMs > 120_000) {
+  if (
+    !Number.isFinite(options.watchMs) ||
+    options.watchMs < 1_000 ||
+    options.watchMs > 120_000
+  ) {
     throw new Error("--watch-ms must be between 1000 and 120000");
   }
-  if (!Number.isFinite(options.delayMs) || options.delayMs < 0 || options.delayMs > 60_000) {
+  if (
+    !Number.isFinite(options.delayMs) ||
+    options.delayMs < 0 ||
+    options.delayMs > 60_000
+  ) {
     throw new Error("--delay-ms must be between 0 and 60000");
   }
-  if (!Number.isFinite(options.startupTimeoutMs) || options.startupTimeoutMs < 1_000 || options.startupTimeoutMs > 120_000) {
+  if (
+    !Number.isFinite(options.startupTimeoutMs) ||
+    options.startupTimeoutMs < 1_000 ||
+    options.startupTimeoutMs > 120_000
+  ) {
     throw new Error("--startup-timeout-ms must be between 1000 and 120000");
   }
-  if (!options.targetCandidates.length) throw new Error("at least one Daytona target candidate is required");
+  if (!options.targetCandidates.length)
+    throw new Error("at least one Daytona target candidate is required");
   if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(String(options.planId || ""))) {
     throw new Error("--plan-id must be a safe Autumn plan id");
   }
@@ -198,7 +266,7 @@ function normalizeBaseUrl(value) {
 }
 
 function log(message) {
-  console.log(`[prod-tigris-edge] ${message}`);
+  console.log(`[prod-hls-providers] ${message}`);
 }
 
 function parseEnvFile(text) {
@@ -254,7 +322,8 @@ async function loadBenchmarkEnv() {
 
 function requireEnv(env, names) {
   const missing = names.filter((name) => !String(env[name] || "").trim());
-  if (missing.length) throw new Error(`Missing required env: ${missing.join(", ")}`);
+  if (missing.length)
+    throw new Error(`Missing required env: ${missing.join(", ")}`);
 }
 
 function redactText(value) {
@@ -268,25 +337,43 @@ function redactText(value) {
     .replace(/([?&]X-Amz-Credential=)[^&\s"']+/gi, "$1<redacted>")
     .replace(/([?&]X-Amz-Security-Token=)[^&\s"']+/gi, "$1<redacted>")
     .replace(/(token=)[a-z0-9._~-]{12,}/gi, "$1<redacted>")
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asset-id>");
+    .replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      "<asset-id>",
+    );
 }
 
 async function checkedExec(sandbox, command, cwd, env, timeoutSeconds) {
   log(`exec: ${command.replaceAll(/\s+/g, " ").slice(0, 180)}`);
-  const result = await sandbox.process.executeCommand(command, cwd, env, timeoutSeconds);
-  const output = redactText(result.result || result.artifacts?.stdout || "").trim();
+  const result = await sandbox.process.executeCommand(
+    command,
+    cwd,
+    env,
+    timeoutSeconds,
+  );
+  const output = redactText(
+    result.result || result.artifacts?.stdout || "",
+  ).trim();
   if (output) {
-    const clipped = output.length > 5000 ? `${output.slice(-5000)}\n[output clipped]` : output;
+    const clipped =
+      output.length > 5000
+        ? `${output.slice(-5000)}\n[output clipped]`
+        : output;
     console.log(clipped);
   }
   if (result.exitCode && result.exitCode !== 0) {
-    throw new Error(`remote command exited ${result.exitCode}: ${command}\n${output}`);
+    throw new Error(
+      `remote command exited ${result.exitCode}: ${command}\n${output}`,
+    );
   }
   return result;
 }
 
 function awsEncode(value) {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 }
 
 function objectUrl(env, key = "") {
@@ -310,14 +397,20 @@ function objectUrl(env, key = "") {
 function canonicalQuery(searchParams) {
   return [...searchParams.entries()]
     .map(([key, value]) => [awsEncode(key), awsEncode(value)])
-    .sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue))
+    .sort(
+      ([leftKey, leftValue], [rightKey, rightValue]) =>
+        leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue),
+    )
     .map(([key, value]) => `${key}=${value}`)
     .join("&");
 }
 
 function canonicalHeaders(headers) {
   const entries = [...headers.entries()]
-    .map(([key, value]) => [key.toLowerCase(), String(value).trim().replace(/\s+/g, " ")])
+    .map(([key, value]) => [
+      key.toLowerCase(),
+      String(value).trim().replace(/\s+/g, " "),
+    ])
     .sort(([left], [right]) => left.localeCompare(right));
   return {
     block: entries.map(([key, value]) => `${key}:${value}\n`).join(""),
@@ -352,10 +445,14 @@ function credentialScope(dateStamp, region) {
   return `${dateStamp}/${region}/s3/aws4_request`;
 }
 
-async function s3Fetch(env, { method, key = "", query = {}, headers = {}, body }) {
+async function s3Fetch(
+  env,
+  { method, key = "", query = {}, headers = {}, body },
+) {
   const url = objectUrl(env, key);
   for (const [name, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null) url.searchParams.set(name, String(value));
+    if (value !== undefined && value !== null)
+      url.searchParams.set(name, String(value));
   }
 
   const { amzDate, dateStamp } = amzDates();
@@ -364,7 +461,8 @@ async function s3Fetch(env, { method, key = "", query = {}, headers = {}, body }
   requestHeaders.set("host", url.host);
   requestHeaders.set("x-amz-content-sha256", payloadHash);
   requestHeaders.set("x-amz-date", amzDate);
-  if (env.AWS_SESSION_TOKEN) requestHeaders.set("x-amz-security-token", env.AWS_SESSION_TOKEN);
+  if (env.AWS_SESSION_TOKEN)
+    requestHeaders.set("x-amz-security-token", env.AWS_SESSION_TOKEN);
 
   const canonical = canonicalHeaders(requestHeaders);
   const canonicalRequest = [
@@ -382,7 +480,11 @@ async function s3Fetch(env, { method, key = "", query = {}, headers = {}, body }
     scope,
     sha256Hex(canonicalRequest),
   ].join("\n");
-  const signature = hmac(signingKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, env.S3_REGION), stringToSign, "hex");
+  const signature = hmac(
+    signingKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, env.S3_REGION),
+    stringToSign,
+    "hex",
+  );
   requestHeaders.set(
     "authorization",
     `AWS4-HMAC-SHA256 Credential=${env.AWS_ACCESS_KEY_ID}/${scope}, SignedHeaders=${canonical.signedHeaders}, Signature=${signature}`,
@@ -393,7 +495,9 @@ async function s3Fetch(env, { method, key = "", query = {}, headers = {}, body }
   const response = await fetch(url, { method, headers: fetchHeaders, body });
   if (!response.ok) {
     const text = redactText((await response.text()).slice(0, 1000));
-    throw new Error(`S3 ${method} failed with HTTP ${response.status}: ${text}`);
+    throw new Error(
+      `S3 ${method} failed with HTTP ${response.status}: ${text}`,
+    );
   }
   return response;
 }
@@ -405,9 +509,13 @@ function presignedGetObjectUrl(env, key, expiresSeconds = 7200) {
   url.searchParams.set("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
   url.searchParams.set("X-Amz-Credential", `${env.AWS_ACCESS_KEY_ID}/${scope}`);
   url.searchParams.set("X-Amz-Date", amzDate);
-  url.searchParams.set("X-Amz-Expires", String(Math.max(60, Math.min(604800, Math.floor(expiresSeconds)))));
+  url.searchParams.set(
+    "X-Amz-Expires",
+    String(Math.max(60, Math.min(604800, Math.floor(expiresSeconds)))),
+  );
   url.searchParams.set("X-Amz-SignedHeaders", "host");
-  if (env.AWS_SESSION_TOKEN) url.searchParams.set("X-Amz-Security-Token", env.AWS_SESSION_TOKEN);
+  if (env.AWS_SESSION_TOKEN)
+    url.searchParams.set("X-Amz-Security-Token", env.AWS_SESSION_TOKEN);
 
   const canonicalRequest = [
     "GET",
@@ -423,7 +531,11 @@ function presignedGetObjectUrl(env, key, expiresSeconds = 7200) {
     scope,
     sha256Hex(canonicalRequest),
   ].join("\n");
-  const signature = hmac(signingKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, env.S3_REGION), stringToSign, "hex");
+  const signature = hmac(
+    signingKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, env.S3_REGION),
+    stringToSign,
+    "hex",
+  );
   url.searchParams.set("X-Amz-Signature", signature);
   return url.toString();
 }
@@ -443,7 +555,9 @@ function parseXmlTag(text, tagName) {
 }
 
 function parseListObjectKeys(text) {
-  return [...text.matchAll(/<Key>([\s\S]*?)<\/Key>/g)].map((match) => decodeXmlText(match[1]));
+  return [...text.matchAll(/<Key>([\s\S]*?)<\/Key>/g)].map((match) =>
+    decodeXmlText(match[1]),
+  );
 }
 
 async function listObjectKeys(env, prefix) {
@@ -455,7 +569,9 @@ async function listObjectKeys(env, prefix) {
       query: {
         "list-type": "2",
         prefix,
-        ...(continuationToken ? { "continuation-token": continuationToken } : {}),
+        ...(continuationToken
+          ? { "continuation-token": continuationToken }
+          : {}),
       },
     });
     const text = await response.text();
@@ -463,22 +579,6 @@ async function listObjectKeys(env, prefix) {
     continuationToken = parseXmlTag(text, "NextContinuationToken");
   } while (continuationToken);
   return keys;
-}
-
-async function putObject(env, key, body, contentType) {
-  await s3Fetch(env, {
-    method: "PUT",
-    key,
-    headers: {
-      "cache-control": "private, max-age=3600",
-      "content-type": contentType,
-    },
-    body,
-  });
-}
-
-async function deleteObject(env, key) {
-  await s3Fetch(env, { method: "DELETE", key });
 }
 
 async function rendApiJson(env, options, requestPath, init = {}) {
@@ -491,7 +591,9 @@ async function rendApiJson(env, options, requestPath, init = {}) {
     headers,
     body: init.body,
   }).catch((error) => {
-    throw new Error(`Rend API request ${requestPath} failed: ${fetchErrorMessage(error)}`);
+    throw new Error(
+      `Rend API request ${requestPath} failed: ${fetchErrorMessage(error)}`,
+    );
   });
   const text = response.text;
   let body = null;
@@ -503,14 +605,21 @@ async function rendApiJson(env, options, requestPath, init = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(`Rend API ${requestPath} failed with HTTP ${response.status}: ${redactText(text.slice(0, 1000))}`);
+    throw new Error(
+      `Rend API ${requestPath} failed with HTTP ${response.status}: ${redactText(text.slice(0, 1000))}`,
+    );
   }
   if (init.returnHeaders) return { body, headers: response.headers };
   return body;
 }
 
 function activeRendApiKey(env) {
-  return env.__BENCHMARK_REND_API_KEY || env.REND_API_KEY || env.REND_READINESS_API_KEY || "";
+  return (
+    env.__BENCHMARK_REND_API_KEY ||
+    env.REND_API_KEY ||
+    env.REND_READINESS_API_KEY ||
+    ""
+  );
 }
 
 async function createDbClient(databaseUrl) {
@@ -527,9 +636,13 @@ async function provisionBenchmarkApiKey(env, options) {
   const rawKey = `rend_live_${randomBytes(32).toString("base64url")}`;
   const keyHash = sha256Hex(rawKey);
   const prefix = rawKey.slice(0, 18);
-  const slug = `prod-tigris-edge-${runId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 80);
+  const slug =
+    `prod-hls-providers-${runId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(
+      0,
+      80,
+    );
   const email = `${slug}@internal.rend.so`;
-  const name = `Prod Tigris vs Edge ${runId}`;
+  const name = `Prod HLS Provider Benchmark ${runId}`;
 
   try {
     await db.query("BEGIN");
@@ -545,7 +658,8 @@ RETURNING id::text
       [userId, "Rend Benchmark", email],
     );
     const resolvedUserId = userResult.rows[0]?.id;
-    if (!resolvedUserId) throw new Error("benchmark user provisioning did not return an id");
+    if (!resolvedUserId)
+      throw new Error("benchmark user provisioning did not return an id");
 
     await db.query(
       `
@@ -559,7 +673,7 @@ SET updated_at = now()
         name,
         slug,
         JSON.stringify({
-          provisioned: "prod-tigris-vs-edge-benchmark",
+          provisioned: "prod-hls-provider-benchmark",
           run_id: runId,
         }),
       ],
@@ -608,7 +722,8 @@ RETURNING id::text, prefix
       [organizationId, resolvedUserId, name, prefix, keyHash],
     );
     const apiKeyId = keyResult.rows[0]?.id;
-    if (!apiKeyId) throw new Error("benchmark API key provisioning did not return an id");
+    if (!apiKeyId)
+      throw new Error("benchmark API key provisioning did not return an id");
     await db.query("COMMIT");
 
     try {
@@ -618,10 +733,12 @@ RETURNING id::text, prefix
         userEmail: email,
       });
     } catch (error) {
-      await db.query(
-        "UPDATE rend.api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1::uuid",
-        [apiKeyId],
-      ).catch(() => undefined);
+      await db
+        .query(
+          "UPDATE rend.api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1::uuid",
+          [apiKeyId],
+        )
+        .catch(() => undefined);
       await db.end().catch(() => undefined);
       throw error;
     }
@@ -646,14 +763,16 @@ RETURNING id::text, prefix
 
 async function attachBenchmarkAutumnPlan(env, options, account) {
   if (!env.AUTUMN_SECRET_KEY) {
-    throw new Error("AUTUMN_SECRET_KEY is required to auto-provision a benchmark API key");
+    throw new Error(
+      "AUTUMN_SECRET_KEY is required to auto-provision a benchmark API key",
+    );
   }
   await autumnPost(env, "/customers.get_or_create", {
     customer_id: account.organizationId,
     name: account.organizationName,
     email: account.userEmail,
     metadata: {
-      source: "rend-prod-tigris-vs-edge-benchmark",
+      source: "rend-prod-hls-provider-benchmark",
       run_id: runId,
     },
   });
@@ -696,7 +815,9 @@ async function autumnPost(env, routePath, body) {
     data = { message: text.slice(0, 240) };
   }
   if (!response.ok) {
-    const message = redactText(data.message || data.error || `HTTP ${response.status}`);
+    const message = redactText(
+      data.message || data.error || `HTTP ${response.status}`,
+    );
     throw new Error(`Autumn ${routePath} failed: ${message}`);
   }
   return data;
@@ -729,7 +850,9 @@ SELECT 1
     );
     log("revoked temporary production benchmark API key");
   } catch (error) {
-    log(`failed to revoke temporary benchmark API key: ${redactText(error?.message || error).slice(0, 300)}`);
+    log(
+      `failed to revoke temporary benchmark API key: ${redactText(error?.message || error).slice(0, 300)}`,
+    );
   } finally {
     await credential.db.end().catch(() => undefined);
   }
@@ -744,7 +867,8 @@ async function uploadRendAsset(env, options, videoBuffer, videoStats) {
       "content-type": "video/mp4",
     },
   });
-  if (!response?.asset_id) throw new Error("Rend upload response did not include asset_id");
+  if (!response?.asset_id)
+    throw new Error("Rend upload response did not include asset_id");
   return response.asset_id;
 }
 
@@ -793,113 +917,56 @@ function httpRequestText(url, { method, headers, body }) {
 }
 
 async function waitForHlsReady(env, options, assetId) {
-  const timeoutMs = Number(process.env.REND_TIGRIS_EDGE_READY_TIMEOUT_MS || 600_000);
-  const intervalMs = Number(process.env.REND_TIGRIS_EDGE_READY_INTERVAL_MS || 2_000);
+  const timeoutMs = Number(
+    envValue(
+      "REND_HLS_PROVIDER_READY_TIMEOUT_MS",
+      "REND_TIGRIS_EDGE_READY_TIMEOUT_MS",
+    ) || 600_000,
+  );
+  const intervalMs = Number(
+    envValue(
+      "REND_HLS_PROVIDER_READY_INTERVAL_MS",
+      "REND_TIGRIS_EDGE_READY_INTERVAL_MS",
+    ) || 2_000,
+  );
   const started = Date.now();
   let last = null;
   while (Date.now() - started < timeoutMs) {
-    last = await rendApiJson(env, options, `/v1/assets/${encodeURIComponent(assetId)}`);
+    last = await rendApiJson(
+      env,
+      options,
+      `/v1/assets/${encodeURIComponent(assetId)}`,
+    );
     if (last?.playable_state === "hls_ready") return last;
-    if (last?.playable_state === "failed" || last?.playable_state === "deleted") {
-      throw new Error(`asset reached terminal playable_state ${last.playable_state}`);
+    if (
+      last?.playable_state === "failed" ||
+      last?.playable_state === "deleted"
+    ) {
+      throw new Error(
+        `asset reached terminal playable_state ${last.playable_state}`,
+      );
     }
     await sleep(intervalMs);
   }
-  throw new Error(`timed out waiting for hls_ready; last playable_state=${last?.playable_state || "unknown"}`);
+  throw new Error(
+    `timed out waiting for hls_ready; last playable_state=${last?.playable_state || "unknown"}`,
+  );
 }
 
 async function deleteRendAsset(env, options, assetId) {
-  await rendApiJson(env, options, `/v1/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" });
+  await rendApiJson(env, options, `/v1/assets/${encodeURIComponent(assetId)}`, {
+    method: "DELETE",
+  });
 }
 
-async function getPlayback(env, options, assetId) {
-  const { body: data, headers } = await rendApiJson(
-    env,
-    options,
-    `/v1/assets/${encodeURIComponent(assetId)}/playback`,
-    { returnHeaders: true },
-  );
-  const playbackToken = data?.playback_token || playbackTokenFromSetCookie(headers);
-  const manifestUrl = data?.manifest_url || (String(data?.playback_url || "").includes("/hls/master.m3u8") ? data.playback_url : "");
-  if (!manifestUrl || !playbackToken) {
-    throw new Error("Rend playback response did not include a manifest URL and playback cookie");
-  }
-  return { ...data, manifest_url: manifestUrl, playback_token: playbackToken };
-}
-
-function playbackTokenFromSetCookie(headers) {
-  const values = headers?.["set-cookie"];
-  const cookies = Array.isArray(values) ? values : values ? [values] : [];
-  for (const cookie of cookies) {
-    const match = String(cookie).match(/(?:^|,\s*)__rend_playback=([^;,\s]+)/);
-    if (match?.[1]) return match[1];
-  }
-  return "";
-}
-
-function withQueryParam(rawUrl, name, value) {
-  const url = new URL(rawUrl);
-  url.searchParams.set(name, value);
-  return url.toString();
-}
-
-function tokenizedEdgeUrl(rawUrl, token) {
-  return withQueryParam(rawUrl, "token", token);
-}
-
-function rewritePlaybackBaseUrl(rawUrl, playbackBaseUrl) {
-  const source = new URL(rawUrl);
-  const target = new URL(playbackBaseUrl);
-  const targetPrefix = target.pathname.replace(/\/+$/, "");
-  target.pathname = `${targetPrefix}${source.pathname}`;
-  target.search = source.search;
-  target.hash = "";
-  return target.toString();
-}
-
-function createMp4Page({ title, sourceUrl, selectedMode }) {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${escapeHtml(title)}</title>
-    <style>
-      html, body { background: #000; height: 100%; margin: 0; }
-      #player, video { height: 100%; width: 100%; }
-      video { background: #000; display: block; object-fit: contain; }
-    </style>
-  </head>
-  <body>
-    <div
-      id="player"
-      data-rend-player-state="loading"
-      data-rend-player-selected="${escapeHtml(selectedMode)}"
-      data-rend-player-artifact="source.mp4"
-      data-rend-bootstrap-ms="0"
-      data-rend-metadata-ms=""
-      data-rend-loadeddata-ms=""
-      data-rend-canplay-ms=""
-      data-rend-first-frame-ms=""
-      data-rend-selected-bitrate=""
-      data-rend-selected-height=""
-      data-rend-selected-level=""
-      data-rend-selected-width=""
-    >
-      <video id="video" autoplay muted playsinline controls preload="auto" src=${JSON.stringify(sourceUrl)}></video>
-    </div>
-    <script>
-      ${commonPlayerProbeScript()}
-      setState("ready");
-      video.load();
-      play();
-    </script>
-  </body>
-</html>
-`;
-}
-
-function createHlsPage({ title, manifestUrl, playbackToken = "", signedUrlByPath = {}, selectedMode, artifact = "hls/master.m3u8" }) {
+function createHlsPage({
+  title,
+  manifestUrl,
+  playbackToken = "",
+  signedUrlByPath = {},
+  selectedMode,
+  artifact = "hls/master.m3u8",
+}) {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1093,7 +1160,16 @@ function escapeHtml(value) {
 
 async function resolveHlsMinScript() {
   const candidates = [
-    path.join(repoRoot, "node_modules", ".bun", "hls.js@1.6.16", "node_modules", "hls.js", "dist", "hls.min.js"),
+    path.join(
+      repoRoot,
+      "node_modules",
+      ".bun",
+      "hls.js@1.6.16",
+      "node_modules",
+      "hls.js",
+      "dist",
+      "hls.min.js",
+    ),
     path.join(repoRoot, "node_modules", "hls.js", "dist", "hls.min.js"),
   ];
   for (const candidate of candidates) {
@@ -1114,7 +1190,12 @@ function benchmarkRegionForTarget(target) {
 }
 
 function daytonaApiKeyForTarget(env, target) {
-  if (String(target || "").toLowerCase().startsWith("eu") && env.DAYTONA_EU_API_KEY) {
+  if (
+    String(target || "")
+      .toLowerCase()
+      .startsWith("eu") &&
+    env.DAYTONA_EU_API_KEY
+  ) {
     return env.DAYTONA_EU_API_KEY;
   }
   return env.DAYTONA_API_KEY || env.DAYTONA_EU_API_KEY || "";
@@ -1140,7 +1221,7 @@ async function createSandbox(env, options) {
           networkBlockAll: false,
           labels: {
             app: "rend",
-            purpose: "prod-tigris-vs-edge-benchmark",
+            purpose: "prod-hls-provider-benchmark",
             runId,
           },
         },
@@ -1154,11 +1235,15 @@ async function createSandbox(env, options) {
       log(`target ${target} failed: ${message.slice(0, 400)}`);
     }
   }
-  throw new Error(`Could not create Daytona sandbox in any target: ${JSON.stringify(errors, null, 2)}`);
+  throw new Error(
+    `Could not create Daytona sandbox in any target: ${JSON.stringify(errors, null, 2)}`,
+  );
 }
 
 async function runDaytonaBenchmark(env, options, pages) {
-  const benchmarkScript = await readFile(path.join(repoRoot, "scripts", "benchmark-providers.mjs"));
+  const benchmarkScript = await readFile(
+    path.join(repoRoot, "scripts", "benchmark-providers.mjs"),
+  );
   const hlsMinScript = await resolveHlsMinScript();
   let sandbox;
   let daytona;
@@ -1170,25 +1255,38 @@ async function runDaytonaBenchmark(env, options, pages) {
     daytona = created.daytona;
     requestedTarget = created.requestedTarget;
 
-    const workDir = (await sandbox.getWorkDir()) || (await sandbox.getUserHomeDir()) || "/home/daytona";
-    const remoteRoot = path.posix.join(workDir, "rend-prod-tigris-edge-benchmark");
-    const remoteScript = path.posix.join(remoteRoot, "scripts", "benchmark-providers.mjs");
+    const workDir =
+      (await sandbox.getWorkDir()) ||
+      (await sandbox.getUserHomeDir()) ||
+      "/home/daytona";
+    const remoteRoot = path.posix.join(
+      workDir,
+      "rend-prod-hls-provider-benchmark",
+    );
+    const remoteScript = path.posix.join(
+      remoteRoot,
+      "scripts",
+      "benchmark-providers.mjs",
+    );
     const remoteStaticRoot = path.posix.join(remoteRoot, "static");
     log(`remoteRoot=${remoteRoot}`);
 
     await checkedExec(
       sandbox,
-      `mkdir -p ${remoteRoot}/scripts ${remoteStaticRoot}/vendor ${remoteStaticRoot}/tigris-direct-mp4 ${remoteStaticRoot}/rend-edge-hls ${remoteStaticRoot}/tigris-direct-hls`,
+      `mkdir -p ${remoteRoot}/scripts ${remoteStaticRoot}/vendor ${remoteStaticRoot}/rend-tigris-hls`,
       workDir,
       undefined,
       30,
     );
     await sandbox.fs.uploadFile(Buffer.from(benchmarkScript), remoteScript);
-    await sandbox.fs.uploadFile(Buffer.from(hlsMinScript), path.posix.join(remoteStaticRoot, "vendor", "hls.min.js"));
-    await sandbox.fs.uploadFile(Buffer.from(pages.tigrisDirectMp4), path.posix.join(remoteStaticRoot, "tigris-direct-mp4", "index.html"));
-    if (pages.tigrisDirectHls) {
-      await sandbox.fs.uploadFile(Buffer.from(pages.tigrisDirectHls), path.posix.join(remoteStaticRoot, "tigris-direct-hls", "index.html"));
-    }
+    await sandbox.fs.uploadFile(
+      Buffer.from(hlsMinScript),
+      path.posix.join(remoteStaticRoot, "vendor", "hls.min.js"),
+    );
+    await sandbox.fs.uploadFile(
+      Buffer.from(pages.rendTigrisHls),
+      path.posix.join(remoteStaticRoot, "rend-tigris-hls", "index.html"),
+    );
 
     await checkedExec(
       sandbox,
@@ -1206,20 +1304,22 @@ async function runDaytonaBenchmark(env, options, pages) {
     );
     await checkedExec(
       sandbox,
-      "node -e \"fetch('http://127.0.0.1:8125/tigris-direct-mp4/index.html').then(r=>{if(!r.ok)process.exit(1); console.log('static server ready')})\"",
+      "node -e \"fetch('http://127.0.0.1:8125/rend-tigris-hls/index.html').then(r=>{if(!r.ok)process.exit(1); console.log('static server ready')})\"",
       remoteRoot,
       undefined,
       30,
     );
 
-    const providers = ["tigris_direct_mp4", "rend_prod_embed"];
-    if (pages.tigrisDirectHls) providers.push("tigris_direct_hls");
+    const providers = ["rend", "mux", "rend_tigris_hls"];
     const benchmarkEnv = {
       BENCHMARK_PROVIDERS: providers.join(","),
-      BENCHMARK_TIGRIS_DIRECT_MP4_URL: "http://127.0.0.1:8125/tigris-direct-mp4/index.html",
-      BENCHMARK_REND_PROD_EMBED_URL: pages.rendProdEmbedUrl,
-      BENCHMARK_TIGRIS_DIRECT_HLS_URL: "http://127.0.0.1:8125/tigris-direct-hls/index.html",
-      BENCHMARK_REGION: benchmarkRegionForTarget(sandbox.target || requestedTarget),
+      BENCHMARK_REND_URL: pages.rendWatchUrl,
+      BENCHMARK_MUX_URL: pages.muxUrl,
+      BENCHMARK_REND_TIGRIS_HLS_URL:
+        "http://127.0.0.1:8125/rend-tigris-hls/index.html",
+      BENCHMARK_REGION: benchmarkRegionForTarget(
+        sandbox.target || requestedTarget,
+      ),
       BENCHMARK_REGION_LABEL: `Daytona ${sandbox.target} (${requestedTarget} requested)`,
       BENCHMARK_RUNNER_KIND: "daytona",
       BENCHMARK_RUNNER_LABEL: sandbox.id,
@@ -1227,12 +1327,22 @@ async function runDaytonaBenchmark(env, options, pages) {
       BENCHMARK_ALLOW_BUNDLED_CHROMIUM: "1",
       BENCHMARK_PUBLIC_COPY: "0",
     };
-    const timeoutSeconds = Number(process.env.REND_TIGRIS_EDGE_REMOTE_TIMEOUT_SECS || Math.max(
-      180,
-      Math.ceil((options.samples * providers.length * (options.watchMs + options.delayMs + options.startupTimeoutMs)) / 1000) + 60,
-    ));
-    const benchmarkCommand =
-      `timeout ${Math.max(30, timeoutSeconds - 5)}s node scripts/benchmark-providers.mjs --samples ${Math.floor(options.samples)} --watch-ms ${Math.floor(options.watchMs)} --delay-ms ${Math.floor(options.delayMs)} --startup-timeout-ms ${Math.floor(options.startupTimeoutMs)}`;
+    const timeoutSeconds = Number(
+      envValue(
+        "REND_HLS_PROVIDER_REMOTE_TIMEOUT_SECS",
+        "REND_TIGRIS_EDGE_REMOTE_TIMEOUT_SECS",
+      ) ||
+        Math.max(
+          180,
+          Math.ceil(
+            (options.samples *
+              providers.length *
+              (options.watchMs + options.delayMs + options.startupTimeoutMs)) /
+              1000,
+          ) + 60,
+        ),
+    );
+    const benchmarkCommand = `timeout ${Math.max(30, timeoutSeconds - 5)}s node scripts/benchmark-providers.mjs --samples ${Math.floor(options.samples)} --watch-ms ${Math.floor(options.watchMs)} --delay-ms ${Math.floor(options.delayMs)} --startup-timeout-ms ${Math.floor(options.startupTimeoutMs)}`;
     await checkedExec(
       sandbox,
       `${benchmarkCommand}; status=$?; if [ "$status" -eq 124 ] && [ -f .rend/benchmarks/providers/latest.json ]; then echo '[benchmark] process timed out after writing artifacts; continuing'; exit 0; fi; exit "$status"`,
@@ -1241,8 +1351,20 @@ async function runDaytonaBenchmark(env, options, pages) {
       timeoutSeconds,
     );
 
-    const remoteSummary = path.posix.join(remoteRoot, ".rend", "benchmarks", "providers", "latest.json");
-    const remoteSamples = path.posix.join(remoteRoot, ".rend", "benchmarks", "providers", "latest.samples.json");
+    const remoteSummary = path.posix.join(
+      remoteRoot,
+      ".rend",
+      "benchmarks",
+      "providers",
+      "latest.json",
+    );
+    const remoteSamples = path.posix.join(
+      remoteRoot,
+      ".rend",
+      "benchmarks",
+      "providers",
+      "latest.samples.json",
+    );
     const [summaryBytes, sampleBytes] = await Promise.all([
       sandbox.fs.downloadFile(remoteSummary, 120),
       sandbox.fs.downloadFile(remoteSamples, 120),
@@ -1254,7 +1376,10 @@ async function runDaytonaBenchmark(env, options, pages) {
     if (options.publicCopy) {
       await mkdir(publicOutDir, { recursive: true });
       await writeFile(path.join(publicOutDir, "latest.json"), summaryBytes);
-      await writeFile(path.join(publicOutDir, "latest.samples.json"), sampleBytes);
+      await writeFile(
+        path.join(publicOutDir, "latest.samples.json"),
+        sampleBytes,
+      );
     }
 
     const summary = JSON.parse(summaryBytes.toString("utf8"));
@@ -1262,7 +1387,10 @@ async function runDaytonaBenchmark(env, options, pages) {
       `downloaded artifacts run=${summary.run.id} region=${summary.run.regionLabel} minSamples=${summary.summary.minSamplesPerProvider} redaction=${summary.redaction?.status}`,
     );
     log(`local artifacts: ${localOutDir}`);
-    if (!options.publicCopy) log("public artifact copy skipped; pass --public-copy to update site benchmark JSON");
+    if (!options.publicCopy)
+      log(
+        "public artifact copy skipped; pass --public-copy to update site benchmark JSON",
+      );
     return summary;
   } finally {
     if (sandbox) {
@@ -1270,11 +1398,15 @@ async function runDaytonaBenchmark(env, options, pages) {
         log(`deleting sandbox id=${sandbox.id}`);
         await sandbox.delete(180);
       } catch (error) {
-        log(`sandbox delete failed; trying stop: ${redactText(error?.message || error).slice(0, 300)}`);
+        log(
+          `sandbox delete failed; trying stop: ${redactText(error?.message || error).slice(0, 300)}`,
+        );
         try {
           await sandbox.stop(120, true);
         } catch (stopError) {
-          log(`sandbox stop failed: ${redactText(stopError?.message || stopError).slice(0, 300)}`);
+          log(
+            `sandbox stop failed: ${redactText(stopError?.message || stopError).slice(0, 300)}`,
+          );
         }
       }
     }
@@ -1284,37 +1416,36 @@ async function runDaytonaBenchmark(env, options, pages) {
   }
 }
 
-async function preparePages(env, options, assetId, directObjectKey) {
-  const directMp4Url = presignedGetObjectUrl(env, directObjectKey);
-
-  const pages = {
-    rendProdEmbedUrl: new URL(`/embed/${encodeURIComponent(assetId)}`, options.siteBaseUrl).toString(),
-    tigrisDirectMp4: createMp4Page({
-      title: "Tigris direct MP4 benchmark",
-      sourceUrl: directMp4Url,
-      selectedMode: "tigris_direct_mp4",
-    }),
-    tigrisDirectHls: "",
-  };
-
-  if (options.includeDirectHls) {
-    const prefix = `videos/${assetId}/hls/`;
-    const keys = (await listObjectKeys(env, prefix)).filter((key) => key.endsWith(".m3u8") || key.endsWith(".ts"));
-    if (!keys.some((key) => key.endsWith("/master.m3u8"))) {
-      throw new Error("Tigris HLS object listing did not include hls/master.m3u8");
-    }
-    const signedUrlByPath = Object.fromEntries(
-      keys.map((key) => [key.slice(`videos/${assetId}/`.length), presignedGetObjectUrl(env, key)]),
+async function preparePages(env, options, assetId) {
+  const prefix = `videos/${assetId}/hls/`;
+  const keys = (await listObjectKeys(env, prefix)).filter(
+    (key) => key.endsWith(".m3u8") || key.endsWith(".ts"),
+  );
+  if (!keys.some((key) => key.endsWith("/master.m3u8"))) {
+    throw new Error(
+      "Tigris HLS object listing did not include hls/master.m3u8",
     );
-    pages.tigrisDirectHls = createHlsPage({
-      title: "Tigris direct HLS benchmark",
+  }
+  const signedUrlByPath = Object.fromEntries(
+    keys.map((key) => [
+      key.slice(`videos/${assetId}/`.length),
+      presignedGetObjectUrl(env, key),
+    ]),
+  );
+
+  return {
+    rendWatchUrl: new URL(
+      `/watch/${encodeURIComponent(assetId)}?autoplay=1`,
+      options.siteBaseUrl,
+    ).toString(),
+    muxUrl: options.muxUrl,
+    rendTigrisHls: createHlsPage({
+      title: "Rend HLS direct from Tigris benchmark",
       manifestUrl: signedUrlByPath["hls/master.m3u8"],
       signedUrlByPath,
-      selectedMode: "tigris_direct_hls_js",
-    });
-  }
-
-  return pages;
+      selectedMode: "rend_tigris_hls_js",
+    }),
+  };
 }
 
 function summarizeResult(summary) {
@@ -1343,20 +1474,25 @@ async function main() {
     "AWS_SECRET_ACCESS_KEY",
   ]);
   if (!activeRendApiKey(env) && !env.DATABASE_URL) {
-    throw new Error("REND_API_KEY or REND_READINESS_API_KEY is required unless DATABASE_URL is available to create a temporary benchmark key");
+    throw new Error(
+      "REND_API_KEY or REND_READINESS_API_KEY is required unless DATABASE_URL is available to create a temporary benchmark key",
+    );
   }
   if (!activeRendApiKey(env) && !env.AUTUMN_SECRET_KEY) {
-    throw new Error("AUTUMN_SECRET_KEY is required when creating a temporary benchmark key");
-  }
-  if (!options.edgeBaseUrl) {
-    if (!env.REND_PLAYBACK_BASE_URL) throw new Error("REND_PLAYBACK_BASE_URL is required unless --edge-base-url is provided");
-    options.edgeBaseUrl = normalizeBaseUrl(env.REND_PLAYBACK_BASE_URL);
+    throw new Error(
+      "AUTUMN_SECRET_KEY is required when creating a temporary benchmark key",
+    );
   }
 
-  if (!existsSync(options.videoPath)) throw new Error(`video does not exist: ${options.videoPath}`);
+  if (!existsSync(options.videoPath))
+    throw new Error(`video does not exist: ${options.videoPath}`);
   const videoStats = await stat(options.videoPath);
-  log(`video=${options.videoPath} size=${Math.round(videoStats.size / 1024 / 1024)}MiB`);
-  log(`samples=${options.samples} watchMs=${options.watchMs} providers=${options.includeDirectHls ? "tigris_direct_mp4,rend_prod_embed,tigris_direct_hls" : "tigris_direct_mp4,rend_prod_embed"}`);
+  log(
+    `video=${options.videoPath} size=${Math.round(videoStats.size / 1024 / 1024)}MiB`,
+  );
+  log(
+    `samples=${options.samples} watchMs=${options.watchMs} providers=rend,mux,rend_tigris_hls`,
+  );
 
   if (options.dryRun) {
     log("dry run passed; no production upload or sandbox was created");
@@ -1364,7 +1500,6 @@ async function main() {
   }
 
   const videoBuffer = await readFile(options.videoPath);
-  const directObjectKey = `benchmarks/prod-tigris-vs-edge/${runId}/${path.basename(options.videoPath) || "source.mp4"}`;
   let assetId = "";
   let summary = null;
   let benchmarkCredential = null;
@@ -1374,34 +1509,28 @@ async function main() {
       benchmarkCredential = await provisionBenchmarkApiKey(env, options);
     }
 
-    log("uploading direct MP4 object to Tigris");
-    await putObject(env, directObjectKey, videoBuffer, "video/mp4");
-
     log("uploading source through Rend production API");
     assetId = await uploadRendAsset(env, options, videoBuffer, videoStats);
     log("waiting for production Rend asset to reach hls_ready");
     await waitForHlsReady(env, options, assetId);
 
-    log("preparing redacted benchmark pages");
-    const pages = await preparePages(env, options, assetId, directObjectKey);
+    log("preparing redacted HLS benchmark page");
+    const pages = await preparePages(env, options, assetId);
     await mkdir(localOutDir, { recursive: true });
     await writeFile(
       path.join(localOutDir, "run-metadata.redacted.json"),
       `${JSON.stringify(
         {
-          schemaVersion: "rend.prod-tigris-vs-edge.metadata.v1",
+          schemaVersion: "rend.prod-hls-provider-benchmark.metadata.v1",
           runId,
           generatedAt: new Date().toISOString(),
           video: {
             basename: path.basename(options.videoPath),
             byteSize: videoStats.size,
           },
-          providers: options.includeDirectHls
-            ? ["tigris_direct_mp4", "rend_prod_embed", "tigris_direct_hls"]
-            : ["tigris_direct_mp4", "rend_prod_embed"],
+          providers: ["rend", "mux", "rend_tigris_hls"],
           cleanup: {
             rendAsset: options.cleanupAsset,
-            directTigrisObject: options.cleanupDirectObject,
           },
         },
         null,
@@ -1417,21 +1546,12 @@ async function main() {
         log("deleting production Rend test asset");
         await deleteRendAsset(env, options, assetId);
       } catch (error) {
-        log(`failed to delete production Rend test asset: ${redactText(error?.message || error).slice(0, 300)}`);
+        log(
+          `failed to delete production Rend test asset: ${redactText(error?.message || error).slice(0, 300)}`,
+        );
       }
     } else if (assetId) {
       log("keeping production Rend test asset because --keep-asset was set");
-    }
-
-    if (options.cleanupDirectObject) {
-      try {
-        log("deleting direct Tigris MP4 object");
-        await deleteObject(env, directObjectKey);
-      } catch (error) {
-        log(`failed to delete direct Tigris object: ${redactText(error?.message || error).slice(0, 300)}`);
-      }
-    } else {
-      log("keeping direct Tigris MP4 object because --keep-direct-object was set");
     }
 
     await cleanupBenchmarkCredential(benchmarkCredential);
@@ -1439,6 +1559,8 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`[prod-tigris-edge] ${redactText(error.stack || error.message)}`);
+  console.error(
+    `[prod-hls-providers] ${redactText(error.stack || error.message)}`,
+  );
   process.exitCode = 1;
 });

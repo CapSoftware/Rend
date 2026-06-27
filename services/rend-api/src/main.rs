@@ -29,6 +29,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use futures_util::stream;
 use hmac::{Hmac, Mac};
 use http_body::{Body as HttpBody, Frame};
 use rend_config::{
@@ -38,8 +39,8 @@ use rend_config::{
     validate_required_secret, validate_required_service_url, validate_required_url,
 };
 use rend_playback_auth::{
-    PlaybackAuthError, PlaybackTokenIssuer, SigningKey, current_unix_timestamp,
-    is_asset_playback_path,
+    PlaybackAuthError, PlaybackTokenIssuer, SigningKey, SingleKeyring, current_unix_timestamp,
+    is_asset_playback_path, validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -102,9 +103,11 @@ struct ApiConfig {
     s3_bucket: String,
     aws_access_key_id: String,
     aws_secret_access_key: String,
+    playback_mode: PlaybackMode,
     playback_base_url: String,
     playback_cookie_domain: Option<String>,
     playback_token_issuer: PlaybackTokenIssuer,
+    playback_keyring: SingleKeyring,
     playback_bootstrap_prefetch_segments: usize,
     edge_registry: EdgeRegistryConfig,
     edge_warm: EdgeWarmConfig,
@@ -132,6 +135,7 @@ struct EdgeRegistryConfig {
 
 #[derive(Clone)]
 struct EdgeWarmConfig {
+    enabled: bool,
     url: Option<String>,
     internal_token: String,
     max_artifacts: usize,
@@ -139,8 +143,15 @@ struct EdgeWarmConfig {
 
 #[derive(Clone)]
 struct EdgePurgeConfig {
+    enabled: bool,
     url: Option<String>,
     internal_token: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaybackMode {
+    Tigris,
+    Edge,
 }
 
 #[derive(Clone)]
@@ -148,6 +159,24 @@ struct MediaWorkerConfig {
     worker_id: String,
     poll_interval: Duration,
     lock_timeout: Duration,
+}
+
+impl PlaybackMode {
+    fn from_env() -> Result<Self> {
+        match env_string("REND_PLAYBACK_MODE", "tigris")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "tigris" => Ok(Self::Tigris),
+            "edge" => Ok(Self::Edge),
+            _ => anyhow::bail!("REND_PLAYBACK_MODE must be either tigris or edge"),
+        }
+    }
+
+    fn is_edge(self) -> bool {
+        matches!(self, Self::Edge)
+    }
 }
 
 impl ApiConfig {
@@ -178,7 +207,8 @@ impl ApiConfig {
             "REND_PLAYBACK_SIGNING_SECRET",
             "local-dev-playback-signing-secret",
         );
-        let playback_base_url = env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100");
+        let playback_mode = PlaybackMode::from_env()?;
+        let playback_base_url = playback_base_url_for_mode(playback_mode);
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
@@ -287,22 +317,29 @@ impl ApiConfig {
             &object_store_health_url,
         )?;
         validate_required_url(rend_env, "S3_ENDPOINT", &s3_endpoint)?;
-        validate_config_edge_base_url(
-            rend_env,
-            "REND_PLAYBACK_BASE_URL",
-            &playback_base_url,
-            allow_insecure_edge_urls,
-        )?;
+        match playback_mode {
+            PlaybackMode::Tigris => validate_required_url(
+                rend_env,
+                "REND_TIGRIS_PLAYBACK_BASE_URL",
+                &playback_base_url,
+            )?,
+            PlaybackMode::Edge => validate_config_edge_base_url(
+                rend_env,
+                "REND_PLAYBACK_BASE_URL",
+                &playback_base_url,
+                allow_insecure_edge_urls,
+            )?,
+        }
         validate_optional_url(rend_env, "REND_EDGE_WARM_URL", edge_warm_url.as_deref())?;
         validate_optional_url(rend_env, "REND_EDGE_PURGE_URL", edge_purge_url.as_deref())?;
 
-        let playback_token_issuer = PlaybackTokenIssuer::new(
-            SigningKey::new(
-                playback_signing_key_id,
-                playback_signing_secret.into_bytes(),
-            )?,
-            playback_token_ttl,
+        let playback_signing_key = SigningKey::new(
+            playback_signing_key_id,
+            playback_signing_secret.into_bytes(),
         )?;
+        let playback_keyring = SingleKeyring::from_key(playback_signing_key.clone());
+        let playback_token_issuer =
+            PlaybackTokenIssuer::new(playback_signing_key, playback_token_ttl)?;
 
         Ok(Self {
             bind_addr: env_socket_addr("REND_API_BIND_ADDR", "127.0.0.1:4000")?,
@@ -316,9 +353,11 @@ impl ApiConfig {
             s3_bucket,
             aws_access_key_id,
             aws_secret_access_key,
+            playback_mode,
             playback_base_url,
             playback_cookie_domain,
             playback_token_issuer,
+            playback_keyring,
             playback_bootstrap_prefetch_segments,
             edge_registry: EdgeRegistryConfig {
                 internal_token: edge_internal_token.clone(),
@@ -328,11 +367,13 @@ impl ApiConfig {
                 allow_insecure_edge_urls,
             },
             edge_warm: EdgeWarmConfig {
+                enabled: playback_mode.is_edge(),
                 url: edge_warm_url,
                 internal_token: edge_internal_token.clone(),
                 max_artifacts: edge_warm_max_artifacts,
             },
             edge_purge: EdgePurgeConfig {
+                enabled: playback_mode.is_edge(),
                 url: edge_purge_url,
                 internal_token: edge_internal_token,
             },
@@ -383,11 +424,47 @@ fn cors_allowed_origins_from_env(rend_env: RendEnv) -> Result<Vec<HeaderValue>> 
         .collect()
 }
 
+fn playback_base_url_for_mode(mode: PlaybackMode) -> String {
+    match mode {
+        PlaybackMode::Tigris => {
+            let explicit = env_string("REND_TIGRIS_PLAYBACK_BASE_URL", "");
+            if !explicit.trim().is_empty() {
+                return explicit.trim().trim_end_matches('/').to_owned();
+            }
+            let public_api = env_string("REND_PUBLIC_API_BASE_URL", "");
+            if !public_api.trim().is_empty() {
+                return public_api.trim().trim_end_matches('/').to_owned();
+            }
+            env_string("REND_API_BASE_URL", "http://127.0.0.1:4000")
+                .trim()
+                .trim_end_matches('/')
+                .to_owned()
+        }
+        PlaybackMode::Edge => env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100")
+            .trim()
+            .trim_end_matches('/')
+            .to_owned(),
+    }
+}
+
 fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(allowed_origins.to_vec())
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::RANGE,
+        ])
+        .allow_credentials(true)
+        .expose_headers([
+            header::ACCEPT_RANGES,
+            header::CONTENT_LENGTH,
+            header::CONTENT_RANGE,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("x-rend-origin"),
+        ])
 }
 
 #[derive(Clone)]
@@ -673,6 +750,17 @@ struct PlaybackBootstrapResponse {
     prefetch_hints: Vec<PlaybackPrefetchHint>,
 }
 
+#[derive(Deserialize)]
+struct PlaybackOriginPath {
+    asset_id: String,
+    artifact_path: String,
+}
+
+#[derive(Deserialize)]
+struct PlaybackOriginQuery {
+    token: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlaybackPrefetchHint {
     artifact_path: String,
@@ -722,6 +810,14 @@ struct AssetEventRecord {
 struct PlaybackArtifact {
     artifact_path: String,
     content_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OriginPlaybackArtifact {
+    asset_id: String,
+    artifact_path: String,
+    object_key: String,
+    content_type: &'static str,
 }
 
 struct IssuedPlaybackToken {
@@ -1125,7 +1221,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
                 require_internal_edge_token,
             ));
 
-    Router::new()
+    let playback_mode = state.config.playback_mode;
+    let cors = cors_layer(&state.config.cors_allowed_origins);
+
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/healthz", get(healthz))
@@ -1151,8 +1250,19 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             request_timeout,
         ))
-        .layer(cors_layer(&state.config.cors_allowed_origins))
-        .with_state(state)
+        .layer(cors);
+
+    if playback_mode == PlaybackMode::Tigris {
+        // Tigris mode intentionally keeps bare-metal playback dormant. This
+        // route validates Rend playback cookies/tokens and streams private
+        // origin objects without exposing object-store signed URLs.
+        app = app.route(
+            "/v/{asset_id}/{*artifact_path}",
+            get(playback_origin_artifact).route_layer(DefaultBodyLimit::disable()),
+        );
+    }
+
+    app.with_state(state)
 }
 
 fn build_s3_client(config: &ApiConfig) -> S3Client {
@@ -2066,6 +2176,63 @@ async fn get_asset_playback_inner(
         state.config.playback_bootstrap_prefetch_segments,
         now,
     )
+}
+
+async fn playback_origin_artifact(
+    State(state): State<Arc<AppState>>,
+    AxumPath(path): AxumPath<PlaybackOriginPath>,
+    Query(query): Query<PlaybackOriginQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match playback_origin_artifact_inner(state, path, query, headers).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn playback_origin_artifact_inner(
+    state: Arc<AppState>,
+    path: PlaybackOriginPath,
+    query: PlaybackOriginQuery,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let artifact = origin_playback_artifact(&path.asset_id, &path.artifact_path)?;
+    let cookie_token = playback_token_cookie(&headers);
+    let token = query.token.as_deref().or(cookie_token.as_deref());
+    let token = token.ok_or_else(|| AppError::unauthorized("unauthorized playback token"))?;
+    let now = current_unix_timestamp().map_err(AppError::internal)?;
+    validate_playback_token(
+        token,
+        &artifact.asset_id,
+        &artifact.artifact_path,
+        now,
+        &state.config.playback_keyring,
+    )
+    .map_err(|_| AppError::unauthorized("unauthorized playback token"))?;
+
+    let range_header = if is_hls_manifest_artifact_path(&artifact.artifact_path) {
+        None
+    } else {
+        headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(normalize_single_byte_range_header)
+    };
+
+    let mut get_object = state
+        .s3
+        .get_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&artifact.object_key);
+    if let Some(range_header) = range_header {
+        get_object = get_object.range(range_header);
+    }
+
+    let object = get_object
+        .send()
+        .await
+        .map_err(|error| origin_playback_artifact_error(&artifact, error))?;
+    Ok(origin_playback_artifact_response(artifact, object))
 }
 
 async fn fetch_asset_state_record(
@@ -4138,6 +4305,169 @@ fn source_object_key(asset_id: &str) -> String {
     format!("videos/{asset_id}/source")
 }
 
+fn origin_playback_artifact(
+    asset_id: &str,
+    artifact_path: &str,
+) -> Result<OriginPlaybackArtifact, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let content_type = match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
+        ["opener.mp4"] => "video/mp4",
+        ["hls", "master.m3u8"] => "application/vnd.apple.mpegurl",
+        ["hls", segment] if rend_playback_auth::is_valid_hls_segment_name(segment) => "video/mp2t",
+        ["hls", rendition, "index.m3u8"]
+            if rend_playback_auth::is_valid_hls_rendition_name(rendition) =>
+        {
+            "application/vnd.apple.mpegurl"
+        }
+        ["hls", rendition, segment]
+            if rend_playback_auth::is_valid_hls_rendition_name(rendition)
+                && rend_playback_auth::is_valid_hls_segment_name(segment) =>
+        {
+            "video/mp2t"
+        }
+        _ => return Err(AppError::not_found("artifact not found")),
+    };
+
+    Ok(OriginPlaybackArtifact {
+        asset_id: asset_id.clone(),
+        artifact_path: artifact_path.to_owned(),
+        object_key: format!("videos/{asset_id}/{artifact_path}"),
+        content_type,
+    })
+}
+
+fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        let value = value.trim();
+        (name.trim() == PLAYBACK_COOKIE_NAME && !value.is_empty() && value.len() <= 4096)
+            .then(|| value.to_owned())
+    })
+}
+
+fn normalize_single_byte_range_header(value: &str) -> Option<String> {
+    let value = value.trim();
+    let range_spec = value.strip_prefix("bytes=")?.trim();
+    if range_spec.is_empty() || range_spec.contains(',') {
+        return None;
+    }
+
+    let (start, end) = range_spec.split_once('-')?;
+    let start = start.trim();
+    let end = end.trim();
+    if start.is_empty() && end.is_empty() {
+        return None;
+    }
+    let parsed_start = if start.is_empty() {
+        None
+    } else {
+        Some(start.parse::<u64>().ok()?)
+    };
+    let parsed_end = if end.is_empty() {
+        None
+    } else {
+        Some(end.parse::<u64>().ok()?)
+    };
+    if let (Some(start), Some(end)) = (parsed_start, parsed_end)
+        && start > end
+    {
+        return None;
+    }
+    if parsed_start.is_none() && parsed_end == Some(0) {
+        return None;
+    }
+
+    Some(match (parsed_start, parsed_end) {
+        (Some(start), Some(end)) => format!("bytes={start}-{end}"),
+        (Some(start), None) => format!("bytes={start}-"),
+        (None, Some(suffix_length)) => format!("bytes=-{suffix_length}"),
+        (None, None) => return None,
+    })
+}
+
+fn origin_playback_artifact_error(
+    artifact: &OriginPlaybackArtifact,
+    error: impl std::fmt::Display,
+) -> AppError {
+    let message = error.to_string();
+    if message.contains("NoSuchKey")
+        || message.contains("NotFound")
+        || message.contains("Not Found")
+    {
+        return AppError::not_found("artifact not found");
+    }
+
+    tracing::error!(
+        artifact_path = %artifact.artifact_path,
+        error = %message,
+        "failed to fetch playback artifact from Tigris",
+    );
+    AppError::bad_gateway("artifact fetch failed")
+}
+
+fn origin_playback_artifact_response(
+    artifact: OriginPlaybackArtifact,
+    object: aws_sdk_s3::operation::get_object::GetObjectOutput,
+) -> Response {
+    let content_length = object
+        .content_length()
+        .map(|value| u64::try_from(value).unwrap_or(u64::MAX));
+    let content_range = object.content_range().map(str::to_owned);
+    let status = if content_range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, artifact.content_type)
+        .header(
+            header::CACHE_CONTROL,
+            playback_artifact_cache_control(artifact.content_type),
+        )
+        .header("x-rend-origin", "tigris");
+    if artifact.content_type != "application/vnd.apple.mpegurl" {
+        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
+    if let Some(content_length) = content_length {
+        builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());
+    }
+    if let Some(content_range) = content_range.as_deref() {
+        builder = builder.header(header::CONTENT_RANGE, content_range);
+    }
+
+    builder
+        .body(Body::from_stream(byte_stream_body(
+            object.body,
+            artifact.object_key,
+        )))
+        .expect("origin artifact response headers are valid")
+}
+
+fn byte_stream_body(
+    body: ByteStream,
+    object_key: String,
+) -> impl futures_util::Stream<Item = std::result::Result<Bytes, std::io::Error>> {
+    stream::try_unfold((body, object_key), |(mut body, object_key)| async move {
+        match body.try_next().await {
+            Ok(Some(chunk)) => Ok(Some((chunk, (body, object_key)))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(std::io::Error::other(format!(
+                "failed to read playback artifact {object_key} from origin: {error}"
+            ))),
+        }
+    })
+}
+
+fn playback_artifact_cache_control(content_type: &str) -> &'static str {
+    match content_type {
+        "application/vnd.apple.mpegurl" => "private, max-age=60, stale-while-revalidate=300",
+        "video/mp4" | "video/mp2t" => "private, max-age=31536000, immutable",
+        _ => "no-store",
+    }
+}
+
 fn playback_url(
     base_url: &str,
     asset_id: &str,
@@ -4170,6 +4500,10 @@ async fn maybe_warm_edge(
     playable_state: &str,
     generated_artifact_paths: &[String],
 ) {
+    if !config.enabled {
+        return;
+    }
+
     let Some(request) = edge_warm_request(
         asset_id,
         playable_state,
@@ -4622,6 +4956,10 @@ async fn maybe_purge_edge(
     asset_id: &str,
     artifact_paths: Option<Vec<String>>,
 ) -> bool {
+    if !config.enabled {
+        return false;
+    }
+
     let targets = edge_purge_fanout_targets(db, registry, config).await;
     if targets.is_empty() {
         return false;
@@ -5512,6 +5850,13 @@ impl AppError {
         }
     }
 
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -5538,6 +5883,13 @@ impl AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "internal server error".to_owned(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
         }
     }
 

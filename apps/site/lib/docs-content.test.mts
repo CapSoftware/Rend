@@ -19,9 +19,15 @@ import {
   docsNavItems,
 } from "../app/docs/docs-content.ts";
 
-const DOCS_PAGE_PATH = fileURLToPath(new URL("../app/docs/page.tsx", import.meta.url));
-const LLMS_ROUTE_PATH = fileURLToPath(new URL("../app/llms.txt/route.ts", import.meta.url));
-const SDK_README_PATH = fileURLToPath(new URL("../../../packages/sdk/README.md", import.meta.url));
+const DOCS_PAGE_PATH = fileURLToPath(
+  new URL("../app/docs/page.tsx", import.meta.url),
+);
+const LLMS_ROUTE_PATH = fileURLToPath(
+  new URL("../app/llms.txt/route.ts", import.meta.url),
+);
+const SDK_README_PATH = fileURLToPath(
+  new URL("../../../packages/sdk/README.md", import.meta.url),
+);
 
 test("docs navigation uses stable unique anchors", () => {
   const anchors = docsNavItems.map((item) => item.href);
@@ -39,7 +45,9 @@ test("command palette targets docs and reference routes", () => {
   assert.ok(docsCommandItems.some((item) => item.href === "/llms.txt"));
   assert.ok(docsCommandItems.some((item) => item.href === "/llms-full.txt"));
   assert.ok(
-    docsCommandItems.every((item) => item.title && item.description && item.keywords)
+    docsCommandItems.every(
+      (item) => item.title && item.description && item.keywords,
+    ),
   );
 });
 
@@ -54,14 +62,23 @@ test("docs examples match the public API and SDK surface", () => {
   assert.match(MCP_CLIENT_CONFIG_CODE, /@rend-sdk\/mcp/);
   assert.match(MCP_CLIENT_CONFIG_CODE, /REND_API_KEY/);
   assert.equal(MCP_INSTALL_COMMAND_CODE, "npx -y @rend-sdk/mcp");
-  assert.match(MCP_CURSOR_INSTALL_URL, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=rend&config=/);
+  assert.match(
+    MCP_CURSOR_INSTALL_URL,
+    /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=rend&config=/,
+  );
   assert.match(MCP_LOCAL_CONFIG_CODE, /packages\/mcp\/dist\/bin\/rend-mcp\.js/);
   assert.match(MCP_SMOKE_CODE, /bun run mcp:smoke/);
   assert.match(CURL_UPLOAD_CODE, /\/v1\/videos/);
-  assert.match(CURL_UPLOAD_CODE, /\/v1\/assets\/\$ASSET_ID\/analytics\/playback/);
+  assert.match(
+    CURL_UPLOAD_CODE,
+    /\/v1\/assets\/\$ASSET_ID\/analytics\/playback/,
+  );
   assert.match(CURL_UPLOAD_CODE, /\/api\/player\/\$ASSET_ID/);
   assert.match(AUTH_HEADER_CODE, /^Authorization: Bearer \$REND_API_KEY$/);
-  assert.match(PLAYBACK_BOOTSTRAP_CODE, /https:\/\/ash-1\.play\.rend\.so\/v\/018f52b2-5401-7f3b-ae2e-4923f4d62120\/hls\/master\.m3u8/);
+  assert.match(
+    PLAYBACK_BOOTSTRAP_CODE,
+    /\/api\/player\/018f52b2-5401-7f3b-ae2e-4923f4d62120\/artifact\/hls\/master\.m3u8/,
+  );
   assert.match(LOCAL_DOCKER_CODE, /bun run sdk:integration-smoke/);
   assert.match(AGENT_PROMPT_CODE, /\/llms\.txt/);
   assert.match(AGENT_PROMPT_CODE, /\/openapi\.json/);

@@ -15,17 +15,20 @@ export const docsNavItems: DocsNavItem[] = [
   {
     href: "#quickstart",
     title: "Quickstart",
-    description: "Sign up, choose a plan, create a key, upload, embed, and delete.",
+    description:
+      "Sign up, choose a plan, create a key, upload, embed, and delete.",
   },
   {
     href: "#agent-setup",
     title: "Agent setup",
-    description: "Give an agent the docs, API contract, safe key rules, and smoke test path.",
+    description:
+      "Give an agent the docs, API contract, safe key rules, and smoke test path.",
   },
   {
     href: "#mcp-server",
     title: "MCP server",
-    description: "Install Rend tools in Cursor or any MCP client with one click or copyable config.",
+    description:
+      "Install Rend tools in Cursor or any MCP client with one click or copyable config.",
   },
   {
     href: "#sdk-guide",
@@ -50,12 +53,14 @@ export const docsNavItems: DocsNavItem[] = [
   {
     href: "#billing-usage",
     title: "Billing and usage",
-    description: "Autumn limits, tiered delivery seconds, and storage second-months.",
+    description:
+      "Autumn limits, tiered delivery seconds, and storage second-months.",
   },
   {
     href: "#error-states",
     title: "Error states",
-    description: "not_playable, suspended, unauthorized, upload too large, and deleted.",
+    description:
+      "not_playable, suspended, unauthorized, upload too large, and deleted.",
   },
   {
     href: "#local-docker",
@@ -112,7 +117,8 @@ export const docsCommandItems: DocsCommandItem[] = [
   {
     href: "/llms-full.txt",
     title: "llms-full.txt",
-    description: "Plain-text marketing content for larger model context windows.",
+    description:
+      "Plain-text marketing content for larger model context windows.",
     group: "Reference",
     keywords: "llms full plain text marketing faqs context",
   },
@@ -255,16 +261,16 @@ export const PLAYBACK_BOOTSTRAP_CODE = `GET https://rend.so/api/player/018f52b2-
   "asset_id": "018f52b2-5401-7f3b-ae2e-4923f4d62120",
   "source_state": "uploaded",
   "playable_state": "hls_ready",
-  "playback_url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/master.m3u8",
+  "playback_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
   "playback_content_type": "application/vnd.apple.mpegurl",
-  "manifest_url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/master.m3u8",
+  "manifest_url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/master.m3u8",
   "manifest_content_type": "application/vnd.apple.mpegurl",
   "playback_token_expires_at": 1781432100,
   "ttl_seconds": 900,
   "prefetch_hints": [
     {
       "artifact_path": "hls/1080p/segment_00000.ts",
-      "url": "https://ash-1.play.rend.so/v/018f52b2-5401-7f3b-ae2e-4923f4d62120/hls/1080p/segment_00000.ts",
+      "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/1080p/segment_00000.ts",
       "content_type": "video/mp2t"
     }
   ]

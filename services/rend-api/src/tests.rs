@@ -69,11 +69,11 @@ async fn spawn_warm_recorder(status: StatusCode) -> (String, WarmRecorder) {
 }
 
 fn test_issuer() -> PlaybackTokenIssuer {
-    PlaybackTokenIssuer::new(
-        SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap(),
-        Duration::from_secs(600),
-    )
-    .unwrap()
+    PlaybackTokenIssuer::new(test_signing_key(), Duration::from_secs(600)).unwrap()
+}
+
+fn test_signing_key() -> SigningKey {
+    SigningKey::new("kid-a", b"test-playback-secret".to_vec()).unwrap()
 }
 
 fn test_config() -> ApiConfig {
@@ -89,9 +89,11 @@ fn test_config() -> ApiConfig {
         s3_bucket: "rend-local".to_owned(),
         aws_access_key_id: "test".to_owned(),
         aws_secret_access_key: "test".to_owned(),
-        playback_base_url: "http://127.0.0.1:4100".to_owned(),
+        playback_mode: PlaybackMode::Tigris,
+        playback_base_url: "http://127.0.0.1:4000".to_owned(),
         playback_cookie_domain: None,
         playback_token_issuer: test_issuer(),
+        playback_keyring: SingleKeyring::from_key(test_signing_key()),
         playback_bootstrap_prefetch_segments: DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
         edge_registry: EdgeRegistryConfig {
             internal_token: "internal".to_owned(),
@@ -101,11 +103,13 @@ fn test_config() -> ApiConfig {
             allow_insecure_edge_urls: false,
         },
         edge_warm: EdgeWarmConfig {
+            enabled: false,
             url: None,
             internal_token: "internal".to_owned(),
             max_artifacts: DEFAULT_EDGE_WARM_MAX_ARTIFACTS,
         },
         edge_purge: EdgePurgeConfig {
+            enabled: false,
             url: None,
             internal_token: "internal".to_owned(),
         },
@@ -1737,6 +1741,7 @@ fn fanout_skips_untrusted_registry_rows() {
 async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
     let (url, recorder) = spawn_warm_recorder(StatusCode::OK).await;
     let config = EdgeWarmConfig {
+        enabled: true,
         url: Some(url),
         internal_token: "warm-secret".to_owned(),
         max_artifacts: 3,
@@ -1784,9 +1789,40 @@ async fn maybe_warm_edge_posts_when_configured_and_uses_internal_token() {
 }
 
 #[tokio::test]
+async fn maybe_warm_edge_is_dormant_when_disabled() {
+    let (url, recorder) = spawn_warm_recorder(StatusCode::OK).await;
+    let config = EdgeWarmConfig {
+        enabled: false,
+        url: Some(url),
+        internal_token: "warm-secret".to_owned(),
+        max_artifacts: 3,
+    };
+
+    maybe_warm_edge(
+        None,
+        &reqwest::Client::new(),
+        &EdgeRegistryConfig {
+            internal_token: "warm-secret".to_owned(),
+            active_heartbeat_window: Duration::from_secs(120),
+            expected_edges: ExpectedEdges::default(),
+            rend_env: RendEnv::Local,
+            allow_insecure_edge_urls: false,
+        },
+        &config,
+        "asset-123",
+        "hls_ready",
+        &["hls/master.m3u8".to_owned()],
+    )
+    .await;
+
+    assert_eq!(recorder.count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn maybe_warm_edge_swallows_warm_endpoint_failure() {
     let (url, recorder) = spawn_warm_recorder(StatusCode::INTERNAL_SERVER_ERROR).await;
     let config = EdgeWarmConfig {
+        enabled: true,
         url: Some(url),
         internal_token: "warm-secret".to_owned(),
         max_artifacts: 4,

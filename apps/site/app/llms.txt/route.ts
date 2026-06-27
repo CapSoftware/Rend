@@ -12,14 +12,19 @@ export function GET() {
     "",
     `> ${siteDescription}`,
     "",
-    "Rend is open source. The server is AGPL; the player and SDKs are MIT. Self-hosting is free forever, and Rend Cloud adds a managed bare-metal edge network that warms each video's opening seconds close to viewers so playback starts fast even on a cold request.",
+    "Rend is open source. The server is AGPL; the player and SDKs are MIT. Self-hosting is free forever, and Rend Cloud currently serves generated HLS from Tigris-backed origin while the bare-metal edge path remains optional and dormant.",
     "",
     "## Pages",
-    ...marketingPages.map((page) => `- [${page.title}](${url(page.path)}): ${page.summary}`),
+    ...marketingPages.map(
+      (page) => `- [${page.title}](${url(page.path)}): ${page.summary}`,
+    ),
     "",
     "## Docs",
     `- [Docs home](${url("/docs")}): Public API docs for uploading video, waiting for playback, embedding the player, reading analytics, and deletion.`,
-    ...docsNavItems.map((item) => `- [${item.title}](${url("/docs")}${item.href}): ${item.description}`),
+    ...docsNavItems.map(
+      (item) =>
+        `- [${item.title}](${url("/docs")}${item.href}): ${item.description}`,
+    ),
     "",
     "## Reference",
     `- [OpenAPI JSON](${url("/openapi.json")}): Canonical public API contract.`,

@@ -49,7 +49,7 @@ const approaches = [
 const differences = [
   "Delivery and storage billed by resolution, not by the minute.",
   "Encoding included on every upload, not a separate charge.",
-  "Warmed openers at a bare-metal edge by default, so the first frame shows fast even cold.",
+  "Generated HLS served from Tigris-backed origin by default, with the bare-metal edge path kept optional.",
   "Open source and free to self-host, the same code that runs Rend Cloud.",
   "Agent-ready, with llms.txt, OpenAPI, a generated SDK and a copyable setup prompt for the model in your editor.",
 ];
@@ -60,7 +60,12 @@ export default function ComparePage() {
       <Effects />
       <JsonLd
         data={[
-          webPageLd({ name: page.title, description: page.description, path: page.path, type: "CollectionPage" }),
+          webPageLd({
+            name: page.title,
+            description: page.description,
+            path: page.path,
+            type: "CollectionPage",
+          }),
           breadcrumbLd(breadcrumbs),
           faqLd(page.faqs),
         ]}
@@ -72,8 +77,9 @@ export default function ComparePage() {
           title="How Rend compares"
           lede={
             <p>
-              Two prices, seconds delivered and storage kept, both by resolution. Here is how that
-              compares to the usual ways of paying for video.
+              Two prices, seconds delivered and storage kept, both by
+              resolution. Here is how that compares to the usual ways of paying
+              for video.
             </p>
           }
           actions={
@@ -81,7 +87,12 @@ export default function ComparePage() {
               <Button href={START_HREF} size="lg" className="w-full sm:w-auto">
                 Get started <ArrowRight />
               </Button>
-              <Button href="/pricing" size="lg" variant="secondary" className="w-full sm:w-auto">
+              <Button
+                href="/pricing"
+                size="lg"
+                variant="secondary"
+                className="w-full sm:w-auto"
+              >
                 See pricing
               </Button>
             </>
@@ -98,9 +109,9 @@ export default function ComparePage() {
           <ComparisonTable />
 
           <p className="mt-6 max-w-[680px] text-[13px] text-faint">
-            The other three columns are broad strokes for how each kind of platform usually bills and
-            runs, not a quote from any one vendor. Rend&apos;s own rates are listed live in the
-            dashboard.
+            The other three columns are broad strokes for how each kind of
+            platform usually bills and runs, not a quote from any one vendor.
+            Rend&apos;s own rates are listed live in the dashboard.
           </p>
         </Section>
 
@@ -128,8 +139,14 @@ export default function ComparePage() {
           />
           <ul className="mt-10 flex max-w-[680px] flex-col gap-4">
             {differences.map((d) => (
-              <li key={d} className="flex gap-2.5 text-[16px] leading-snug text-ink-soft">
-                <span aria-hidden="true" className="mt-[9px] h-1 w-1 shrink-0 rounded-full bg-accent" />
+              <li
+                key={d}
+                className="flex gap-2.5 text-[16px] leading-snug text-ink-soft"
+              >
+                <span
+                  aria-hidden="true"
+                  className="mt-[9px] h-1 w-1 shrink-0 rounded-full bg-accent"
+                />
                 {d}
               </li>
             ))}
@@ -150,7 +167,10 @@ export default function ComparePage() {
           </div>
         </Section>
 
-        <Faq faqs={page.faqs} lede="Common questions about how Rend compares to other ways of paying for video." />
+        <Faq
+          faqs={page.faqs}
+          lede="Common questions about how Rend compares to other ways of paying for video."
+        />
 
         <CtaSection
           title="Try Rend against your own numbers"

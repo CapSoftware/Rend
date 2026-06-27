@@ -20,9 +20,10 @@ Rend is the video platform for developers: one API call to upload, one playback
 URL that starts fast. Encoding, storage, delivery, signed playback, analytics,
 player packages, and SDKs are handled by one open-source stack.
 
-Rend warms the opening bytes of each video onto edge-local RAM and NVMe/SSD,
-close to viewers, so playback can start with fewer round trips even on a cold
-request. You can run the same stack yourself or use Rend Cloud's managed edge.
+Rend currently serves generated HLS from Tigris-backed origin through
+Rend-controlled playback URLs, so playback can start without exposing private
+storage URLs. The bare-metal edge path remains in the repo, but it is dormant in
+production until regional coverage makes it worthwhile.
 
 ## Performance Goals
 
@@ -32,26 +33,25 @@ that has not already been watched and cached everywhere.
 - Minimize time to first frame, not just server response time.
 - Generate a small opener during media processing so real frames can be served
   before the full HLS ladder is ready.
-- Warm openers and first playback artifacts to edge nodes before viewers press
-  play.
-- Serve playback from bare-metal edge nodes with local RAM and NVMe/SSD cache,
-  backed by durable object storage.
-- Keep the hot playback path independent of the control plane: signed playback
-  is validated at the edge before cache lookup, coalescing, or origin fetch.
+- Serve generated HLS from Tigris-backed origin by default while the bare-metal
+  edge path stays dormant until regional coverage makes it worthwhile again.
+- Keep playback credentials server-controlled: signed playback is validated
+  before private origin artifacts are streamed, without exposing storage URLs.
 - Measure the path with readiness and benchmark scripts covering upload
-  response time, upload-to-playable timings, playback bootstrap latency, edge
-  TTFB for misses/hits/warmed hits, cache behavior, and telemetry visibility.
+  response time, upload-to-playable timings, playback bootstrap latency,
+  origin TTFB, optional edge cache behavior, and telemetry visibility.
 
 ## Current Shape
 
 - [`apps/site/`](./apps/site) - Next.js app for the public site, docs,
   dashboard, auth, billing, and player-facing routes.
 - [`services/rend-api/`](./services/rend-api) - Rust API/control plane for
-  uploads, asset state, media jobs, playback bootstrap, edge registry,
-  telemetry ingest, and billing hooks.
+  uploads, asset state, media jobs, playback bootstrap, Tigris-origin playback,
+  optional edge registry, telemetry ingest, and billing hooks.
 - [`services/rend-edge/`](./services/rend-edge) - Rust playback edge for signed
   playback validation, cache warm/purge, origin-backed cache fill/coalescing,
-  and playback telemetry flushing.
+  and playback telemetry flushing. This code is currently dormant in production
+  unless `REND_PLAYBACK_MODE=edge` is explicitly enabled.
 - `rend-media-worker` - the `rend-api` binary running as `worker media`; claims
   queued media jobs and writes playback artifacts with `ffmpeg`/`ffprobe`.
 - [`packages/player/`](./packages/player) - React/HLS player package.
@@ -63,7 +63,7 @@ that has not already been watched and cached everywhere.
 
 The local stack currently covers upload, queued media processing, source and
 playback artifact storage, HLS/openers/thumbnails, signed playback bootstrap,
-edge cache warm/purge/coalescing, playback request analytics, API keys,
+Tigris-origin playback, optional edge cache warm/purge/coalescing, API keys,
 dashboard asset management, billing checks, and a generated public SDK.
 
 ## Requirements

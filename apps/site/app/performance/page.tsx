@@ -30,16 +30,16 @@ const breadcrumbs = [
 
 const pillars = [
   {
-    t: "Bare-metal edge, not shared functions",
-    d: "Rend Cloud runs on bare-metal nodes in the regions we operate. The hottest bytes live in edge-local RAM and NVMe, with durable object storage behind the cache. There is no cold function to spin up, and no shared tenant slowing you down.",
+    t: "Tigris-backed HLS by default",
+    d: "Rend Cloud serves generated HLS directly from Tigris-backed origin today. The bare-metal edge path stays available in the repo, but it is dormant in production until regional coverage makes it worthwhile.",
   },
   {
-    t: "First bytes already at the edge",
-    d: "The opening seconds of each video are warmed onto edge-local memory and NVMe, close to your viewers. Startup takes the shortest path we have instead of a trip back to origin.",
+    t: "No edge dependency",
+    d: "Uploads, readiness, watch pages and embeds do not require active edge nodes. Playback stays behind Rend-controlled URLs without exposing private object-store links.",
   },
   {
     t: "Ready before anyone presses play",
-    d: "Rend builds a small opener at upload and pushes it to the edge ahead of the first viewer. That first request hands back real frames while the rest of the video streams in behind it.",
+    d: "Rend builds HLS artifacts during media processing so the player can start from real media as soon as the asset reaches hls_ready.",
   },
 ];
 
@@ -49,12 +49,12 @@ const terms = [
     d: "The first request for a video nobody has watched yet, with nothing primed in any cache.",
   },
   {
-    t: "Warmed opener",
-    d: "The small file built from a video's opening seconds, pushed to the edge before the first viewer arrives.",
+    t: "HLS ready",
+    d: "The state where Rend-generated HLS manifests and segments are available for playback from origin.",
   },
   {
-    t: "Edge node",
-    d: "A bare-metal machine near your viewers that serves the first frames from local RAM and NVMe.",
+    t: "Dormant edge node",
+    d: "A bare-metal playback cache service kept in the repo for future reactivation, not required for current production playback.",
   },
 ];
 
@@ -64,7 +64,11 @@ export default function PerformancePage() {
       <Effects />
       <JsonLd
         data={[
-          webPageLd({ name: page.title, description: page.description, path: page.path }),
+          webPageLd({
+            name: page.title,
+            description: page.description,
+            path: page.path,
+          }),
           breadcrumbLd(breadcrumbs),
           faqLd(page.faqs),
         ]}
@@ -77,15 +81,15 @@ export default function PerformancePage() {
           lede={
             <>
               <p>
-                When a video is slow to start, it's rarely raw server speed. It's the round trips before
-                the first frame. Rend cuts those trips down by starting playback from the edge nearest
-                your viewer rather than a journey back to distant storage.
+                When a video is slow to start, it's rarely raw server speed.
+                It's the round trips before the first frame. Rend cuts those
+                trips down with generated HLS and a server-controlled Tigris
+                origin path that keeps private storage URLs out of the browser.
               </p>
               <p className="mt-4">
-                Every region we run sits on bare-metal machines we own, not shared cloud functions. The
-                opening seconds of each video live in local NVMe right beside the hardware serving them,
-                so the first request reads from fast local flash instead of pulling bytes back from
-                origin.
+                The bare-metal edge code remains available for a future regional
+                fleet, but it is not the active production path today. Current
+                playback works without edge warmers or edge cache fanout.
               </p>
             </>
           }
@@ -94,7 +98,12 @@ export default function PerformancePage() {
               <Button href={START_HREF} size="lg" className="w-full sm:w-auto">
                 Get started <ArrowRight />
               </Button>
-              <Button href="/docs" size="lg" variant="secondary" className="w-full sm:w-auto">
+              <Button
+                href="/docs"
+                size="lg"
+                variant="secondary"
+                className="w-full sm:w-auto"
+              >
                 Read the quickstart
               </Button>
             </>
@@ -112,9 +121,12 @@ export default function PerformancePage() {
             {/* viewer screen */}
             <path d="M16 36 C30 34 46 34 56 36 C58 48 58 68 56 80 C46 82 30 82 16 80 C14 68 14 48 16 36" />
             <path d="M30 48 L46 58 L30 68 Z" />
-            {/* edge node, with the warmed opener loaded */}
+            {/* optional edge node; dormant by default */}
             <path d="M80 44 C88 42 100 42 108 44 C110 52 110 64 108 72 C100 74 88 74 80 72 C78 64 78 52 80 44" />
-            <path d="M90 52 L100 58 L90 64 Z" style={{ fill: "var(--color-ink)", stroke: "none" }} />
+            <path
+              d="M90 52 L100 58 L90 64 Z"
+              style={{ fill: "var(--color-ink)", stroke: "none" }}
+            />
             <path className="anim-twinkle" d="M95 28 L95 38 M90 33 L100 33" />
             {/* origin streaming into the edge */}
             <path className="anim-zip" d="M120 50 L134 49" />
@@ -124,10 +136,22 @@ export default function PerformancePage() {
             <path id="p-ev" d="M78 60 C70 62 66 60 60 60" />
             {/* first frame hops to the screen */}
             <circle className="dot" r="4">
-              <animateMotion dur="2.2s" repeatCount="indefinite" calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.28;1">
+              <animateMotion
+                dur="2.2s"
+                repeatCount="indefinite"
+                calcMode="linear"
+                keyPoints="0;1;1"
+                keyTimes="0;0.28;1"
+              >
                 <mpath href="#p-ev" />
               </animateMotion>
-              <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.05;0.26;0.36;1" dur="2.2s" repeatCount="indefinite" />
+              <animate
+                attributeName="opacity"
+                values="0;1;1;0;0"
+                keyTimes="0;0.05;0.26;0.36;1"
+                dur="2.2s"
+                repeatCount="indefinite"
+              />
             </circle>
           </svg>
 
@@ -155,22 +179,28 @@ export default function PerformancePage() {
 
           <div className="mt-7 max-w-[640px] space-y-4 text-[17px] leading-[1.62] text-muted">
             <p>
-              A lot of speed claims are measured on the easy case, a video that has been watched many
-              times and cached everywhere. The honest figure is the cold start, when nothing is primed
-              and the bytes have the furthest to travel.
+              A lot of speed claims are measured on the easy case, a video that
+              has been watched many times and cached everywhere. The honest
+              figure is the cold start, when nothing is primed and the bytes
+              have the furthest to travel.
             </p>
             <p>
-              That is the case Rend is built for. Because the opener is already warmed onto an edge node
-              near the viewer, the first request can return real frames straight away while the rest of
-              the video streams in behind it.
+              That is the case Rend is built for. Rend generates the HLS
+              artifacts during processing and serves them through
+              Rend-controlled URLs, so the first request can return real media
+              while private object-store URLs stay out of the browser.
             </p>
           </div>
 
           <dl className="mt-10 grid gap-px overflow-hidden rounded-[18px] border border-line bg-line sm:grid-cols-3">
             {terms.map((term) => (
               <div key={term.t} className="bg-card p-6">
-                <dt className="font-head text-[17px] leading-snug text-ink">{term.t}</dt>
-                <dd className="mt-2 text-[14px] leading-[1.6] text-muted">{term.d}</dd>
+                <dt className="font-head text-[17px] leading-snug text-ink">
+                  {term.t}
+                </dt>
+                <dd className="mt-2 text-[14px] leading-[1.6] text-muted">
+                  {term.d}
+                </dd>
               </div>
             ))}
           </dl>
@@ -178,10 +208,12 @@ export default function PerformancePage() {
           <div className="mt-10 rounded-[18px] border border-line bg-card p-6 sm:p-7">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="max-w-[460px]">
-                <p className="font-head text-[20px] leading-snug">Measure it yourself</p>
+                <p className="font-head text-[20px] leading-snug">
+                  Measure it yourself
+                </p>
                 <p className="mt-1 text-[14px] text-muted">
-                  Upload a video, press play from wherever you are, and time the first frame. That is the
-                  only benchmark worth trusting.
+                  Upload a video, press play from wherever you are, and time the
+                  first frame. That is the only benchmark worth trusting.
                 </p>
               </div>
               <Button href={START_HREF} size="md" className="shrink-0">
@@ -191,7 +223,10 @@ export default function PerformancePage() {
           </div>
         </Section>
 
-        <Faq faqs={page.faqs} lede="A few questions we get about how Rend keeps playback fast." />
+        <Faq
+          faqs={page.faqs}
+          lede="A few questions we get about how Rend keeps playback fast."
+        />
 
         <CtaSection title="See the first frame for yourself" />
       </main>

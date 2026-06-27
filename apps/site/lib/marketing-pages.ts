@@ -44,10 +44,11 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "Features",
     description:
-      "What Rend does for developers: one API call to upload, encoding included, fast starts from the edge, and tooling your AI editor understands.",
-    ogSubtitle: "One call to upload, one fast playback URL out. Encoding, storage and delivery handled.",
+      "What Rend does for developers: one API call to upload, encoding included, Tigris-backed HLS playback, and tooling your AI editor understands.",
+    ogSubtitle:
+      "One call to upload, one fast playback URL out. Encoding, storage and delivery handled.",
     summary:
-      "What Rend does: upload with one API call, encoding included, warmed HLS startup bytes for fast cold starts, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
+      "What Rend does: upload with one API call, encoding included, generated HLS from Tigris-backed origin, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
     priority: 0.9,
     faqs: [
       {
@@ -60,11 +61,11 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "What do I get back to play the video?",
-        a: "An adaptive HLS ladder with startup playlists and early segments warmed at the edge. Browser playback uses same-origin URLs with no tokens to manage, so you drop in one source and it plays.",
+        a: "An adaptive HLS ladder served through Rend-controlled playback URLs. Browser playback uses same-origin URLs with no tokens to manage, so you drop in one source and it plays.",
       },
       {
         q: "Can I run it on my own servers?",
-        a: "Yes. Rend is open source and installs as a single binary, so you can self-host it for free. Or use Rend Cloud and let us run the edge network for you.",
+        a: "Yes. Rend is open source and installs as a single binary, so you can self-host it for free. Or use Rend Cloud and let us run the hosted playback stack for you.",
       },
       {
         q: "Is it easy to wire up with an AI coding assistant?",
@@ -79,10 +80,11 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "Why Rend is fast",
     description:
-      "Rend starts playback from the edge nearest your viewer. The HLS master, startup playlist, and first segments are warmed onto edge-local RAM and NVMe, so the first frame shows fast, even on a cold request.",
-    ogSubtitle: "Warmed HLS startup bytes on bare-metal edge nodes, so the first frame shows fast, even cold.",
+      "Rend serves generated HLS from Tigris-backed origin through Rend-controlled playback URLs, with the bare-metal edge path kept dormant until regional coverage makes it worthwhile.",
+    ogSubtitle:
+      "Generated HLS from Tigris-backed origin, with the edge path dormant by default.",
     summary:
-      "Why Rend is fast: bare-metal edge nodes instead of shared functions, HLS startup playlists and early segments warmed onto edge-local RAM and NVMe, and the first playback bytes pushed to the edge before the first viewer arrives so cold starts stay fast.",
+      "Why Rend is fast: generated HLS, Rend-controlled playback URLs, private origin URLs kept out of the browser, and an optional bare-metal edge path kept dormant until regional coverage makes it worthwhile.",
     priority: 0.9,
     faqs: [
       {
@@ -90,12 +92,12 @@ export const marketingPages: MarketingPage[] = [
         a: "It is rarely the server working hard. The wait comes from the round trips across the internet before the first frame can show. The further the first bytes have to travel, the longer playback takes to begin.",
       },
       {
-        q: "What gets warmed?",
-        a: "When you upload, Rend warms the HLS master playlist, the initial rendition playlist, and the first media segments at the edge before anyone presses play. The first request can start from local cache while adaptive playback continues normally.",
+        q: "What is active today?",
+        a: "When you upload, Rend generates the HLS master playlist, rendition playlists, and media segments during processing. Production playback serves those artifacts from Tigris-backed origin through Rend-controlled URLs.",
       },
       {
         q: "Do you run on serverless functions?",
-        a: "No. Rend Cloud runs on bare-metal nodes in the regions we operate. The hottest bytes sit in edge-local RAM and NVMe, with durable object storage behind the cache, so there is no cold function to spin up.",
+        a: "Current production playback does not depend on edge functions or active edge nodes; it uses Rend API-origin streaming from Tigris. The optional bare-metal edge service remains available behind REND_PLAYBACK_MODE=edge.",
       },
       {
         q: "What is time to first frame?",
@@ -115,7 +117,8 @@ export const marketingPages: MarketingPage[] = [
     title: "Pricing",
     description:
       "You pay for two things, both by resolution: seconds delivered and storage kept. Encoding is included, there are no per-minute fees and no egress surprises. Start free and scale when you need to.",
-    ogSubtitle: "Pay for delivery and storage by resolution. Encoding included. No egress surprises.",
+    ogSubtitle:
+      "Pay for delivery and storage by resolution. Encoding included. No egress surprises.",
     summary:
       "Rend pricing: pay for delivery (per second streamed, by resolution) and storage (per second-month kept, by resolution). Encoding is included, there are no egress fees, and plans run from pay as you go up to Enterprise.",
     priority: 0.9,
@@ -153,19 +156,20 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "How Rend compares",
     description:
-      "How Rend compares to minute-billed platforms, per-GB CDNs, and rolling your own. Delivery and storage by resolution, encoding included, open source, and a bare-metal edge.",
-    ogSubtitle: "Rend next to minute-billed platforms, per-GB CDNs, and rolling your own.",
+      "How Rend compares to minute-billed platforms, per-GB CDNs, and rolling your own. Delivery and storage by resolution, encoding included, open source, and Tigris-backed HLS playback.",
+    ogSubtitle:
+      "Rend next to minute-billed platforms, per-GB CDNs, and rolling your own.",
     summary:
-      "How Rend compares to other ways of paying for video: minute-billed platforms, budget per-GB CDNs, and rolling your own. Rend bills delivery and storage by resolution, includes encoding, is open source and self-hostable, and runs on a bare-metal edge.",
+      "How Rend compares to other ways of paying for video: minute-billed platforms, budget per-GB CDNs, and rolling your own. Rend bills delivery and storage by resolution, includes encoding, is open source and self-hostable, and serves generated HLS from Tigris-backed origin by default.",
     priority: 0.8,
     faqs: [
       {
         q: "How is Rend different from minute-billed platforms?",
-        a: "They charge per minute of video plus tiers, and things like encoding and fast cold starts are often extras. Rend bills delivery and storage by resolution, includes encoding, and warms HLS startup bytes at the edge by default.",
+        a: "They charge per minute of video plus tiers, and things like encoding and fast starts are often extras. Rend bills delivery and storage by resolution, includes encoding, and serves generated HLS from Tigris-backed origin by default.",
       },
       {
         q: "How does Rend compare to budget per-GB CDNs?",
-        a: "A per-GB CDN bills raw bandwidth by region and leaves encoding and packaging to you. Rend handles encoding, packaging, storage and delivery, and starts playback from the edge nearest the viewer.",
+        a: "A per-GB CDN bills raw bandwidth by region and leaves encoding and packaging to you. Rend handles encoding, packaging, storage and delivery through one playback stack.",
       },
       {
         q: "Why not just roll my own video stack?",
@@ -185,9 +189,10 @@ export const marketingPages: MarketingPage[] = [
     title: "Benchmarks",
     description:
       "An honest startup benchmark: time to first frame for Rend versus Mux on the same source video, measured from a clean browser with the raw results published.",
-    ogSubtitle: "Time to first frame, Rend versus Mux on the same source video, with raw results published.",
+    ogSubtitle:
+      "Time to first frame, Rend versus Mux on the same source video, with raw results published.",
     summary:
-      "A startup speed benchmark comparing Rend's fastest production playback path against Mux on the same source video: median time to first frame, stall counts and reliability across US and Europe runs, with the full raw artifacts published.",
+      "A startup speed benchmark comparing Rend's production playback path against Mux on the same source video: median time to first frame, stall counts and reliability across US and Europe runs, with the full raw artifacts published.",
     priority: 0.8,
     faqs: [
       {
@@ -216,7 +221,8 @@ export const marketingPages: MarketingPage[] = [
     title: "Built by the team behind Cap",
     description:
       "Rend is built by the team behind Cap, the open source screen recorder. We needed video that played the instant a link opened, could not buy it, so we built it. Cap runs entirely on Rend.",
-    ogSubtitle: "We needed video that loaded instantly, could not buy it, so we built it.",
+    ogSubtitle:
+      "We needed video that loaded instantly, could not buy it, so we built it.",
     summary:
       "Rend is built by the team behind Cap, the open source screen recorder. Cap serves a huge library of recordings that have to play the instant a share link opens, so the team built Rend to make that happen, then opened it up for other developers. Cap runs entirely on Rend.",
     priority: 0.7,

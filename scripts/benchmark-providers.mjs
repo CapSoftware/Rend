@@ -8,22 +8,35 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 const artifactRoot = path.join(repoRoot, ".rend", "benchmarks", "providers");
-const publicRoot = path.join(repoRoot, "apps", "site", "public", "benchmarks", "providers");
+const publicRoot = path.join(
+  repoRoot,
+  "apps",
+  "site",
+  "public",
+  "benchmarks",
+  "providers",
+);
 
 const defaultProviderUrls = {
   rend: "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
   mux: "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
   cloudfront: "https://v.cap.so/mezzanine.mp4",
   rend_edge_static: "http://127.0.0.1:8125/index.html",
-  rend_prod_embed: "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
-  tigris_direct_mp4: "http://127.0.0.1:8125/tigris-direct-mp4/index.html",
-  tigris_direct_hls: "http://127.0.0.1:8125/tigris-direct-hls/index.html",
+  rend_prod_embed:
+    "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+  rend_tigris_hls: "http://127.0.0.1:8125/rend-tigris-hls/index.html",
 };
 
 function providerUrl(providerId) {
-  return process.env[`BENCHMARK_${providerId.toUpperCase()}_URL`] || defaultProviderUrls[providerId];
+  return (
+    process.env[`BENCHMARK_${providerId.toUpperCase()}_URL`] ||
+    defaultProviderUrls[providerId]
+  );
 }
 
 function providerHost(url) {
@@ -66,17 +79,11 @@ const providerCatalog = {
     url: providerUrl("rend_prod_embed"),
     playerHost: providerHost(providerUrl("rend_prod_embed")),
   },
-  tigris_direct_mp4: {
-    id: "tigris_direct_mp4",
-    name: "Tigris direct MP4",
-    url: providerUrl("tigris_direct_mp4"),
-    playerHost: providerHost(providerUrl("tigris_direct_mp4")),
-  },
-  tigris_direct_hls: {
-    id: "tigris_direct_hls",
-    name: "Tigris direct HLS",
-    url: providerUrl("tigris_direct_hls"),
-    playerHost: providerHost(providerUrl("tigris_direct_hls")),
+  rend_tigris_hls: {
+    id: "rend_tigris_hls",
+    name: "Rend HLS direct from Tigris",
+    url: providerUrl("rend_tigris_hls"),
+    playerHost: providerHost(providerUrl("rend_tigris_hls")),
   },
 };
 
@@ -98,6 +105,7 @@ const caveats = [
   "The harness does not purge or manipulate Mux CDN caches.",
   "The harness does not warm only Rend during direct comparisons.",
   "Selected resolutions and rendition ladders may differ; current Rend media generation emits an ABR ladder using the supported 720p/1080p/2k/4k billing tiers.",
+  "Direct object-storage HLS pages use Rend-generated HLS artifacts but bypass Rend's edge cache, site route, and production player shell.",
   "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals.",
 ];
 
@@ -116,8 +124,15 @@ const sensitivePatterns = [
   { name: "set-cookie header", pattern: /set-cookie/i },
   { name: "bearer token", pattern: /bearer\s+[a-z0-9._~+/=-]{12,}/i },
   { name: "basic auth token", pattern: /basic\s+[a-z0-9+/=-]{12,}/i },
-  { name: "aws signed query", pattern: /[?&](x-amz-|awsaccesskeyid|signature=|x-amz-signature)/i },
-  { name: "generic secret key", pattern: /"(api[_-]?key|secret|private[_-]?key|access[_-]?token|refresh[_-]?token)"\s*:/i },
+  {
+    name: "aws signed query",
+    pattern: /[?&](x-amz-|awsaccesskeyid|signature=|x-amz-signature)/i,
+  },
+  {
+    name: "generic secret key",
+    pattern:
+      /"(api[_-]?key|secret|private[_-]?key|access[_-]?token|refresh[_-]?token)"\s*:/i,
+  },
   { name: "url credentials", pattern: /https?:\/\/[^/\s"']+:[^@\s"']+@/i },
 ];
 
@@ -126,8 +141,12 @@ function parseArgs(argv) {
     samples: Number(process.env.BENCHMARK_PROVIDER_SAMPLES || 5),
     watchMs: Number(process.env.BENCHMARK_WATCH_MS || 30_000),
     delayMs: Number(process.env.BENCHMARK_SAMPLE_DELAY_MS || 3_000),
-    startupTimeoutMs: Number(process.env.BENCHMARK_STARTUP_TIMEOUT_MS || 45_000),
-    navigationTimeoutMs: Number(process.env.BENCHMARK_NAVIGATION_TIMEOUT_MS || 45_000),
+    startupTimeoutMs: Number(
+      process.env.BENCHMARK_STARTUP_TIMEOUT_MS || 45_000,
+    ),
+    navigationTimeoutMs: Number(
+      process.env.BENCHMARK_NAVIGATION_TIMEOUT_MS || 45_000,
+    ),
     videoTimeoutMs: Number(process.env.BENCHMARK_VIDEO_TIMEOUT_MS || 20_000),
     providers: (process.env.BENCHMARK_PROVIDERS || "rend,mux")
       .split(",")
@@ -191,7 +210,10 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === "--providers") {
-      options.providers = next.split(",").map((id) => id.trim()).filter(Boolean);
+      options.providers = next
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
       i += 1;
       continue;
     }
@@ -256,25 +278,43 @@ function parseViewport(value) {
 }
 
 function validateOptions(options) {
-  if (!Number.isFinite(options.samples) || options.samples < 1 || options.samples > 50) {
+  if (
+    !Number.isFinite(options.samples) ||
+    options.samples < 1 ||
+    options.samples > 50
+  ) {
     throw new Error("--samples must be between 1 and 50");
   }
-  if (!Number.isFinite(options.watchMs) || options.watchMs < 1_000 || options.watchMs > 120_000) {
+  if (
+    !Number.isFinite(options.watchMs) ||
+    options.watchMs < 1_000 ||
+    options.watchMs > 120_000
+  ) {
     throw new Error("--watch-ms must be between 1000 and 120000");
   }
-  if (!Number.isFinite(options.delayMs) || options.delayMs < 0 || options.delayMs > 60_000) {
+  if (
+    !Number.isFinite(options.delayMs) ||
+    options.delayMs < 0 ||
+    options.delayMs > 60_000
+  ) {
     throw new Error("--delay-ms must be between 0 and 60000");
   }
   for (const provider of options.providers) {
     if (!providerCatalog[provider]) {
-      throw new Error(`Unknown provider "${provider}". Known providers: ${Object.keys(providerCatalog).join(", ")}`);
+      throw new Error(
+        `Unknown provider "${provider}". Known providers: ${Object.keys(providerCatalog).join(", ")}`,
+      );
     }
   }
-  if (options.providers.length < 1) throw new Error("At least one provider is required");
+  if (options.providers.length < 1)
+    throw new Error("At least one provider is required");
 }
 
 function isoRunId(date = new Date()) {
-  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }
 
 function sleep(ms) {
@@ -301,9 +341,18 @@ function percentile(sorted, p) {
 }
 
 function stats(values) {
-  const finite = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  const finite = values
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
   if (finite.length === 0) {
-    return { count: 0, min: null, median: null, p75: null, p95: null, max: null };
+    return {
+      count: 0,
+      min: null,
+      median: null,
+      p75: null,
+      p95: null,
+      max: null,
+    };
   }
   return {
     count: finite.length,
@@ -331,34 +380,45 @@ function sanitizeUrl(value) {
     );
   } catch {
     return value
-      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asset-id>")
+      .replace(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+        "<asset-id>",
+      )
       .slice(0, 180);
   }
 }
 
 function sanitizeError(error) {
   if (!error) return null;
-  return String(error.message || error).replaceAll(process.cwd(), "<cwd>").slice(0, 500);
+  return String(error.message || error)
+    .replaceAll(process.cwd(), "<cwd>")
+    .slice(0, 500);
 }
 
 function inferPlaybackMode(metadata, resourceSummary) {
   const src = metadata?.currentSrc || "";
-  if (src === "blob:redacted" && resourceSummary?.byExtension?.m3u8) return "hls-via-mse";
-  if (src === "blob:redacted" && (resourceSummary?.byExtension?.m4s || resourceSummary?.byExtension?.mpd)) {
+  if (src === "blob:redacted" && resourceSummary?.byExtension?.m3u8)
+    return "hls-via-mse";
+  if (
+    src === "blob:redacted" &&
+    (resourceSummary?.byExtension?.m4s || resourceSummary?.byExtension?.mpd)
+  ) {
     return "dash-or-cmaf-via-mse";
   }
   if (src === "blob:redacted") return "mse-or-blob";
   if (/\.m3u8($|\?)/i.test(src)) return "hls";
   if (/\.(mp4|m4v)($|\?)/i.test(src)) return "progressive-mp4";
   if (resourceSummary?.byExtension?.m3u8) return "hls";
-  if (resourceSummary?.byExtension?.m4s || resourceSummary?.byExtension?.mpd) return "dash-or-cmaf";
+  if (resourceSummary?.byExtension?.m4s || resourceSummary?.byExtension?.mpd)
+    return "dash-or-cmaf";
   if (resourceSummary?.byExtension?.mp4) return "mp4-resource-observed";
   return "unknown";
 }
 
 function redactSample(sample) {
   const copy = structuredClone(sample);
-  if (copy.video?.currentSrc) copy.video.currentSrc = sanitizeUrl(copy.video.currentSrc);
+  if (copy.video?.currentSrc)
+    copy.video.currentSrc = sanitizeUrl(copy.video.currentSrc);
   if (copy.network?.errors) {
     copy.network.errors = copy.network.errors.map((error) => ({
       ...error,
@@ -366,7 +426,8 @@ function redactSample(sample) {
       message: error.message ? String(error.message).slice(0, 300) : undefined,
     }));
   }
-  if (copy.navigation?.finalUrl) copy.navigation.finalUrl = sanitizeUrl(copy.navigation.finalUrl);
+  if (copy.navigation?.finalUrl)
+    copy.navigation.finalUrl = sanitizeUrl(copy.navigation.finalUrl);
   return copy;
 }
 
@@ -393,14 +454,19 @@ async function launchBenchmarkBrowser(chromium, options) {
 
   if (options.browserChannel) {
     try {
-      return await chromium.launch({ ...launchOptions, channel: options.browserChannel });
+      return await chromium.launch({
+        ...launchOptions,
+        channel: options.browserChannel,
+      });
     } catch (error) {
       if (!options.allowBundledChromium) {
         throw new Error(
           `Failed to launch Playwright browser channel "${options.browserChannel}". Set BENCHMARK_BROWSER_CHANNEL to an installed channel or BENCHMARK_ALLOW_BUNDLED_CHROMIUM=1. ${error.message}`,
         );
       }
-      console.warn(`[benchmark] Chrome channel unavailable, falling back to bundled Chromium: ${error.message}`);
+      console.warn(
+        `[benchmark] Chrome channel unavailable, falling back to bundled Chromium: ${error.message}`,
+      );
     }
   }
 
@@ -430,10 +496,18 @@ async function createContext(browser, options) {
   return context;
 }
 
-async function runProviderSample({ browser, provider, options, roundIndex, providerOrder }) {
+async function runProviderSample({
+  browser,
+  provider,
+  options,
+  roundIndex,
+  providerOrder,
+}) {
   const context = await createContext(browser, options);
   const page = await context.newPage();
-  page.setDefaultTimeout(Math.max(options.startupTimeoutMs, options.videoTimeoutMs));
+  page.setDefaultTimeout(
+    Math.max(options.startupTimeoutMs, options.videoTimeoutMs),
+  );
 
   const networkErrors = [];
   page.on("requestfailed", (request) => {
@@ -471,7 +545,9 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
         timeout: options.navigationTimeoutMs,
       });
       if (!preflight?.ok()) {
-        throw new Error(`preflight failed with HTTP ${preflight?.status() ?? "unknown"}`);
+        throw new Error(
+          `preflight failed with HTTP ${preflight?.status() ?? "unknown"}`,
+        );
       }
     }
 
@@ -482,17 +558,25 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
     });
     responseStatus = response?.status() ?? null;
 
-    await page.waitForFunction(() => Boolean(window.__rendProviderBenchmark?.videoSeen), null, {
-      timeout: options.videoTimeoutMs,
-    });
+    await page.waitForFunction(
+      () => Boolean(window.__rendProviderBenchmark?.videoSeen),
+      null,
+      {
+        timeout: options.videoTimeoutMs,
+      },
+    );
 
-    await page.evaluate(() => window.__rendProviderBenchmark?.startPlayback?.());
+    await page.evaluate(() =>
+      window.__rendProviderBenchmark?.startPlayback?.(),
+    );
 
     try {
       await page.waitForFunction(
         () => {
           const state = window.__rendProviderBenchmark?.snapshot?.();
-          return Boolean(state?.events?.firstFrameMs || state?.events?.playingMs);
+          return Boolean(
+            state?.events?.firstFrameMs || state?.events?.playingMs,
+          );
         },
         null,
         { timeout: options.startupTimeoutMs },
@@ -502,12 +586,16 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
     }
 
     await page.waitForTimeout(options.watchMs);
-    snapshot = await page.evaluate(() => window.__rendProviderBenchmark?.snapshot?.());
+    snapshot = await page.evaluate(() =>
+      window.__rendProviderBenchmark?.snapshot?.(),
+    );
     browserUserAgent = await page.evaluate(() => navigator.userAgent);
   } catch (error) {
     failure = sanitizeError(error);
     try {
-      snapshot = await page.evaluate(() => window.__rendProviderBenchmark?.snapshot?.());
+      snapshot = await page.evaluate(() =>
+        window.__rendProviderBenchmark?.snapshot?.(),
+      );
       browserUserAgent = await page.evaluate(() => navigator.userAgent);
     } catch {
       snapshot = null;
@@ -528,11 +616,19 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
     readyState: snapshot?.video?.readyState ?? null,
     networkState: snapshot?.video?.networkState ?? null,
     currentSrc: sanitizeUrl(snapshot?.video?.currentSrc),
-    playbackMode: inferPlaybackMode({ currentSrc: sanitizeUrl(snapshot?.video?.currentSrc) }, resourceSummary),
+    playbackMode: inferPlaybackMode(
+      { currentSrc: sanitizeUrl(snapshot?.video?.currentSrc) },
+      resourceSummary,
+    ),
   };
-  const timeToFirstFrameMs = finiteOrNull(eventMetrics.firstFrameMs ?? eventMetrics.playingMs);
+  const timeToFirstFrameMs = finiteOrNull(
+    eventMetrics.firstFrameMs ?? eventMetrics.playingMs,
+  );
   const timeToPlayerReadyMs = finiteOrNull(
-    eventMetrics.firstFrameMs ?? eventMetrics.playingMs ?? eventMetrics.canplayMs ?? eventMetrics.loadedmetadataMs,
+    eventMetrics.firstFrameMs ??
+      eventMetrics.playingMs ??
+      eventMetrics.canplayMs ??
+      eventMetrics.loadedmetadataMs,
   );
   const sample = redactSample({
     id: randomUUID(),
@@ -542,7 +638,9 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
     runnerLabel: options.runnerLabel,
     roundIndex,
     providerOrder,
-    startedAt: new Date(Date.now() - (sampleEnded - sampleStarted)).toISOString(),
+    startedAt: new Date(
+      Date.now() - (sampleEnded - sampleStarted),
+    ).toISOString(),
     finishedAt: new Date().toISOString(),
     navigation: {
       url: provider.url,
@@ -558,7 +656,10 @@ async function runProviderSample({ browser, provider, options, roundIndex, provi
       totalDurationMs: roundMs(sampleEnded - sampleStarted),
       stallCount: snapshot?.stalls?.length ?? 0,
       stallDurationMs: roundMs(
-        (snapshot?.stalls || []).reduce((sum, stall) => sum + Math.max(0, Number(stall.durationMs) || 0), 0),
+        (snapshot?.stalls || []).reduce(
+          (sum, stall) => sum + Math.max(0, Number(stall.durationMs) || 0),
+          0,
+        ),
       ),
     },
     success: !failure && Number.isFinite(timeToFirstFrameMs),
@@ -596,34 +697,51 @@ function finiteOrNull(value) {
 }
 
 function buildProviderSummary(samples, providerId) {
-  const providerSamples = samples.filter((sample) => sample.providerId === providerId);
+  const providerSamples = samples.filter(
+    (sample) => sample.providerId === providerId,
+  );
   const successful = providerSamples.filter((sample) => sample.success);
   const metricStats = {};
   for (const metric of Object.keys(metricLabels)) {
-    metricStats[metric] = stats(providerSamples.map((sample) => sample.metrics?.[metric]));
+    metricStats[metric] = stats(
+      providerSamples.map((sample) => sample.metrics?.[metric]),
+    );
   }
 
-  const observedDurations = successful.map((sample) => sample.video?.durationSeconds).filter((value) => Number.isFinite(value));
+  const observedDurations = successful
+    .map((sample) => sample.video?.durationSeconds)
+    .filter((value) => Number.isFinite(value));
   const observedResolutions = successful
     .map((sample) => {
       const width = sample.video?.naturalWidth;
       const height = sample.video?.naturalHeight;
-      return Number.isFinite(width) && Number.isFinite(height) ? `${width}x${height}` : null;
+      return Number.isFinite(width) && Number.isFinite(height)
+        ? `${width}x${height}`
+        : null;
     })
     .filter(Boolean);
   const renderedResolutions = successful
     .map((sample) => {
       const width = sample.video?.renderedWidth;
       const height = sample.video?.renderedHeight;
-      return Number.isFinite(width) && Number.isFinite(height) ? `${Math.round(width)}x${Math.round(height)}` : null;
+      return Number.isFinite(width) && Number.isFinite(height)
+        ? `${Math.round(width)}x${Math.round(height)}`
+        : null;
     })
     .filter(Boolean);
-  const playbackModes = successful.map((sample) => sample.video?.playbackMode).filter(Boolean);
+  const playbackModes = successful
+    .map((sample) => sample.video?.playbackMode)
+    .filter(Boolean);
   const selectedRenditions = successful
     .map((sample) => {
       const width = Number(sample.player?.rend?.selectedWidth);
       const height = Number(sample.player?.rend?.selectedHeight);
-      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      if (
+        Number.isFinite(width) &&
+        Number.isFinite(height) &&
+        width > 0 &&
+        height > 0
+      ) {
         return `${width}x${height}`;
       }
       return null;
@@ -635,7 +753,11 @@ function buildProviderSummary(samples, providerId) {
     successfulSamples: successful.length,
     failedSamples: providerSamples.length - successful.length,
     startupFailureRate: providerSamples.length
-      ? Math.round(((providerSamples.length - successful.length) / providerSamples.length) * 10_000) / 100
+      ? Math.round(
+          ((providerSamples.length - successful.length) /
+            providerSamples.length) *
+            10_000,
+        ) / 100
       : null,
     metrics: metricStats,
     observed: {
@@ -643,9 +765,15 @@ function buildProviderSummary(samples, providerId) {
       naturalResolution: mostCommon(observedResolutions),
       renderedResolution: mostCommon(renderedResolutions),
       playbackMode: mostCommon(playbackModes),
-      selectedRendition: mostCommon(selectedRenditions) || mostCommon(observedResolutions) || "not observable",
+      selectedRendition:
+        mostCommon(selectedRenditions) ||
+        mostCommon(observedResolutions) ||
+        "not observable",
     },
-    browserNetworkErrors: providerSamples.reduce((sum, sample) => sum + (sample.network?.errors?.length || 0), 0),
+    browserNetworkErrors: providerSamples.reduce(
+      (sum, sample) => sum + (sample.network?.errors?.length || 0),
+      0,
+    ),
   };
 }
 
@@ -653,7 +781,9 @@ function mostCommon(values) {
   if (values.length === 0) return null;
   const counts = new Map();
   for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0][0];
+  return [...counts.entries()].sort(
+    (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])),
+  )[0][0];
 }
 
 function buildSourceVerification(providerSummaries) {
@@ -661,7 +791,8 @@ function buildSourceVerification(providerSummaries) {
   const observed = {};
   for (const id of ids) {
     observed[id] = {
-      durationMedianSeconds: providerSummaries[id].observed.durationSeconds.median,
+      durationMedianSeconds:
+        providerSummaries[id].observed.durationSeconds.median,
       naturalResolution: providerSummaries[id].observed.naturalResolution,
       playbackMode: providerSummaries[id].observed.playbackMode,
     };
@@ -669,8 +800,12 @@ function buildSourceVerification(providerSummaries) {
 
   let metadataLooksConsistent = false;
   if (ids.length >= 2) {
-    const durations = ids.map((id) => providerSummaries[id].observed.durationSeconds.median).filter(Number.isFinite);
-    const resolutions = ids.map((id) => providerSummaries[id].observed.naturalResolution).filter(Boolean);
+    const durations = ids
+      .map((id) => providerSummaries[id].observed.durationSeconds.median)
+      .filter(Number.isFinite);
+    const resolutions = ids
+      .map((id) => providerSummaries[id].observed.naturalResolution)
+      .filter(Boolean);
     metadataLooksConsistent =
       durations.length === ids.length &&
       Math.max(...durations) - Math.min(...durations) <= 0.75 &&
@@ -687,14 +822,32 @@ function buildSourceVerification(providerSummaries) {
   };
 }
 
-function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByRound, options, browserVersion }) {
+function buildArtifact({
+  runId,
+  startedAt,
+  finishedAt,
+  samples,
+  providerOrderByRound,
+  options,
+  browserVersion,
+}) {
   const providers = options.providers.map((id) => providerCatalog[id]);
-  const providerSummaries = Object.fromEntries(providers.map((provider) => [provider.id, buildProviderSummary(samples, provider.id)]));
-  const minSamplesPerProvider = Math.min(...Object.values(providerSummaries).map((summary) => summary.sampleCount));
-  const minSuccessfulSamplesPerProvider = Math.min(
-    ...Object.values(providerSummaries).map((summary) => summary.successfulSamples),
+  const providerSummaries = Object.fromEntries(
+    providers.map((provider) => [
+      provider.id,
+      buildProviderSummary(samples, provider.id),
+    ]),
   );
-  const sufficientForPublication = minSamplesPerProvider >= 5 && minSuccessfulSamplesPerProvider >= 5;
+  const minSamplesPerProvider = Math.min(
+    ...Object.values(providerSummaries).map((summary) => summary.sampleCount),
+  );
+  const minSuccessfulSamplesPerProvider = Math.min(
+    ...Object.values(providerSummaries).map(
+      (summary) => summary.successfulSamples,
+    ),
+  );
+  const sufficientForPublication =
+    minSamplesPerProvider >= 5 && minSuccessfulSamplesPerProvider >= 5;
   const sourceVerification = buildSourceVerification(providerSummaries);
 
   return {
@@ -716,7 +869,9 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
       providerOrderByRound,
     },
     source: {
-      urls: Object.fromEntries(providers.map((provider) => [provider.id, sanitizeUrl(provider.url)])),
+      urls: Object.fromEntries(
+        providers.map((provider) => [provider.id, sanitizeUrl(provider.url)]),
+      ),
       verification: sourceVerification,
     },
     fairness: {
@@ -751,9 +906,17 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
     providers: providers.map((provider) => ({
       ...provider,
       url: sanitizeUrl(provider.url),
-      ...(provider.preflightUrl ? { preflightUrl: sanitizeUrl(provider.preflightUrl) } : {}),
+      ...(provider.preflightUrl
+        ? { preflightUrl: sanitizeUrl(provider.preflightUrl) }
+        : {}),
     })),
-    regions: [{ id: options.region, label: options.regionLabel, runnerKind: options.runnerKind }],
+    regions: [
+      {
+        id: options.region,
+        label: options.regionLabel,
+        runnerKind: options.runnerKind,
+      },
+    ],
     summary: {
       result: sufficientForPublication
         ? "benchmark_samples_available_no_universal_claim"
@@ -772,7 +935,13 @@ function buildArtifact({ runId, startedAt, finishedAt, samples, providerOrderByR
   };
 }
 
-async function writeArtifacts({ runId, artifact, samples, redaction, options }) {
+async function writeArtifacts({
+  runId,
+  artifact,
+  samples,
+  redaction,
+  options,
+}) {
   const runDir = path.join(artifactRoot, runId);
   const sampleDocument = {
     schemaVersion: "rend.provider-benchmark-samples.v1",
@@ -809,7 +978,9 @@ async function writeArtifacts({ runId, artifact, samples, redaction, options }) 
   return {
     runDir,
     latestPath: path.join(artifactRoot, "latest.json"),
-    publicLatestPath: options.publicCopy ? path.join(publicRoot, "latest.json") : null,
+    publicLatestPath: options.publicCopy
+      ? path.join(publicRoot, "latest.json")
+      : null,
   };
 }
 
@@ -839,8 +1010,12 @@ async function main() {
       const order = shuffle(providers);
       providerOrderByRound.push(order.map((provider) => provider.id));
       for (const provider of order) {
-        const sampleNumber = samples.filter((sample) => sample.providerId === provider.id).length + 1;
-        console.log(`[benchmark] round=${round + 1}/${options.samples} provider=${provider.id} sample=${sampleNumber}`);
+        const sampleNumber =
+          samples.filter((sample) => sample.providerId === provider.id).length +
+          1;
+        console.log(
+          `[benchmark] round=${round + 1}/${options.samples} provider=${provider.id} sample=${sampleNumber}`,
+        );
         const sample = await runProviderSample({
           browser,
           provider,
@@ -849,7 +1024,10 @@ async function main() {
           providerOrder: order.map((item) => item.id),
         });
         samples.push(sample);
-        const ready = sample.metrics.timeToPlayerReadyMs == null ? "n/a" : `${sample.metrics.timeToPlayerReadyMs}ms`;
+        const ready =
+          sample.metrics.timeToPlayerReadyMs == null
+            ? "n/a"
+            : `${sample.metrics.timeToPlayerReadyMs}ms`;
         console.log(
           `[benchmark] provider=${provider.id} success=${sample.success} ready=${ready} stalls=${sample.metrics.stallCount}`,
         );
@@ -874,13 +1052,25 @@ async function main() {
   if (redaction.status !== "passed") {
     const reportDir = path.join(artifactRoot, runId);
     await mkdir(reportDir, { recursive: true });
-    await writeFile(path.join(reportDir, "redaction-report.json"), `${JSON.stringify(redaction, null, 2)}\n`);
-    throw new Error(`Redaction scan failed: ${redaction.findings.map((finding) => finding.name).join(", ")}`);
+    await writeFile(
+      path.join(reportDir, "redaction-report.json"),
+      `${JSON.stringify(redaction, null, 2)}\n`,
+    );
+    throw new Error(
+      `Redaction scan failed: ${redaction.findings.map((finding) => finding.name).join(", ")}`,
+    );
   }
 
-  const paths = await writeArtifacts({ runId, artifact, samples, redaction, options });
+  const paths = await writeArtifacts({
+    runId,
+    artifact,
+    samples,
+    redaction,
+    options,
+  });
   console.log(`[benchmark] wrote ${paths.latestPath}`);
-  if (paths.publicLatestPath) console.log(`[benchmark] wrote ${paths.publicLatestPath}`);
+  if (paths.publicLatestPath)
+    console.log(`[benchmark] wrote ${paths.publicLatestPath}`);
 }
 
 const browserProbeSource = String.raw`

@@ -13,39 +13,41 @@ paths used by the local Docker stack.
 ## Current Deployment Shape
 
 - `rend-api`: control-plane HTTP API on container port `4000`. It owns
-  migrations, upload ingest, asset state, playback bootstrap, the
-  `rend.edge_nodes` registry, best-effort edge warm/purge fanout, and playback
-  telemetry ingest into ClickHouse.
+  migrations, upload ingest, asset state, playback bootstrap, Tigris-origin
+  playback, the optional `rend.edge_nodes` registry, and playback telemetry
+  ingest into ClickHouse.
 - `rend-media-worker`: same API binary started as `rend-api worker media`. It
   claims media jobs, runs `ffmpeg`/`ffprobe`, writes artifacts to object
-  storage, and asks healthy registered edges to warm artifacts.
+  storage. It asks healthy registered edges to warm artifacts only when
+  `REND_PLAYBACK_MODE=edge` is explicitly enabled.
 - `rend-edge`: playback edge on container port `4100`. It validates signed
   playback tokens locally, fills a node-local cache from object storage, exposes
   `/internal/warm` and `/internal/purge`, exposes token-protected `/metrics`,
   registers and heartbeats with `rend-api` when `REND_CONTROL_PLANE_URL` is set,
-  and spools telemetry to local disk before sending it to `rend-api`.
+  and spools telemetry to local disk before sending it to `rend-api`. This
+  service is currently dormant in production unless edge mode is re-enabled.
 
-`rend.edge_nodes` is the source of registered edge nodes. API and media worker
-warm/purge fanout targets every row with `status='healthy'`, a non-empty
-`base_url`, and a fresh heartbeat. Leave `REND_EDGE_WARM_URL` and
-`REND_EDGE_PURGE_URL` unset in normal production; they are single-edge
-fallbacks for local/dev or emergency debugging.
+`rend.edge_nodes` is the source of registered edge nodes when edge mode is
+active. API and media worker warm/purge fanout is skipped in the default
+`REND_PLAYBACK_MODE=tigris` production path. Leave `REND_EDGE_WARM_URL` and
+`REND_EDGE_PURGE_URL` unset in normal production; they are single-edge fallbacks
+for local/dev, edge-mode trials, or emergency debugging.
 
 ## Minimum Edge Host Requirements
 
 These are initial production minimums for one `rend-edge` process. They are not final
 capacity targets.
 
-| Concern | Minimum | Preferred for production |
-| --- | --- | --- |
-| CPU | 4 dedicated x86_64 vCPU | 8 vCPU |
-| RAM | 8 GiB | 16 GiB |
-| Cache disk | 250 GiB local SSD/NVMe | 500 GiB to 1 TiB NVMe |
-| Telemetry spool | 10 GiB persistent SSD | 20 GiB separate filesystem |
-| Logs | 5 GiB retained by Docker logging | 20 GiB or external drain |
-| Network | 1 Gbps NIC, low jitter | 10 Gbps NIC or provider equivalent |
-| OS | Debian 12 or Ubuntu 24.04 LTS | Same, current kernel updates applied |
-| Runtime | Docker Engine 25+ with Compose v2 | Docker Engine 26+ with Compose v2.26+ |
+| Concern         | Minimum                           | Preferred for production              |
+| --------------- | --------------------------------- | ------------------------------------- |
+| CPU             | 4 dedicated x86_64 vCPU           | 8 vCPU                                |
+| RAM             | 8 GiB                             | 16 GiB                                |
+| Cache disk      | 250 GiB local SSD/NVMe            | 500 GiB to 1 TiB NVMe                 |
+| Telemetry spool | 10 GiB persistent SSD             | 20 GiB separate filesystem            |
+| Logs            | 5 GiB retained by Docker logging  | 20 GiB or external drain              |
+| Network         | 1 Gbps NIC, low jitter            | 10 Gbps NIC or provider equivalent    |
+| OS              | Debian 12 or Ubuntu 24.04 LTS     | Same, current kernel updates applied  |
+| Runtime         | Docker Engine 25+ with Compose v2 | Docker Engine 26+ with Compose v2.26+ |
 
 Bandwidth assumptions for initial production deployments:
 
@@ -127,17 +129,17 @@ and requires an explicit `REND_EDGE_PUBLISH_ADDR` override plus
 `scripts/preflight-edge-host.sh --allow-direct-edge-exposure`; use that only for
 short production debugging with known test client IPs.
 
-| Direction | Port | Source | Destination | Purpose |
-| --- | --- | --- | --- | --- |
-| Inbound public | TCP `443` | Viewers/test clients | Edge proxy | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. Requires allowed Rend origins for credentialed browser CORS. |
-| Inbound debugging-only | TCP `4100` | Known test client IPs | `rend-edge` | Direct playback while debugging only. Requires the explicit direct-exposure preflight override. |
-| Inbound private | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge` | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`. |
-| Metrics | TCP `4100` or private `443` | Monitoring/VPN only | `rend-edge` | `GET /metrics`; token-protected by the service and should also be network-restricted. |
-| Outbound origin | TCP `443` | `rend-edge` | S3-compatible endpoint | Artifact fills and origin readiness checks. |
-| Outbound control plane | TCP `443` or private `4000` | `rend-edge` | `rend-api` internal edge endpoints | `POST /internal/edges/register` and `/internal/edges/heartbeat`. |
-| Outbound telemetry | TCP `443` or private `4000` | `rend-edge` | `rend-api` telemetry endpoint | `POST /internal/telemetry/playback`. |
-| Outbound image pull | TCP `443` | Host Docker daemon | Container registry | Deploy and rollback image pulls. |
-| Outbound platform | UDP/TCP `53`, UDP `123` | Host | DNS and NTP | Name resolution and token clock correctness. |
+| Direction              | Port                        | Source                 | Destination                        | Purpose                                                                                                                                 |
+| ---------------------- | --------------------------- | ---------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Inbound public         | TCP `443`                   | Viewers/test clients   | Edge proxy                         | Signed playback paths under `/v/...`; optionally `/healthz` and `/readyz`. Requires allowed Rend origins for credentialed browser CORS. |
+| Inbound debugging-only | TCP `4100`                  | Known test client IPs  | `rend-edge`                        | Direct playback while debugging only. Requires the explicit direct-exposure preflight override.                                         |
+| Inbound private        | TCP `4100` or private `443` | Control plane/VPN only | `rend-edge`                        | `/internal/warm`, `/internal/purge`, and `/metrics`. Requires `x-rend-internal-token`.                                                  |
+| Metrics                | TCP `4100` or private `443` | Monitoring/VPN only    | `rend-edge`                        | `GET /metrics`; token-protected by the service and should also be network-restricted.                                                   |
+| Outbound origin        | TCP `443`                   | `rend-edge`            | S3-compatible endpoint             | Artifact fills and origin readiness checks.                                                                                             |
+| Outbound control plane | TCP `443` or private `4000` | `rend-edge`            | `rend-api` internal edge endpoints | `POST /internal/edges/register` and `/internal/edges/heartbeat`.                                                                        |
+| Outbound telemetry     | TCP `443` or private `4000` | `rend-edge`            | `rend-api` telemetry endpoint      | `POST /internal/telemetry/playback`.                                                                                                    |
+| Outbound image pull    | TCP `443`                   | Host Docker daemon     | Container registry                 | Deploy and rollback image pulls.                                                                                                        |
+| Outbound platform      | UDP/TCP `53`, UDP `123`     | Host                   | DNS and NTP                        | Name resolution and token clock correctness.                                                                                            |
 
 Control-plane host exposure:
 
@@ -198,13 +200,13 @@ sudo ufw --force enable
 
 ## Volume Paths
 
-| Service | Container path | Host path | Notes |
-| --- | --- | --- | --- |
-| `rend-edge` | `/var/lib/rend/edge-cache` | `/var/lib/rend/edge-cache` | Local cache. Safe to purge or replace during rollback. |
-| `rend-edge` | `/var/spool/rend/edge-telemetry` | `/var/spool/rend/edge-telemetry` | JSONL spool at `playback-events.jsonl`. Preserve across restarts. |
-| `rend-edge` | Docker logs | Docker `json-file` or host log drain | Template rotates at `100m` x `5`. |
-| `rend-api` | Docker logs | Docker `json-file` or host log drain | Inspect for migrations, readiness, telemetry ingest. |
-| `rend-media-worker` | Docker logs | Docker `json-file` or host log drain | Inspect for job claims, ffmpeg failures, warm failures. |
+| Service             | Container path                   | Host path                            | Notes                                                             |
+| ------------------- | -------------------------------- | ------------------------------------ | ----------------------------------------------------------------- |
+| `rend-edge`         | `/var/lib/rend/edge-cache`       | `/var/lib/rend/edge-cache`           | Local cache. Safe to purge or replace during rollback.            |
+| `rend-edge`         | `/var/spool/rend/edge-telemetry` | `/var/spool/rend/edge-telemetry`     | JSONL spool at `playback-events.jsonl`. Preserve across restarts. |
+| `rend-edge`         | Docker logs                      | Docker `json-file` or host log drain | Template rotates at `100m` x `5`.                                 |
+| `rend-api`          | Docker logs                      | Docker `json-file` or host log drain | Inspect for migrations, readiness, telemetry ingest.              |
+| `rend-media-worker` | Docker logs                      | Docker `json-file` or host log drain | Inspect for job claims, ffmpeg failures, warm failures.           |
 
 ## Env Var Sets
 
@@ -227,9 +229,11 @@ API required set:
 - API/runtime: `REND_API_BIND_ADDR`, `REND_API_AUTO_MIGRATE`,
   `REND_API_INLINE_MEDIA_PROCESSING`, `REND_SITE_INTERNAL_TOKEN`,
   `REND_HTTP_TIMEOUT_SECS`
-- Playback: `REND_PLAYBACK_BASE_URL`, `REND_PLAYBACK_COOKIE_DOMAIN`,
-  `REND_PLAYBACK_SIGNING_KEY_ID`, `REND_PLAYBACK_SIGNING_SECRET`,
-  `REND_PLAYBACK_TOKEN_TTL_SECS`, `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`
+- Playback: `REND_PLAYBACK_MODE=tigris`, `REND_TIGRIS_PLAYBACK_BASE_URL`,
+  `REND_PLAYBACK_COOKIE_DOMAIN`, `REND_PLAYBACK_SIGNING_KEY_ID`,
+  `REND_PLAYBACK_SIGNING_SECRET`, `REND_PLAYBACK_TOKEN_TTL_SECS`,
+  `REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS`. `REND_PLAYBACK_BASE_URL` is
+  required only when `REND_PLAYBACK_MODE=edge`.
 - Edge registry/fanout: `REND_EDGE_INTERNAL_TOKEN`,
   `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EDGE_WARM_MAX_ARTIFACTS`,
   `REND_EDGE_CORS_ALLOWED_ORIGINS`.

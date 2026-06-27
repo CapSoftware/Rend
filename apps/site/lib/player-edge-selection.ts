@@ -16,7 +16,9 @@ export function normalizePlaybackBaseUrl(value: string) {
     throw new Error("playback base URL must use http or https");
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("playback base URL must not include credentials, query, or fragment");
+    throw new Error(
+      "playback base URL must not include credentials, query, or fragment",
+    );
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "");
   return parsed.toString().replace(/\/+$/, "");
@@ -55,7 +57,10 @@ function edgeBaseMap(value: string) {
   return map;
 }
 
-export function selectedConfiguredEdgePlaybackBaseUrl(headers: Headers, env: EnvLike = process.env) {
+export function selectedConfiguredEdgePlaybackBaseUrl(
+  headers: Headers,
+  env: EnvLike = process.env,
+) {
   const configured = envString(env, "REND_PLAYER_EDGE_BASE_URLS");
   if (!configured) return null;
 
@@ -63,7 +68,10 @@ export function selectedConfiguredEdgePlaybackBaseUrl(headers: Headers, env: Env
   if (!edges.size) return null;
 
   const country = headerSelectorKey(headers, "x-vercel-ip-country");
-  const countryRegion = headerSelectorKey(headers, "x-vercel-ip-country-region");
+  const countryRegion = headerSelectorKey(
+    headers,
+    "x-vercel-ip-country-region",
+  );
   const continent = headerSelectorKey(headers, "x-vercel-ip-continent");
   const candidates = [
     country && countryRegion ? `${country}-${countryRegion}` : "",
@@ -96,7 +104,8 @@ function requestLocation(request: Request): PlaybackRequestLocation {
     latitude: geo.latitude || request.headers.get("x-vercel-ip-latitude"),
     longitude: geo.longitude || request.headers.get("x-vercel-ip-longitude"),
     country: geo.country || request.headers.get("x-vercel-ip-country"),
-    countryRegion: geo.countryRegion || request.headers.get("x-vercel-ip-country-region"),
+    countryRegion:
+      geo.countryRegion || request.headers.get("x-vercel-ip-country-region"),
     continent: request.headers.get("x-vercel-ip-continent"),
   };
 }
@@ -106,10 +115,14 @@ export function selectedEdgePlaybackBaseUrl(headers: Headers) {
 }
 
 export function selectedMetalPlaybackRouteDecision(headers: Headers) {
-  return selectedMetalPlaybackRouteDecisionFromLocation(requestLocationFromHeaders(headers));
+  return selectedMetalPlaybackRouteDecisionFromLocation(
+    requestLocationFromHeaders(headers),
+  );
 }
 
-export function selectedMetalPlaybackRouteDecisionFromLocation(location: PlaybackRequestLocation) {
+export function selectedMetalPlaybackRouteDecisionFromLocation(
+  location: PlaybackRequestLocation,
+) {
   const decision = closestMetalPlaybackRouteDecision(location);
   if (!decision) return null;
   return {
@@ -128,10 +141,16 @@ function envUsesConfiguredEdgeOverride(env: EnvLike) {
   return mode === "override" || (profile && profile !== "production");
 }
 
+function playbackMode(env: EnvLike) {
+  const mode = envString(env, "REND_PLAYBACK_MODE", "tigris").toLowerCase();
+  return mode === "edge" ? "edge" : "tigris";
+}
+
 export type PlaybackBaseUrlDecision = {
   playbackBaseUrl: string | null;
   source:
     | "manual_override"
+    | "tigris_origin"
     | "configured_edge"
     | "shared_metal"
     | "configured_edge_fallback"
@@ -146,7 +165,7 @@ export type PlaybackBaseUrlDecision = {
 
 export function playbackBaseUrlDecisionForRequest(
   request: Request,
-  env: EnvLike = process.env
+  env: EnvLike = process.env,
 ): PlaybackBaseUrlDecision {
   const requestUrl = new URL(request.url);
   const requested = requestUrl.searchParams.get("playbackBaseUrl");
@@ -158,12 +177,21 @@ export function playbackBaseUrlDecisionForRequest(
     return { playbackBaseUrl: normalized, source: "manual_override" };
   }
 
-  const configuredEdge = selectedConfiguredEdgePlaybackBaseUrl(request.headers, env);
+  const configuredEdge = selectedConfiguredEdgePlaybackBaseUrl(
+    request.headers,
+    env,
+  );
+  if (playbackMode(env) !== "edge") {
+    return { playbackBaseUrl: null, source: "tigris_origin" };
+  }
+
   if (configuredEdge && envUsesConfiguredEdgeOverride(env)) {
     return { playbackBaseUrl: configuredEdge, source: "configured_edge" };
   }
 
-  const selectedEdge = selectedMetalPlaybackRouteDecisionFromLocation(requestLocation(request));
+  const selectedEdge = selectedMetalPlaybackRouteDecisionFromLocation(
+    requestLocation(request),
+  );
   if (selectedEdge) {
     return {
       playbackBaseUrl: normalizePlaybackBaseUrl(selectedEdge.playbackBaseUrl),
@@ -176,14 +204,24 @@ export function playbackBaseUrlDecisionForRequest(
     };
   }
 
-  if (configuredEdge) return { playbackBaseUrl: configuredEdge, source: "configured_edge_fallback" };
+  if (configuredEdge)
+    return {
+      playbackBaseUrl: configuredEdge,
+      source: "configured_edge_fallback",
+    };
 
   const configured = envString(env, "REND_PLAYER_PLAYBACK_BASE_URL");
   return configured
-    ? { playbackBaseUrl: normalizePlaybackBaseUrl(configured), source: "configured_fallback" }
+    ? {
+        playbackBaseUrl: normalizePlaybackBaseUrl(configured),
+        source: "configured_fallback",
+      }
     : { playbackBaseUrl: null, source: "none" };
 }
 
-export function playbackBaseUrlForRequest(request: Request, env: EnvLike = process.env) {
+export function playbackBaseUrlForRequest(
+  request: Request,
+  env: EnvLike = process.env,
+) {
   return playbackBaseUrlDecisionForRequest(request, env).playbackBaseUrl;
 }

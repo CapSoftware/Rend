@@ -18,79 +18,65 @@ Run the public launch gate before deploy or promotion; see
 ## Service Topology
 
 - `rend-api`: Rust API and control plane. It owns upload ingest, asset state,
-  Postgres migrations, playback bootstrap, the `rend.edge_nodes` registry,
-  best-effort edge warm/purge fanout, and telemetry ingestion into ClickHouse.
+  Postgres migrations, playback bootstrap, Tigris-origin playback, the optional
+  `rend.edge_nodes` registry, and telemetry ingestion into ClickHouse.
 - `rend-media-worker`: the same repo runtime, started as `rend-api worker media`.
   It claims queued media jobs, uses `ffmpeg` and `ffprobe`, writes artifacts to
-  S3-compatible storage, and asks healthy registered edges to warm playback
-  artifacts.
+  S3-compatible storage. In the current default `REND_PLAYBACK_MODE=tigris`
+  path it does not warm playback artifacts to edge nodes.
 - `rend-edge`: Rust playback edge. It validates signed playback URLs locally,
   serves playback artifacts, fills and coalesces local cache misses from object
   storage, exposes internal warm/purge endpoints, registers and heartbeats with
   `rend-api` when configured, and spools playback telemetry locally before
-  sending it to `rend-api`.
+  sending it to `rend-api`. This implementation is intentionally dormant in
+  production unless `REND_PLAYBACK_MODE=edge` is explicitly enabled.
 
 Production dependencies are external managed services: Postgres, Redis,
 S3-compatible object storage, and ClickHouse.
 
 ## Browser Media Path
 
-Production browser playback should use the site route only for JSON bootstrap,
-then send hot media bytes directly to the selected public edge hostname:
+Production browser playback currently uses the site route for JSON bootstrap
+and same-origin artifact URLs. The artifact route fetches Rend's API-origin
+`/v/{assetId}/...` path, which validates the Rend playback cookie and streams
+private Tigris-backed objects without exposing signed object-store URLs:
 
 ```txt
 browser
   -> https://www.rend.so/api/player/{assetId}
-  -> Next.js route handler uses Vercel geo headers and shared route config
-  -> route returns tokenless https://ash-1.play.rend.so/v/{assetId}/... URLs
-  -> https://ash-1.play.rend.so/v/{assetId}/{artifactPath}
-  -> edge ingress
-  -> rend-edge
-  -> edge-local cache or object-storage fill
+  -> route returns tokenless /api/player/{assetId}/artifact/... URLs
+  -> https://www.rend.so/api/player/{assetId}/artifact/{artifactPath}
+  -> https://api.rend.so/v/{assetId}/{artifactPath}
+  -> rend-api validates the playback cookie
+  -> Tigris/object-storage origin
 ```
 
-Production edge selection comes from the checked-in
-`@rend/playback-routing` route table. The site route uses Vercel's
-`@vercel/functions` `geolocation(request)` helper to read latitude, longitude,
-country, and country-region from the incoming request. It selects the closest
-configured metal route by great-circle distance. If coordinates are not
-available, it falls back through country, optional continent header, then the
-default metal route. Current public metal routes:
+`REND_PLAYBACK_MODE=tigris` is the default for local and production. In this
+mode `REND_TIGRIS_PLAYBACK_BASE_URL` should point at the public API origin, for
+example `https://api.rend.so`, and warm/purge fanout is skipped even if edge
+registry rows or legacy edge URLs are configured.
+
+The checked-in `@rend/playback-routing` route table remains available for the
+future edge mode. Set `REND_PLAYBACK_MODE=edge` to re-enable metal selection,
+direct `/v/{assetId}/...` edge URLs, and warm/purge fanout. Current public metal
+routes retained for that optional mode:
 
 ```txt
 ash-1  us-east    https://ash-1.play.rend.so
 ams-1  amsterdam  https://ams-1.play.rend.so
 ```
 
-`REND_PLAYER_EDGE_BASE_URLS` remains available as a non-production/local escape
-hatch, or as an explicit override with `REND_PLAYER_EDGE_BASE_URLS_MODE=override`.
-Production should not need a per-request control-plane lookup or a separate
-media load balancer just to choose the closest edge.
+`REND_PLAYER_EDGE_BASE_URLS` and `REND_PLAYER_PLAYBACK_BASE_URL` are ignored by
+the site player unless `REND_PLAYBACK_MODE=edge` is set or a request uses an
+allowlisted explicit `playbackBaseUrl` override. In Tigris mode, `x-rend-origin:
+tigris` on API-origin artifact responses is the expected proof signal; edge
+headers such as `x-rend-cache`, `x-rend-edge-id`, and `x-rend-region` are not on
+the active path.
 
-Keep `REND_PLAYER_PLAYBACK_BASE_URL` as an emergency fallback single-edge base.
-`GET /api/player/{assetId}` returns direct
-`/v/{assetId}/...` media URLs and sets an HttpOnly playback cookie scoped to
-`/v/{assetId}/`. The cookie may use `Domain=rend.so` only when both the site host
-and media host are trusted Rend domains.
-
-The legacy same-origin artifact route
-`/api/player/{assetId}/artifact/{artifactPath}` remains as a fallback for local
-or unconfigured environments, but it should not carry production media bytes
-once direct edge delivery is configured. Edge headers such as
-`x-rend-cache: HIT`, `x-rend-edge-id`, and `x-rend-region` prove that the
-upstream `rend-edge` served the artifact from its local cache. The direct path
-removes Next/Vercel from the media byte path.
-
-The direct path keeps playback tokens out of JavaScript-visible URLs, uses only
-configured public edge hosts, requires credentialed CORS from allowed Rend
-origins, preserves the HttpOnly playback credential boundary, avoids exposing
-`/internal/*`, and keeps private/authenticated media private.
-
-The site route logs one structured `rend_player_edge_selected` event per
-playback bootstrap. The event includes Vercel request id, Vercel edge region
-from the geolocation helper, country, country-region, optional continent header,
-whether valid coordinates were present, selected metal route id/region,
-selection reason, playback host, and rounded route distance. It does not log IP
+The current path keeps playback tokens out of JavaScript-visible URLs, preserves
+the HttpOnly playback credential boundary, avoids exposing `/internal/*`, and
+keeps private/authenticated media private. The site route logs one structured
+`rend_player_playback_selected` event per playback bootstrap without IP
 addresses, cookies, auth headers, playback tokens, signed URLs, or raw
 coordinates.
 
@@ -108,11 +94,11 @@ coordinates.
 - optional `rend-edge-london` on host port `4102`
 
 Container-to-container URLs use Docker service names: `postgres`, `redis`,
-`minio`, `clickhouse`, `rend-api`, and `rend-edge`. `REND_PLAYBACK_BASE_URL`
-is the local client-facing URL and defaults to `http://127.0.0.1:4100`. Edge
-containers register API-reachable `REND_EDGE_BASE_URL` values in
-`rend.edge_nodes`; API and worker fan out warm/purge calls to all healthy edges
-with fresh heartbeats.
+`minio`, `clickhouse`, `rend-api`, and `rend-edge`. Local playback defaults to
+`REND_PLAYBACK_MODE=tigris` with `REND_TIGRIS_PLAYBACK_BASE_URL` pointing at
+`rend-api`. Edge containers can still register API-reachable `REND_EDGE_BASE_URL`
+values in `rend.edge_nodes`, but API and worker warm/purge fanout is skipped
+unless `REND_PLAYBACK_MODE=edge` is set.
 
 Run the default single-edge stack:
 
@@ -186,27 +172,27 @@ API:
 - `REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS`
 - `REND_BILLING_STORAGE_SYNC_LAG_SECS`
 - `REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS`
-- `REND_PLAYBACK_BASE_URL`
-- `REND_PLAYER_PLAYBACK_BASE_URL` on the site deployment
-- `REND_PLAYER_EDGE_BASE_URLS` on local/test site deployments only, or with
-  `REND_PLAYER_EDGE_BASE_URLS_MODE=override` for emergency production override
+- `REND_PLAYBACK_MODE=tigris`
+- `REND_TIGRIS_PLAYBACK_BASE_URL`
 - `REND_PLAYBACK_COOKIE_DOMAIN`
 - `REND_MAX_UPLOAD_BYTES`
-- `REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`
-- `REND_EXPECTED_EDGES`
-- `REND_ALLOW_INSECURE_EDGE_URLS`
-- `REND_EDGE_INTERNAL_TOKEN`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
 - `REND_PLAYBACK_SIGNING_KEY_ID`
 - `REND_PLAYBACK_SIGNING_SECRET`
 - `REND_PLAYBACK_TOKEN_TTL_SECS`
 
-`REND_EDGE_WARM_URL` and `REND_EDGE_PURGE_URL` are optional single-edge
-fallbacks for local/dev or emergency debugging. Leave them unset in normal
-production so warm/purge fanout uses registered healthy edges.
-`REND_EXPECTED_EDGES` uses comma-separated
-`edge_id=region=base_url` entries. In `production`, edge base URLs must be
-HTTPS.
+`REND_PLAYBACK_MODE=tigris` is the production default. Set
+`REND_TIGRIS_PLAYBACK_BASE_URL` to the public API origin, for example
+`https://api.rend.so`. `REND_PLAYBACK_BASE_URL`,
+`REND_EDGE_WARM_URL`, and `REND_EDGE_PURGE_URL` are edge-mode settings; leave
+them unset in normal production unless `REND_PLAYBACK_MODE=edge` is explicitly
+enabled.
+`REND_PLAYER_PLAYBACK_BASE_URL`, `REND_PLAYER_EDGE_BASE_URLS`,
+`REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS`, `REND_EXPECTED_EDGES`,
+`REND_ALLOW_INSECURE_EDGE_URLS`, and `REND_EDGE_INTERNAL_TOKEN` are required
+only for explicit edge-mode deployments. `REND_EXPECTED_EDGES` uses
+comma-separated `edge_id=region=base_url` entries. In `production`, edge base
+URLs must be HTTPS.
 
 Worker:
 
@@ -220,6 +206,7 @@ into the control-plane API and worker env files before deployment, including
 Production GitHub environment must include `CLICKHOUSE_URL`, `CLICKHOUSE_USER`,
 `CLICKHOUSE_PASSWORD`, and `AUTUMN_SECRET_KEY`; the sync helper refuses to run
 unless the Autumn key is visibly live, and logs only key names.
+
 - `REND_MEDIA_WORKER_ID`
 - `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`
 - `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`
@@ -568,7 +555,7 @@ usage or watch accounting.
 2. Apply or confirm ClickHouse schema.
 3. From a clean git worktree, build and optionally push images with
    `bun run release:images -- --tag production-001 --registry <registry-prefix>
-   --platform linux/amd64 --push`. Pushed releases require the git SHA to be
+--platform linux/amd64 --push`. Pushed releases require the git SHA to be
    reachable from a pushed branch or tag and copy the accepted manifest to
    `docs/releases/`.
 4. Copy production-style compose files, real env files, and the release

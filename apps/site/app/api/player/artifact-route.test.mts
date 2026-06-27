@@ -10,18 +10,23 @@ import {
 const ASSET_ID = "00000000-0000-0000-0000-000000000001";
 const ORG_ID = "00000000-0000-0000-0000-000000000002";
 
-function cachedSafeResponse(expiresAt: number, ttlSeconds: number): SafePlaybackBootstrapResponse {
+function cachedSafeResponse(
+  expiresAt: number,
+  ttlSeconds: number,
+): SafePlaybackBootstrapResponse {
   return {
     status: "ready",
     asset_id: ASSET_ID,
     organization_id: ORG_ID,
     source_state: "uploaded",
     playable_state: "hls_ready",
-    playback_url: "/api/player/00000000-0000-0000-0000-000000000001/artifact/opener.mp4",
+    playback_url:
+      "/api/player/00000000-0000-0000-0000-000000000001/artifact/opener.mp4",
     playback_content_type: "video/mp4",
     playback_token_expires_at: expiresAt,
     ttl_seconds: ttlSeconds,
-    opener_url: "/api/player/00000000-0000-0000-0000-000000000001/artifact/opener.mp4",
+    opener_url:
+      "/api/player/00000000-0000-0000-0000-000000000001/artifact/opener.mp4",
     opener_content_type: "video/mp4",
     manifest_url: undefined,
     manifest_content_type: undefined,
@@ -33,11 +38,16 @@ function cachedSafeResponse(expiresAt: number, ttlSeconds: number): SafePlayback
 
 test("artifact route uses playback cookie fast path when the edge base is known", async () => {
   const originalFetch = globalThis.fetch;
+  const originalPlaybackMode = process.env.REND_PLAYBACK_MODE;
   const originalPlaybackBaseUrl = process.env.REND_PLAYER_PLAYBACK_BASE_URL;
   const fetches: Array<{ url: string; headers: Headers }> = [];
+  process.env.REND_PLAYBACK_MODE = "edge";
   process.env.REND_PLAYER_PLAYBACK_BASE_URL = "https://edge.rend.so";
 
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     fetches.push({
       url: String(url),
       headers: new Headers(init?.headers),
@@ -54,27 +64,41 @@ test("artifact route uses playback cookie fast path when the edge base is known"
 
   try {
     const response = await getPlaybackArtifact(
-      new Request(`https://rend.so/api/player/${ASSET_ID}/artifact/opener.mp4`, {
-        headers: {
-          cookie: "__rend_playback=v1.claims.signature",
+      new Request(
+        `https://rend.so/api/player/${ASSET_ID}/artifact/opener.mp4`,
+        {
+          headers: {
+            cookie: "__rend_playback=v1.claims.signature",
+          },
         },
-      }),
+      ),
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
           artifactPath: ["opener.mp4"],
         }),
-      }
+      },
     );
 
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "opener");
     assert.equal(fetches.length, 1);
-    assert.equal(fetches[0]?.url, `https://edge.rend.so/v/${ASSET_ID}/opener.mp4`);
-    assert.equal(fetches[0]?.headers.get("cookie"), "__rend_playback=v1.claims.signature");
+    assert.equal(
+      fetches[0]?.url,
+      `https://edge.rend.so/v/${ASSET_ID}/opener.mp4`,
+    );
+    assert.equal(
+      fetches[0]?.headers.get("cookie"),
+      "__rend_playback=v1.claims.signature",
+    );
     assert.equal(response.headers.get("x-rend-cache"), "HIT");
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalPlaybackMode === undefined) {
+      delete process.env.REND_PLAYBACK_MODE;
+    } else {
+      process.env.REND_PLAYBACK_MODE = originalPlaybackMode;
+    }
     if (originalPlaybackBaseUrl === undefined) {
       delete process.env.REND_PLAYER_PLAYBACK_BASE_URL;
     } else {
@@ -85,11 +109,16 @@ test("artifact route uses playback cookie fast path when the edge base is known"
 
 test("artifact route rewrites variant playlist segment URLs", async () => {
   const originalFetch = globalThis.fetch;
+  const originalPlaybackMode = process.env.REND_PLAYBACK_MODE;
   const originalPlaybackBaseUrl = process.env.REND_PLAYER_PLAYBACK_BASE_URL;
   const fetches: Array<{ url: string; headers: Headers }> = [];
+  process.env.REND_PLAYBACK_MODE = "edge";
   process.env.REND_PLAYER_PLAYBACK_BASE_URL = "https://edge.rend.so";
 
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     fetches.push({
       url: String(url),
       headers: new Headers(init?.headers),
@@ -105,28 +134,50 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
 
   try {
     const response = await getPlaybackArtifact(
-      new Request(`https://rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8`, {
-        headers: {
-          cookie: "__rend_playback=v1.claims.signature",
+      new Request(
+        `https://rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8`,
+        {
+          headers: {
+            cookie: "__rend_playback=v1.claims.signature",
+          },
         },
-      }),
+      ),
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
           artifactPath: ["hls", "720p", "index.m3u8"],
         }),
-      }
+      },
     );
 
     const body = await response.text();
     assert.equal(response.status, 200);
-    assert.equal(fetches[0]?.url, `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`);
-    assert.match(body, new RegExp(`/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts`));
+    assert.equal(
+      fetches[0]?.url,
+      `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts`,
+      ),
+    );
     assert.doesNotMatch(body, /playbackBaseUrl=/);
-    assert.equal(response.headers.get("content-type"), "application/vnd.apple.mpegurl");
-    assert.equal(response.headers.get("cache-control"), "private, max-age=60, stale-while-revalidate=300");
+    assert.equal(
+      response.headers.get("content-type"),
+      "application/vnd.apple.mpegurl",
+    );
+    assert.equal(
+      response.headers.get("cache-control"),
+      "private, max-age=60, stale-while-revalidate=300",
+    );
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalPlaybackMode === undefined) {
+      delete process.env.REND_PLAYBACK_MODE;
+    } else {
+      process.env.REND_PLAYBACK_MODE = originalPlaybackMode;
+    }
     if (originalPlaybackBaseUrl === undefined) {
       delete process.env.REND_PLAYER_PLAYBACK_BASE_URL;
     } else {
@@ -138,12 +189,16 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
 test("artifact route keeps playback base query for explicit allowlisted overrides", async () => {
   const originalFetch = globalThis.fetch;
   const originalPlaybackBaseUrl = process.env.REND_PLAYER_PLAYBACK_BASE_URL;
-  const originalAllowedPlaybackBaseUrls = process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
+  const originalAllowedPlaybackBaseUrls =
+    process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
   const fetches: Array<{ url: string; headers: Headers }> = [];
   delete process.env.REND_PLAYER_PLAYBACK_BASE_URL;
   process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS = "https://edge.rend.so";
 
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     fetches.push({
       url: String(url),
       headers: new Headers(init?.headers),
@@ -165,22 +220,27 @@ test("artifact route keeps playback base query for explicit allowlisted override
           headers: {
             cookie: "__rend_playback=v1.claims.signature",
           },
-        }
+        },
       ),
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
           artifactPath: ["hls", "720p", "index.m3u8"],
         }),
-      }
+      },
     );
 
     const body = await response.text();
     assert.equal(response.status, 200);
-    assert.equal(fetches[0]?.url, `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`);
+    assert.equal(
+      fetches[0]?.url,
+      `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+    );
     assert.match(
       body,
-      new RegExp(`/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts\\?playbackBaseUrl=`)
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts\\?playbackBaseUrl=`,
+      ),
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -192,7 +252,8 @@ test("artifact route keeps playback base query for explicit allowlisted override
     if (originalAllowedPlaybackBaseUrls === undefined) {
       delete process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
     } else {
-      process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS = originalAllowedPlaybackBaseUrls;
+      process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS =
+        originalAllowedPlaybackBaseUrls;
     }
   }
 });
@@ -200,7 +261,8 @@ test("artifact route keeps playback base query for explicit allowlisted override
 test("artifact route uses cached bootstrap context without database fallback", async () => {
   const originalFetch = globalThis.fetch;
   const originalPlaybackBaseUrl = process.env.REND_PLAYER_PLAYBACK_BASE_URL;
-  const originalAllowedPlaybackBaseUrls = process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
+  const originalAllowedPlaybackBaseUrls =
+    process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
   const fetches: Array<{ url: string; headers: Headers }> = [];
   const nowSeconds = Math.floor(Date.now() / 1000);
   clearPlaybackBootstrapCache();
@@ -220,18 +282,23 @@ test("artifact route uses cached bootstrap context without database fallback", a
       asset_id: ASSET_ID,
       source_state: "uploaded",
       playable_state: "hls_ready",
-      playback_url: "https://edge.rend.so/v/00000000-0000-0000-0000-000000000001/opener.mp4",
+      playback_url:
+        "https://api.rend.so/v/00000000-0000-0000-0000-000000000001/opener.mp4",
       playback_content_type: "video/mp4",
       playback_token_expires_at: nowSeconds + 600,
       playback_token: "v1.claims.signature",
       ttl_seconds: 600,
-      opener_url: "https://edge.rend.so/v/00000000-0000-0000-0000-000000000001/opener.mp4",
+      opener_url:
+        "https://api.rend.so/v/00000000-0000-0000-0000-000000000001/opener.mp4",
       opener_content_type: "video/mp4",
       prefetch_hints: [],
     },
   });
 
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     fetches.push({
       url: String(url),
       headers: new Headers(init?.headers),
@@ -254,15 +321,24 @@ test("artifact route uses cached bootstrap context without database fallback", a
           assetId: ASSET_ID,
           artifactPath: ["opener.mp4"],
         }),
-      }
+      },
     );
 
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "opener");
     assert.equal(fetches.length, 1);
-    assert.equal(fetches[0]?.url, `https://edge.rend.so/v/${ASSET_ID}/opener.mp4`);
-    assert.equal(fetches[0]?.headers.get("cookie"), "__rend_playback=v1.claims.signature");
-    assert.match(response.headers.get("set-cookie") ?? "", /^__rend_playback=v1\.claims\.signature;/);
+    assert.equal(
+      fetches[0]?.url,
+      `https://api.rend.so/v/${ASSET_ID}/opener.mp4`,
+    );
+    assert.equal(
+      fetches[0]?.headers.get("cookie"),
+      "__rend_playback=v1.claims.signature",
+    );
+    assert.match(
+      response.headers.get("set-cookie") ?? "",
+      /^__rend_playback=v1\.claims\.signature;/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     clearPlaybackBootstrapCache();
@@ -274,7 +350,8 @@ test("artifact route uses cached bootstrap context without database fallback", a
     if (originalAllowedPlaybackBaseUrls === undefined) {
       delete process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS;
     } else {
-      process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS = originalAllowedPlaybackBaseUrls;
+      process.env.REND_PLAYER_ALLOWED_PLAYBACK_BASE_URLS =
+        originalAllowedPlaybackBaseUrls;
     }
   }
 });

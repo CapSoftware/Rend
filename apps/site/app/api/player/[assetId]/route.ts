@@ -22,7 +22,10 @@ import {
   playbackBaseUrlDecisionForRequest,
   type PlaybackBaseUrlDecision,
 } from "../../../../lib/player-edge-selection.ts";
-import { isTrustedRendHost, publicRequestHost } from "../../../../lib/player-request-origin.ts";
+import {
+  isTrustedRendHost,
+  publicRequestHost,
+} from "../../../../lib/player-request-origin.ts";
 import { getSiteDb } from "../../../../lib/server-db.ts";
 
 type UpstreamAssetResponse = {
@@ -45,7 +48,11 @@ function envString(name: string, fallback = "") {
 }
 
 function isProductionProfile() {
-  const profile = envString("REND_ENV_PROFILE") || envString("REND_ENV") || process.env.NODE_ENV || "local";
+  const profile =
+    envString("REND_ENV_PROFILE") ||
+    envString("REND_ENV") ||
+    process.env.NODE_ENV ||
+    "local";
   return ["production", "prod"].includes(profile.toLowerCase());
 }
 
@@ -56,7 +63,10 @@ function siteInternalToken() {
 }
 
 function controlPlaneUrl(path: string) {
-  const baseUrl = envString("REND_API_BASE_URL", DEFAULT_API_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = envString("REND_API_BASE_URL", DEFAULT_API_BASE_URL).replace(
+    /\/+$/,
+    "",
+  );
   return `${baseUrl}${path}`;
 }
 
@@ -91,12 +101,23 @@ function playbackHost(playbackBaseUrl: string | null) {
   }
 }
 
-function logPlaybackEdgeDecision(request: Request, decision: PlaybackBaseUrlDecision) {
+function logPlaybackEdgeDecision(
+  request: Request,
+  decision: PlaybackBaseUrlDecision,
+) {
   const headers = request.headers;
   const geo = geolocation(request);
   const hasCoordinates =
-    validCoordinateHeader(geo.latitude || headers.get("x-vercel-ip-latitude"), -90, 90) &&
-    validCoordinateHeader(geo.longitude || headers.get("x-vercel-ip-longitude"), -180, 180);
+    validCoordinateHeader(
+      geo.latitude || headers.get("x-vercel-ip-latitude"),
+      -90,
+      90,
+    ) &&
+    validCoordinateHeader(
+      geo.longitude || headers.get("x-vercel-ip-longitude"),
+      -180,
+      180,
+    );
   const distanceKm =
     decision.distanceKm !== undefined && Number.isFinite(decision.distanceKm)
       ? Math.round(decision.distanceKm)
@@ -105,12 +126,16 @@ function logPlaybackEdgeDecision(request: Request, decision: PlaybackBaseUrlDeci
   console.info(
     JSON.stringify({
       level: "info",
-      event: "rend_player_edge_selected",
+      event: "rend_player_playback_selected",
       route: "/api/player/[assetId]",
       request_id: safeHeaderLabel(headers.get("x-vercel-id"), 128),
       vercel_edge_region: safeHeaderLabel(geo.region || null, 24),
-      geo_country: safeGeoCode(geo.country || headers.get("x-vercel-ip-country")),
-      geo_country_region: safeGeoCode(geo.countryRegion || headers.get("x-vercel-ip-country-region")),
+      geo_country: safeGeoCode(
+        geo.country || headers.get("x-vercel-ip-country"),
+      ),
+      geo_country_region: safeGeoCode(
+        geo.countryRegion || headers.get("x-vercel-ip-country-region"),
+      ),
       geo_continent: safeGeoCode(headers.get("x-vercel-ip-continent")),
       geo_has_coordinates: hasCoordinates,
       selection_source: decision.source,
@@ -120,7 +145,7 @@ function logPlaybackEdgeDecision(request: Request, decision: PlaybackBaseUrlDeci
       metal_route_region: safeHeaderLabel(decision.routeRegion || null, 48),
       playback_host: playbackHost(decision.playbackBaseUrl),
       distance_km: distanceKm,
-    })
+    }),
   );
 }
 
@@ -143,11 +168,16 @@ function hostMatchesCookieDomain(host: string, domain: string) {
   return host === domain || host.endsWith(`.${domain}`);
 }
 
-function directPlaybackCookieDomain(request: Request, playbackBaseUrl: string | null) {
+function directPlaybackCookieDomain(
+  request: Request,
+  playbackBaseUrl: string | null,
+) {
   if (!playbackBaseUrl) return undefined;
   const requestHost = publicRequestHost(request);
   const playbackHost = new URL(playbackBaseUrl).hostname.toLowerCase();
-  const configured = envString("REND_PLAYER_PLAYBACK_COOKIE_DOMAIN") || envString("REND_PLAYBACK_COOKIE_DOMAIN");
+  const configured =
+    envString("REND_PLAYER_PLAYBACK_COOKIE_DOMAIN") ||
+    envString("REND_PLAYBACK_COOKIE_DOMAIN");
 
   if (configured) {
     const domain = normalizeCookieDomain(configured);
@@ -161,13 +191,15 @@ function directPlaybackCookieDomain(request: Request, playbackBaseUrl: string | 
     return undefined;
   }
 
-  return isTrustedRendHost(requestHost) && isTrustedRendHost(playbackHost) ? "rend.so" : undefined;
+  return isTrustedRendHost(requestHost) && isTrustedRendHost(playbackHost)
+    ? "rend.so"
+    : undefined;
 }
 
 function canUseDirectPlaybackCookie(
   request: Request,
   playbackBaseUrl: string | null,
-  cookieDomain: string | undefined
+  cookieDomain: string | undefined,
 ) {
   if (!playbackBaseUrl) return false;
   if (cookieDomain) return true;
@@ -185,24 +217,32 @@ function setPlaybackCookieHeader(
   ttlSeconds: unknown,
   playbackBaseUrl: string | null,
   directPlaybackEnabled: boolean,
-  directCookieDomain: string | undefined
+  directCookieDomain: string | undefined,
 ) {
-  const playbackCookie = directPlaybackEnabled && playbackBaseUrl
-    ? playbackDirectCookieHeader(
-        request.url,
-        assetId,
-        playbackToken,
-        ttlSeconds,
-        playbackBaseUrl,
-        directCookieDomain
-      )
-    : playbackProxyCookieHeader(request.url, assetId, playbackToken, ttlSeconds);
+  const playbackCookie =
+    directPlaybackEnabled && playbackBaseUrl
+      ? playbackDirectCookieHeader(
+          request.url,
+          assetId,
+          playbackToken,
+          ttlSeconds,
+          playbackBaseUrl,
+          directCookieDomain,
+        )
+      : playbackProxyCookieHeader(
+          request.url,
+          assetId,
+          playbackToken,
+          ttlSeconds,
+        );
   if (playbackCookie) headers.append("set-cookie", playbackCookie);
 }
 
 function normalizeAssetId(value: string) {
   const assetId = value.trim().toLowerCase();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(assetId)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+    assetId,
+  )
     ? assetId
     : null;
 }
@@ -217,14 +257,18 @@ async function assetOrganizationId(assetId: string) {
         eq(assets.id, assetId),
         isNull(assets.deleted_at),
         isNull(assets.suspended_at),
-        isNull(organization.suspended_at)
-      )
+        isNull(organization.suspended_at),
+      ),
     )
     .limit(1);
   return row?.organizationId ?? null;
 }
 
-async function fetchControlPlane(path: string, organizationId: string, internalToken: string) {
+async function fetchControlPlane(
+  path: string,
+  organizationId: string,
+  internalToken: string,
+) {
   return fetch(controlPlaneUrl(path), {
     cache: "no-store",
     headers: {
@@ -235,11 +279,15 @@ async function fetchControlPlane(path: string, organizationId: string, internalT
   });
 }
 
-async function notPlayableOrUnavailable(assetId: string, organizationId: string, internalToken: string) {
+async function notPlayableOrUnavailable(
+  assetId: string,
+  organizationId: string,
+  internalToken: string,
+) {
   const assetResponse = await fetchControlPlane(
     `/v1/assets/${encodeURIComponent(assetId)}`,
     organizationId,
-    internalToken
+    internalToken,
   ).catch(() => null);
 
   if (!assetResponse?.ok) {
@@ -249,11 +297,13 @@ async function notPlayableOrUnavailable(assetId: string, organizationId: string,
         asset_id: assetId,
         message: "Asset is unavailable",
       },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
-  const asset = (await assetResponse.json().catch(() => ({}))) as UpstreamAssetResponse;
+  const asset = (await assetResponse
+    .json()
+    .catch(() => ({}))) as UpstreamAssetResponse;
   return jsonResponse(
     {
       status: "not_playable",
@@ -262,13 +312,13 @@ async function notPlayableOrUnavailable(assetId: string, organizationId: string,
       playable_state: safeString(asset.playable_state),
       message: "Asset is not playable yet",
     },
-    { status: 409 }
+    { status: 409 },
   );
 }
 
 export async function GET(
   request: Request,
-  context: { params: Promise<{ assetId: string }> }
+  context: { params: Promise<{ assetId: string }> },
 ) {
   const { assetId } = await context.params;
   const normalizedAssetId = normalizeAssetId(assetId || "");
@@ -279,7 +329,7 @@ export async function GET(
         asset_id: assetId || "",
         message: "Asset is unavailable",
       },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
@@ -291,7 +341,7 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Playback is not configured",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 
@@ -305,19 +355,26 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Playback edge is not configured",
       },
-      { status: 400 }
+      { status: 400 },
     );
   }
   const playbackBaseUrl = playbackDecision.playbackBaseUrl;
   logPlaybackEdgeDecision(request, playbackDecision);
-  const directCookieDomain = directPlaybackCookieDomain(request, playbackBaseUrl);
-  const directPlaybackEnabled = canUseDirectPlaybackCookie(request, playbackBaseUrl, directCookieDomain);
+  const directCookieDomain = directPlaybackCookieDomain(
+    request,
+    playbackBaseUrl,
+  );
+  const directPlaybackEnabled = canUseDirectPlaybackCookie(
+    request,
+    playbackBaseUrl,
+    directCookieDomain,
+  );
   const cacheKey = cacheKeyForPlaybackBootstrap(
     normalizedAssetId,
     playbackBaseUrl,
     directPlaybackEnabled,
     directCookieDomain,
-    request
+    request,
   );
   const cached = cachedBootstrapResponse(cacheKey);
   if (cached) {
@@ -330,12 +387,14 @@ export async function GET(
       cached.safeResponse.ttl_seconds,
       cached.playbackBaseUrl,
       cached.directPlaybackEnabled,
-      cached.directCookieDomain
+      cached.directCookieDomain,
     );
     return jsonResponse(cached.safeResponse, { headers });
   }
 
-  const organizationId = await assetOrganizationId(normalizedAssetId).catch(() => null);
+  const organizationId = await assetOrganizationId(normalizedAssetId).catch(
+    () => null,
+  );
   if (!organizationId) {
     return jsonResponse(
       {
@@ -343,14 +402,14 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Asset is unavailable",
       },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
   const upstream = await fetchControlPlane(
     `/v1/assets/${encodeURIComponent(normalizedAssetId)}/playback`,
     organizationId,
-    internalToken
+    internalToken,
   ).catch(() => null);
 
   if (!upstream) {
@@ -360,12 +419,16 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Playback bootstrap failed",
       },
-      { status: 502 }
+      { status: 502 },
     );
   }
 
   if (upstream.status === 404) {
-    return notPlayableOrUnavailable(normalizedAssetId, organizationId, internalToken);
+    return notPlayableOrUnavailable(
+      normalizedAssetId,
+      organizationId,
+      internalToken,
+    );
   }
 
   if (!upstream.ok) {
@@ -375,18 +438,22 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Playback bootstrap failed",
       },
-      { status: 502 }
+      { status: 502 },
     );
   }
 
-  const data = (await upstream.json().catch(() => null)) as UpstreamPlaybackResponse | null;
-  const responsePlaybackBaseUrl = directPlaybackEnabled ? playbackBaseUrl : null;
+  const data = (await upstream
+    .json()
+    .catch(() => null)) as UpstreamPlaybackResponse | null;
+  const responsePlaybackBaseUrl = directPlaybackEnabled
+    ? playbackBaseUrl
+    : null;
   const safeResponse = data
     ? safePlaybackBootstrapResponse(
         normalizedAssetId,
         data,
         responsePlaybackBaseUrl,
-        organizationId
+        organizationId,
       )
     : null;
 
@@ -397,12 +464,14 @@ export async function GET(
         asset_id: normalizedAssetId,
         message: "Playback bootstrap failed",
       },
-      { status: 502 }
+      { status: 502 },
     );
   }
 
   const headers = new Headers();
-  const upstreamPlaybackCookie = playbackCookieFromSetCookieHeaders(upstream.headers);
+  const upstreamPlaybackCookie = playbackCookieFromSetCookieHeaders(
+    upstream.headers,
+  );
   const playbackToken = upstreamPlaybackCookie ?? data?.playback_token;
   setPlaybackCookieHeader(
     headers,
@@ -412,7 +481,7 @@ export async function GET(
     safeResponse.ttl_seconds,
     playbackBaseUrl,
     directPlaybackEnabled,
-    directCookieDomain
+    directCookieDomain,
   );
   if (typeof playbackToken === "string") {
     rememberBootstrapResponse(cacheKey, {

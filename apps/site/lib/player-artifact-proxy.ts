@@ -6,6 +6,7 @@ const FORWARDED_RESPONSE_HEADERS = [
   "x-rend-cache",
   "x-rend-edge",
   "x-rend-edge-id",
+  "x-rend-origin",
   "x-rend-region",
 ] as const;
 
@@ -18,18 +19,27 @@ type ArtifactResponseHeaderOptions = {
   rewrittenBody?: string;
 };
 
-const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL = "private, max-age=31536000, immutable";
-const PRIVATE_MANIFEST_CACHE_CONTROL = "private, max-age=60, stale-while-revalidate=300";
+const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL =
+  "private, max-age=31536000, immutable";
+const PRIVATE_MANIFEST_CACHE_CONTROL =
+  "private, max-age=60, stale-while-revalidate=300";
 const HLS_TIMING_ALLOW_ORIGIN = "https://www.rend.so";
 const HLS_VARIANT_MANIFEST_PATH_RE = /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/;
-const HLS_SEGMENT_PATH_RE = /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/;
+const HLS_SEGMENT_PATH_RE =
+  /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/;
 
 export function isHlsManifestArtifactPath(artifactPath: string | undefined) {
-  return artifactPath === "hls/master.m3u8" || HLS_VARIANT_MANIFEST_PATH_RE.test(artifactPath ?? "");
+  return (
+    artifactPath === "hls/master.m3u8" ||
+    HLS_VARIANT_MANIFEST_PATH_RE.test(artifactPath ?? "")
+  );
 }
 
 function isHlsTimingArtifactPath(artifactPath: string | undefined) {
-  return isHlsManifestArtifactPath(artifactPath) || HLS_SEGMENT_PATH_RE.test(artifactPath ?? "");
+  return (
+    isHlsManifestArtifactPath(artifactPath) ||
+    HLS_SEGMENT_PATH_RE.test(artifactPath ?? "")
+  );
 }
 
 function safeCookieValue(value: unknown) {
@@ -52,17 +62,20 @@ export function playbackCookieFromHeaders(requestHeaders: Headers) {
   return undefined;
 }
 
-export function playbackCookieFromSetCookieHeader(setCookieHeader: string | null | undefined) {
+export function playbackCookieFromSetCookieHeader(
+  setCookieHeader: string | null | undefined,
+) {
   if (!setCookieHeader) return undefined;
-  const match = setCookieHeader.match(new RegExp(`(?:^|,\\s*)${PLAYBACK_COOKIE_NAME}=([^;,\\s]+)`));
+  const match = setCookieHeader.match(
+    new RegExp(`(?:^|,\\s*)${PLAYBACK_COOKIE_NAME}=([^;,\\s]+)`),
+  );
   return safeCookieValue(match?.[1]);
 }
 
 export function playbackCookieFromSetCookieHeaders(headers: Headers) {
-  const values =
-    (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? [
-      headers.get("set-cookie"),
-    ];
+  const values = (
+    headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie?.() ?? [headers.get("set-cookie")];
 
   for (const value of values) {
     const cookie = playbackCookieFromSetCookieHeader(value);
@@ -76,12 +89,13 @@ export function playbackProxyCookieHeader(
   requestUrl: string,
   assetId: string,
   playbackToken: unknown,
-  ttlSeconds: unknown
+  ttlSeconds: unknown,
 ) {
   const token = safeCookieValue(playbackToken);
-  const maxAge = typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
-    ? Math.max(0, Math.floor(ttlSeconds))
-    : 0;
+  const maxAge =
+    typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
+      ? Math.max(0, Math.floor(ttlSeconds))
+      : 0;
   if (!token || maxAge <= 0) return undefined;
 
   const url = new URL(requestUrl);
@@ -104,17 +118,19 @@ export function playbackDirectCookieHeader(
   playbackToken: unknown,
   ttlSeconds: unknown,
   playbackBaseUrl: string,
-  cookieDomain?: string
+  cookieDomain?: string,
 ) {
   const token = safeCookieValue(playbackToken);
-  const maxAge = typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
-    ? Math.max(0, Math.floor(ttlSeconds))
-    : 0;
+  const maxAge =
+    typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
+      ? Math.max(0, Math.floor(ttlSeconds))
+      : 0;
   if (!token || maxAge <= 0) return undefined;
 
   const request = new URL(requestUrl);
   const playbackBase = new URL(playbackBaseUrl);
-  const isSecure = request.protocol === "https:" || playbackBase.protocol === "https:";
+  const isSecure =
+    request.protocol === "https:" || playbackBase.protocol === "https:";
   const path = `/v/${encodeURIComponent(assetId)}/`;
   const parts = [
     `${PLAYBACK_COOKIE_NAME}=${token}`,
@@ -131,22 +147,34 @@ export function playbackDirectCookieHeader(
 export function playbackArtifactFetchHeaders(
   requestHeaders: Headers,
   cookie: string | undefined,
-  artifactPath: string
+  artifactPath: string,
 ) {
   const headers = new Headers();
   const range = requestHeaders.get("range");
-  if (range && !isHlsManifestArtifactPath(artifactPath)) headers.set("range", range);
+  if (range && !isHlsManifestArtifactPath(artifactPath))
+    headers.set("range", range);
   if (cookie) headers.set("cookie", `${PLAYBACK_COOKIE_NAME}=${cookie}`);
   return headers;
 }
 
-export function playbackArtifactResponseHeaders(source: Headers, options: ArtifactResponseHeaderOptions = {}) {
+export function playbackArtifactResponseHeaders(
+  source: Headers,
+  options: ArtifactResponseHeaderOptions = {},
+) {
   const headers = new Headers();
-  headers.set("cache-control", playbackArtifactCacheControl(options.artifactPath, options.cacheable));
+  headers.set(
+    "cache-control",
+    playbackArtifactCacheControl(options.artifactPath, options.cacheable),
+  );
 
   const isRewrittenBody = options.rewrittenBody !== undefined;
   for (const name of FORWARDED_RESPONSE_HEADERS) {
-    if (isRewrittenBody && (name === "accept-ranges" || name === "content-length" || name === "content-range")) {
+    if (
+      isRewrittenBody &&
+      (name === "accept-ranges" ||
+        name === "content-length" ||
+        name === "content-range")
+    ) {
       continue;
     }
 
@@ -156,7 +184,10 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
 
   if (options.contentType) headers.set("content-type", options.contentType);
   if (options.rewrittenBody !== undefined) {
-    headers.set("content-length", String(new TextEncoder().encode(options.rewrittenBody).byteLength));
+    headers.set(
+      "content-length",
+      String(new TextEncoder().encode(options.rewrittenBody).byteLength),
+    );
   }
   if (isHlsTimingArtifactPath(options.artifactPath)) {
     headers.set("timing-allow-origin", HLS_TIMING_ALLOW_ORIGIN);
@@ -165,12 +196,17 @@ export function playbackArtifactResponseHeaders(source: Headers, options: Artifa
   return headers;
 }
 
-export function playbackArtifactCacheControl(artifactPath: string | undefined, cacheable = true) {
+export function playbackArtifactCacheControl(
+  artifactPath: string | undefined,
+  cacheable = true,
+) {
   if (!cacheable) return "no-store";
   if (artifactPath === "opener.mp4" || artifactPath === "thumbnail.jpg") {
     return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
   }
-  if (isHlsManifestArtifactPath(artifactPath)) return PRIVATE_MANIFEST_CACHE_CONTROL;
-  if (artifactPath?.startsWith("hls/")) return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
+  if (isHlsManifestArtifactPath(artifactPath))
+    return PRIVATE_MANIFEST_CACHE_CONTROL;
+  if (artifactPath?.startsWith("hls/"))
+    return PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL;
   return "no-store";
 }

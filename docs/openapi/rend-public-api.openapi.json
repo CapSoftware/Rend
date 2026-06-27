@@ -28,7 +28,7 @@
     },
     {
       "name": "Playback",
-      "description": "Browser-safe playback bootstrap and player telemetry."
+      "description": "Browser-safe playback bootstrap and player telemetry. The default production path returns same-origin artifact URLs that proxy to Tigris-backed origin; edge URLs are optional edge-mode behavior."
     },
     {
       "name": "Analytics",
@@ -169,7 +169,7 @@
         "operationId": "deleteAsset",
         "tags": ["Assets"],
         "summary": "Delete an asset",
-        "description": "Deletes Rend-owned asset state and origin objects, then attempts edge purge. API keys need the `delete` scope.",
+        "description": "Deletes Rend-owned asset state and origin objects. Edge purge is attempted only when edge playback mode is explicitly enabled. API keys need the `delete` scope.",
         "security": [{ "RendApiKey": [] }],
         "x-rend-server": "api",
         "responses": {
