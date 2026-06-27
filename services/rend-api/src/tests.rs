@@ -1595,6 +1595,40 @@ fn edge_warm_artifact_paths_skip_unplayable_states() {
 }
 
 #[test]
+fn production_tigris_playback_base_ignores_local_explicit_value() {
+    assert_eq!(
+        tigris_playback_base_url(
+            RendEnv::Production,
+            "http://rend-api:4000/",
+            "",
+            "https://api.rend.so/"
+        ),
+        "https://api.rend.so"
+    );
+    assert_eq!(
+        tigris_playback_base_url(RendEnv::Production, "http://127.0.0.1:4000", "", ""),
+        "https://api.rend.so"
+    );
+}
+
+#[test]
+fn tigris_playback_base_prefers_explicit_external_value() {
+    assert_eq!(
+        tigris_playback_base_url(
+            RendEnv::Production,
+            "https://playback.example.com/",
+            "https://api.rend.so",
+            ""
+        ),
+        "https://playback.example.com"
+    );
+    assert_eq!(
+        tigris_playback_base_url(RendEnv::Local, "http://127.0.0.1:4000/", "", ""),
+        "http://127.0.0.1:4000"
+    );
+}
+
+#[test]
 fn edge_registry_validation_normalizes_safe_values() {
     assert_eq!(
         normalize_edge_name("edge_id", " rend-edge.us-east-1 ").unwrap(),

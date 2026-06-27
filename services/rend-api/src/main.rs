@@ -208,7 +208,7 @@ impl ApiConfig {
             "local-dev-playback-signing-secret",
         );
         let playback_mode = PlaybackMode::from_env()?;
-        let playback_base_url = playback_base_url_for_mode(playback_mode);
+        let playback_base_url = playback_base_url_for_mode(playback_mode, rend_env);
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
@@ -424,27 +424,79 @@ fn cors_allowed_origins_from_env(rend_env: RendEnv) -> Result<Vec<HeaderValue>> 
         .collect()
 }
 
-fn playback_base_url_for_mode(mode: PlaybackMode) -> String {
+fn playback_base_url_for_mode(mode: PlaybackMode, rend_env: RendEnv) -> String {
     match mode {
-        PlaybackMode::Tigris => {
-            let explicit = env_string("REND_TIGRIS_PLAYBACK_BASE_URL", "");
-            if !explicit.trim().is_empty() {
-                return explicit.trim().trim_end_matches('/').to_owned();
-            }
-            let public_api = env_string("REND_PUBLIC_API_BASE_URL", "");
-            if !public_api.trim().is_empty() {
-                return public_api.trim().trim_end_matches('/').to_owned();
-            }
-            env_string("REND_API_BASE_URL", "http://127.0.0.1:4000")
-                .trim()
-                .trim_end_matches('/')
-                .to_owned()
-        }
+        PlaybackMode::Tigris => tigris_playback_base_url(
+            rend_env,
+            &env_string("REND_TIGRIS_PLAYBACK_BASE_URL", ""),
+            &env_string("REND_PUBLIC_API_BASE_URL", ""),
+            &env_string("REND_API_BASE_URL", ""),
+        ),
         PlaybackMode::Edge => env_string("REND_PLAYBACK_BASE_URL", "http://127.0.0.1:4100")
             .trim()
             .trim_end_matches('/')
             .to_owned(),
     }
+}
+
+fn tigris_playback_base_url(
+    rend_env: RendEnv,
+    explicit: &str,
+    public_api_base_url: &str,
+    api_base_url: &str,
+) -> String {
+    let explicit = normalize_base_url_value(explicit);
+    if !explicit.is_empty() && !(rend_env.is_strict() && is_local_playback_base_url(&explicit)) {
+        return explicit;
+    }
+
+    for candidate in [public_api_base_url, api_base_url] {
+        let candidate = normalize_base_url_value(candidate);
+        if !candidate.is_empty() {
+            return candidate;
+        }
+    }
+
+    if rend_env.is_strict() {
+        "https://api.rend.so".to_owned()
+    } else {
+        "http://127.0.0.1:4000".to_owned()
+    }
+}
+
+fn normalize_base_url_value(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_owned()
+}
+
+fn is_local_playback_base_url(value: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    host == "localhost"
+        || host == "0.0.0.0"
+        || host == "::"
+        || host == "::1"
+        || host == "host.docker.internal"
+        || host.starts_with("127.")
+        || host.ends_with(".local")
+        || matches!(
+            host.as_str(),
+            "postgres"
+                | "redis"
+                | "minio"
+                | "clickhouse"
+                | "rend-api"
+                | "rend-edge"
+                | "rend-edge-us-east"
+                | "rend-edge-london"
+        )
 }
 
 fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
