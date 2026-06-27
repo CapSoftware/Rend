@@ -407,7 +407,8 @@ The SSH wrapper also bootstraps production host files before preflight: it
 installs the current control-plane Compose template, patches an existing
 concrete Caddyfile to use the managed upstream snippet, creates
 `/etc/caddy/rend-control-plane-upstream.caddy` only when missing, removes
-legacy `admin off` Caddy settings, and preserves an existing upstream target.
+legacy `admin off` Caddy settings, ensures public `/v/*` playback reaches the
+control-plane API, and preserves an existing upstream target.
 The bootstrap reloads Caddy while the upstream still points at the current slot;
 if an older running config cannot reload because admin was disabled, it performs
 one restart before the transaction starts so later blue/green promotions can use

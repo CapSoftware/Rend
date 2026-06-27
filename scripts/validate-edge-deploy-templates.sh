@@ -251,7 +251,7 @@ require_contains docs/templates/control-plane.Caddyfile 'remote_ip {$REND_CONTRO
 require_contains docs/templates/control-plane.Caddyfile 'REND_PUBLIC_API_HOSTNAME'
 require_contains docs/templates/control-plane.Caddyfile 'import /etc/caddy/rend-control-plane-upstream.caddy'
 require_contains docs/templates/control-plane.Caddyfile 'import rend_active_control_plane'
-require_contains docs/templates/control-plane.Caddyfile "path /v1/* /readyz"
+require_contains docs/templates/control-plane.Caddyfile "path /v1/* /v/* /readyz"
 require_contains docs/templates/control-plane.Caddyfile "path /internal/*"
 require_contains docs/templates/control-plane.Caddyfile "respond 404"
 require_not_contains docs/templates/control-plane.Caddyfile "admin off"

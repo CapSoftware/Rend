@@ -18,7 +18,7 @@ import /etc/caddy/rend-control-plane-upstream.caddy
 	}
 
 	@public_api {
-		path /v1/* /readyz
+		path /v1/* /v/* /readyz
 	}
 	handle @public_api {
 		import rend_active_control_plane

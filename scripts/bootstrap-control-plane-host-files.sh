@@ -165,6 +165,17 @@ for index, line in enumerate(lines):
         lines[index] = f"{match.group(1)}import rend_active_control_plane"
         replaced = True
 
+public_path_pattern = re.compile(r"^(\s*)path\s+(.+)$")
+for index, line in enumerate(lines):
+    match = public_path_pattern.match(line)
+    if not match:
+        continue
+    paths = match.group(2).split()
+    if "/v1/*" in paths and "/readyz" in paths and "/v/*" not in paths:
+        insert_at = paths.index("/v1/*") + 1
+        paths.insert(insert_at, "/v/*")
+        lines[index] = f"{match.group(1)}path {' '.join(paths)}"
+
 has_snippet_import = any(line.strip() == "import rend_active_control_plane" for line in lines)
 if not has_snippet_import:
     if not replaced and source_text == template.read_text(encoding="utf-8"):

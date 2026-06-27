@@ -160,9 +160,10 @@ own public TLS. Checked Caddy templates live in:
 - `docs/templates/control-plane-upstream.Caddyfile`
 - `docs/templates/edge-host.Caddyfile`
 
-The control-plane template exposes `api.rend.so` for the public `/v1/*` API and
-`/readyz`, blocks `/internal/*` on that public hostname, and allows only
-configured edge source IPs to `/internal/*` on `api-internal.play.rend.so`.
+The control-plane template exposes `api.rend.so` for the public `/v1/*` API,
+API-origin playback under `/v/*`, and `/readyz`, blocks `/internal/*` on that
+public hostname, and allows only configured edge source IPs to `/internal/*` on
+`api-internal.play.rend.so`.
 The edge template has a public hostname that blocks `/internal/*` and
 `/metrics`, proxies only canonical lowercase UUID playback paths, and returns
 `404` for `/v/probe`, non-UUID `/v/*`, and every other path. It also has a

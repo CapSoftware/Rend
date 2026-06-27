@@ -19,7 +19,9 @@ The GitHub Actions workflow is `.github/workflows/release-deploy.yml`.
    Before preflight, the deploy wrapper installs the current
    `control-plane.compose.yml`, patches an existing concrete Caddyfile to use
    the managed upstream snippet, creates that snippet if it is missing, and
-   leaves any existing upstream target intact. The bootstrap also removes
+   leaves any existing upstream target intact. It also repairs public Caddy
+   matchers so `/v/*` reaches the control-plane API for Tigris-backed playback.
+   The bootstrap also removes
    legacy `admin off` Caddy settings and reloads Caddy while the upstream still
    points at the current slot; if that one-time reload fails, it restarts Caddy
    before the deploy transaction begins so later promotions can use normal
