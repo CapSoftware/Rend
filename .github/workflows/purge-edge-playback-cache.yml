@@ -1,0 +1,154 @@
+name: Purge Edge Playback Cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: "Asset id whose edge playback cache should be purged."
+        required: true
+        type: string
+      artifact_paths:
+        description: "Optional comma-separated artifact paths. Leave blank to purge all cached playback artifacts for the asset."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  purge:
+    name: Purge production edge playback cache
+    runs-on: ubuntu-latest
+    environment:
+      name: Production
+      url: ${{ vars.REND_API_BASE_URL || 'https://api.rend.so' }}
+    env:
+      REND_EDGE_INTERNAL_TOKEN: ${{ secrets.REND_EDGE_INTERNAL_TOKEN }}
+      REND_SSH_PRIVATE_KEY: ${{ secrets.REND_SSH_PRIVATE_KEY }}
+      REND_SSH_KNOWN_HOSTS: ${{ secrets.REND_SSH_KNOWN_HOSTS }}
+      REND_EDGE_ASH_SSH_HOST: ${{ secrets.REND_EDGE_ASH_SSH_HOST }}
+      REND_EDGE_ASH_SSH_USER: ${{ secrets.REND_EDGE_ASH_SSH_USER }}
+      REND_EDGE_ASH_SSH_PORT: ${{ secrets.REND_EDGE_ASH_SSH_PORT }}
+      REND_EDGE_AMS_SSH_HOST: ${{ secrets.REND_EDGE_AMS_SSH_HOST }}
+      REND_EDGE_AMS_SSH_USER: ${{ secrets.REND_EDGE_AMS_SSH_USER }}
+      REND_EDGE_AMS_SSH_PORT: ${{ secrets.REND_EDGE_AMS_SSH_PORT }}
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY_PATH: ${{ runner.temp }}/rend_deploy_key
+        run: |
+          set -euo pipefail
+          : "${REND_SSH_PRIVATE_KEY:?REND_SSH_PRIVATE_KEY is required}"
+          : "${REND_SSH_KNOWN_HOSTS:?REND_SSH_KNOWN_HOSTS is required}"
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$REND_SSH_PRIVATE_KEY" > "$SSH_KEY_PATH"
+          chmod 600 "$SSH_KEY_PATH"
+          printf '%s\n' "$REND_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "REND_SSH_KEY_PATH=$SSH_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Open edge SSH tunnels
+        run: |
+          set -euo pipefail
+
+          start_tunnel() {
+            local label="$1"
+            local host="$2"
+            local user="$3"
+            local port="$4"
+            local local_port="$5"
+
+            if [[ -z "$host" || -z "$user" ]]; then
+              echo "cannot open $label purge tunnel without SSH host and user" >&2
+              exit 1
+            fi
+
+            ssh \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ExitOnForwardFailure=yes \
+              -i "$REND_SSH_KEY_PATH" \
+              -p "$port" \
+              -f -N \
+              -L "127.0.0.1:${local_port}:127.0.0.1:4100" \
+              "$user@$host"
+
+            curl -fsS --retry 12 --retry-delay 2 --retry-all-errors \
+              "http://127.0.0.1:${local_port}/readyz" >/dev/null
+          }
+
+          start_tunnel "ash" "$REND_EDGE_ASH_SSH_HOST" "$REND_EDGE_ASH_SSH_USER" "${REND_EDGE_ASH_SSH_PORT:-22}" 14100
+          start_tunnel "ams" "$REND_EDGE_AMS_SSH_HOST" "$REND_EDGE_AMS_SSH_USER" "${REND_EDGE_AMS_SSH_PORT:-22}" 14101
+
+      - name: Purge asset cache
+        env:
+          PURGE_ASSET_ID: ${{ inputs.asset_id }}
+          PURGE_ARTIFACT_PATHS: ${{ inputs.artifact_paths }}
+        run: |
+          set -euo pipefail
+          : "${REND_EDGE_INTERNAL_TOKEN:?REND_EDGE_INTERNAL_TOKEN is required}"
+
+          if [[ ! "$PURGE_ASSET_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "asset_id must be a UUID" >&2
+            exit 1
+          fi
+
+          payload_file="$RUNNER_TEMP/rend-edge-purge.json"
+          python3 - "$PURGE_ASSET_ID" "$PURGE_ARTIFACT_PATHS" "$payload_file" <<'PY'
+          import json
+          import sys
+
+          asset_id, raw_paths, target = sys.argv[1:4]
+          payload = {"asset_id": asset_id.lower()}
+          paths = [item.strip() for item in raw_paths.split(",") if item.strip()]
+          if paths:
+              for path in paths:
+                  if path.startswith("/") or "\\" in path or ".." in path:
+                      raise SystemExit(f"unsafe artifact path: {path}")
+              payload["artifact_paths"] = paths
+          with open(target, "w", encoding="utf-8") as file:
+              json.dump(payload, file)
+          PY
+
+          purge_edge() {
+            local label="$1"
+            local base="$2"
+            local body_file="$RUNNER_TEMP/rend-edge-purge-$label-response.json"
+            local status_code
+            status_code="$(
+              curl -sS --max-time 30 -o "$body_file" -w "%{http_code}" \
+                -X POST "$base/internal/purge" \
+                -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
+                -H "content-type: application/json" \
+                --data-binary "@$payload_file"
+            )"
+            python3 - "$label" "$status_code" "$body_file" <<'PY'
+            import json
+            import sys
+
+            label, status, body_path = sys.argv[1:4]
+            try:
+                with open(body_path, encoding="utf-8") as file:
+                    body = json.load(file)
+            except Exception:
+                body = {}
+
+            summary = {
+                "edge": label,
+                "status": int(status),
+                "purged": len(body.get("purged") or []),
+                "missing": len(body.get("missing") or []),
+                "rejected": len(body.get("rejected") or []),
+                "errors": len(body.get("errors") or []),
+            }
+            print(json.dumps(summary, sort_keys=True))
+            if summary["status"] != 200 or summary["rejected"] or summary["errors"]:
+                raise SystemExit(1)
+            PY
+          }
+
+          purge_edge "ash" "http://127.0.0.1:14100"
+          purge_edge "ams" "http://127.0.0.1:14101"
