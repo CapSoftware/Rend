@@ -137,12 +137,12 @@ const method = [
   `A ${Math.round(latest.run.watchWindowMs / 1000)} second watch window per sample, timing the first painted frame and counting any stalls.`,
   `${browserLabel}, run on a Daytona sandbox with the region set to US for the US results.`,
   `${europeBrowserLabel}, run on a Daytona sandbox with the region set to Europe for the Europe results.`,
-  "Rend is measured on the production native-HLS embed path with playback assigned from the initial page.",
+  "Rend is measured on the production native-HLS embed path through the Tigris-origin artifact proxy assigned from the initial page.",
 ];
 
 const caveats = [
   "This is one video, one region, one browser profile, and one run. It is not a universal claim about either service.",
-  "We did not purge or warm any CDN. Mux serves from its own network and Rend from ours, each in whatever cache state it happened to be in.",
+  "We did not purge or warm any CDN. Mux serves from its own network and Rend through its production Tigris-origin artifact proxy, each in whatever cache state it happened to be in.",
   "Encoders, packaging and player implementations differ between the two providers.",
   "This is Rend's production playback path, not a forced-resolution run. Rend selected 1080p and Mux selected 720p in the benchmark viewport.",
   "The Europe run used a Daytona sandbox requested in Europe; Daytona reported the sandbox target as eu.",

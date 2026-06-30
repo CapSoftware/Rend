@@ -17,9 +17,11 @@ const watchMs = Number(process.env.DAYTONA_BENCHMARK_WATCH_MS || 30_000);
 const delayMs = Number(process.env.DAYTONA_BENCHMARK_DELAY_MS || 3_000);
 const startupTimeoutMs = Number(process.env.DAYTONA_BENCHMARK_STARTUP_TIMEOUT_MS || 45_000);
 const publicCopy = process.env.DAYTONA_BENCHMARK_PUBLIC_COPY !== "0";
+const defaultRendBenchmarkUrl =
+  "https://www.rend.so/embed/c12881f9-8b01-4675-b66c-c4f25de3b702";
 const localOutDir = path.join(repoRoot, ".rend", "benchmarks", "providers", `daytona-${runId}`);
 const publicOutDir = path.join(repoRoot, "apps", "site", "public", "benchmarks", "providers");
-let redactionApiKey = "";
+const redactionSecrets = new Set();
 
 function benchmarkRegionForTarget(target) {
   const normalized = String(target || "").toLowerCase();
@@ -229,10 +231,17 @@ function log(message) {
 
 function redactText(value, apiKey) {
   let text = String(value || "");
-  if (apiKey) text = text.split(apiKey).join("<redacted-daytona-api-key>");
+  for (const secret of [apiKey, ...redactionSecrets]) {
+    if (secret) text = text.split(secret).join("<redacted-daytona-api-key>");
+  }
   return text
     .replace(/DAYTONA_API_KEY\s*=\s*[^\s"',;)]+/gi, "DAYTONA_API_KEY=<redacted>")
+    .replace(/DAYTONA_EU_API_KEY\s*=\s*[^\s"',;)]+/gi, "DAYTONA_EU_API_KEY=<redacted>")
     .replace(/\bBearer\s+[a-z0-9._~+/=-]{12,}/gi, "Bearer <redacted>");
+}
+
+function addRedactionSecret(value) {
+  if (value) redactionSecrets.add(value);
 }
 
 function parseEnvFile(text) {
@@ -254,23 +263,108 @@ function parseEnvFile(text) {
   return parsed;
 }
 
-async function loadDaytonaApiKey() {
-  if (process.env.DAYTONA_API_KEY) {
-    redactionApiKey = process.env.DAYTONA_API_KEY;
-    return process.env.DAYTONA_API_KEY;
-  }
+async function loadDaytonaEnv() {
+  const values = {};
   for (const envPath of [".env.local", ".env.production.local", ".env.production"]) {
     try {
-      const values = parseEnvFile(await readFile(path.join(repoRoot, envPath), "utf8"));
-      if (values.DAYTONA_API_KEY) {
-        redactionApiKey = values.DAYTONA_API_KEY;
-        return values.DAYTONA_API_KEY;
+      const parsed = parseEnvFile(await readFile(path.join(repoRoot, envPath), "utf8"));
+      for (const [key, value] of Object.entries(parsed)) {
+        if (values[key] === undefined) values[key] = value;
       }
     } catch {
       // Missing env files are fine.
     }
   }
-  throw new Error("DAYTONA_API_KEY was not found in process env or local env files");
+
+  for (const key of ["DAYTONA_API_KEY", "DAYTONA_EU_API_KEY"]) {
+    if (process.env[key]) values[key] = process.env[key];
+    addRedactionSecret(values[key]);
+  }
+
+  if (!values.DAYTONA_API_KEY && !values.DAYTONA_EU_API_KEY) {
+    throw new Error("DAYTONA_API_KEY was not found in process env or local env files");
+  }
+
+  return values;
+}
+
+function daytonaApiKeyForTarget(env, target) {
+  if (
+    String(target || "")
+      .toLowerCase()
+      .startsWith("eu") &&
+    env.DAYTONA_EU_API_KEY
+  ) {
+    return env.DAYTONA_EU_API_KEY;
+  }
+  return env.DAYTONA_API_KEY || env.DAYTONA_EU_API_KEY || "";
+}
+
+function rendAssetIdFromUrl(rawUrl) {
+  try {
+    const pathParts = new URL(rawUrl).pathname.split("/").filter(Boolean);
+    if (pathParts[0] !== "embed" || !pathParts[1]) return "";
+    return decodeURIComponent(pathParts[1]);
+  } catch {
+    return "";
+  }
+}
+
+async function assertRendProductionTigrisPreflight() {
+  if (process.env.DAYTONA_BENCHMARK_SKIP_REND_PREFLIGHT === "1") return;
+
+  const rendUrl = process.env.DAYTONA_BENCHMARK_REND_URL || defaultRendBenchmarkUrl;
+  const assetId = rendAssetIdFromUrl(rendUrl);
+  if (!assetId) return;
+
+  const embedOrigin = new URL(rendUrl).origin;
+  const bootstrapUrl = new URL(`/api/player/${encodeURIComponent(assetId)}`, embedOrigin);
+  const bootstrap = await fetch(bootstrapUrl, {
+    headers: {
+      accept: "application/json",
+      "cache-control": "no-cache",
+    },
+  });
+  const playbackCookie = (bootstrap.headers.get("set-cookie") || "").split(";")[0];
+  if (!bootstrap.ok) {
+    throw new Error(`Rend benchmark preflight failed with HTTP ${bootstrap.status}`);
+  }
+
+  const data = await bootstrap.json();
+  const manifest = data.manifest_url || data.playback_url;
+  if (!manifest) throw new Error("Rend benchmark preflight did not return a manifest URL");
+
+  const manifestUrl = new URL(manifest, bootstrapUrl);
+  if (
+    process.env.DAYTONA_BENCHMARK_ALLOW_REND_EDGE !== "1" &&
+    manifestUrl.hostname.endsWith(".play.rend.so")
+  ) {
+    throw new Error(`Rend benchmark preflight expected Tigris playback, got edge host ${manifestUrl.hostname}`);
+  }
+
+  const manifestResponse = await fetch(manifestUrl, {
+    headers: {
+      accept: "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+      ...(playbackCookie ? { cookie: playbackCookie } : {}),
+      "cache-control": "no-cache",
+    },
+  });
+  if (!manifestResponse.ok) {
+    throw new Error(`Rend benchmark manifest preflight failed with HTTP ${manifestResponse.status}`);
+  }
+
+  const origin = manifestResponse.headers.get("x-rend-origin");
+  if (
+    process.env.DAYTONA_BENCHMARK_ALLOW_REND_EDGE !== "1" &&
+    origin &&
+    origin !== "tigris"
+  ) {
+    throw new Error(`Rend benchmark preflight expected x-rend-origin=tigris, got ${origin}`);
+  }
+
+  log(
+    `rend preflight: asset=${assetId} manifestHost=${manifestUrl.host} origin=${origin || "unknown"}`,
+  );
 }
 
 function safeShellNumber(value, name) {
@@ -294,9 +388,14 @@ async function checkedExec(sandbox, command, cwd, env, timeout, apiKey) {
   return result;
 }
 
-async function createSandbox(apiKey) {
+async function createSandbox(daytonaEnv) {
   const errors = [];
   for (const target of targetCandidates) {
+    const apiKey = daytonaApiKeyForTarget(daytonaEnv, target);
+    if (!apiKey) {
+      errors.push({ target, message: "missing Daytona API key for target" });
+      continue;
+    }
     try {
       log(`creating sandbox target=${target}`);
       const daytona = new Daytona({ apiKey, target });
@@ -317,7 +416,7 @@ async function createSandbox(apiKey) {
         { timeout: 420 },
       );
       log(`created sandbox id=${sandbox.id} actualTarget=${sandbox.target}`);
-      return { daytona, sandbox, requestedTarget: target };
+      return { daytona, sandbox, requestedTarget: target, apiKey };
     } catch (error) {
       const message = redactText(error?.message || error, apiKey);
       errors.push({ target, message });
@@ -328,7 +427,8 @@ async function createSandbox(apiKey) {
 }
 
 async function main() {
-  const apiKey = await loadDaytonaApiKey();
+  const daytonaEnv = await loadDaytonaEnv();
+  await assertRendProductionTigrisPreflight();
   const benchmarkScript = await readFile(path.join(repoRoot, "scripts", "benchmark-providers.mjs"));
   const hlsMinScript = await readFile(
     path.join(repoRoot, "node_modules", ".bun", "hls.js@1.6.16", "node_modules", "hls.js", "dist", "hls.min.js"),
@@ -336,11 +436,13 @@ async function main() {
   let sandbox;
   let daytona;
   let requestedTarget;
+  let apiKey = "";
   try {
-    const created = await createSandbox(apiKey);
+    const created = await createSandbox(daytonaEnv);
     sandbox = created.sandbox;
     daytona = created.daytona;
     requestedTarget = created.requestedTarget;
+    apiKey = created.apiKey;
 
     const workDir = (await sandbox.getWorkDir()) || (await sandbox.getUserHomeDir()) || "/home/daytona";
     const remoteRoot = path.posix.join(workDir, "rend-provider-benchmark");
@@ -489,6 +591,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`[daytona-benchmark] ${redactText(error.stack || error.message, redactionApiKey)}`);
+  console.error(`[daytona-benchmark] ${redactText(error.stack || error.message)}`);
   process.exitCode = 1;
 });
