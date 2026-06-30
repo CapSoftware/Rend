@@ -3,7 +3,8 @@ import /etc/caddy/rend-control-plane-upstream.caddy
 # Internal control-plane ingress for edge hosts.
 #
 # Required Caddy environment:
-# - REND_PUBLIC_API_HOSTNAME: public API hostname for /v1/* and /readyz.
+# - REND_PUBLIC_API_HOSTNAME: public API hostname for /v1/*, /v/*,
+#   /embed-fast/*, and /readyz.
 # - REND_CONTROL_PLANE_HOSTNAME: private/internal API hostname.
 # - REND_CONTROL_PLANE_ALLOWED_EDGE_IPS: space-separated edge source IPs,
 #   plus any private bastion/VPN source used for operator probes.
@@ -18,7 +19,7 @@ import /etc/caddy/rend-control-plane-upstream.caddy
 	}
 
 	@public_api {
-		path /v1/* /v/* /readyz
+		path /v1/* /v/* /embed-fast/* /readyz
 	}
 	handle @public_api {
 		import rend_active_control_plane

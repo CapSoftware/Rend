@@ -171,9 +171,15 @@ for index, line in enumerate(lines):
     if not match:
         continue
     paths = match.group(2).split()
-    if "/v1/*" in paths and "/readyz" in paths and "/v/*" not in paths:
+    if "/v1/*" in paths and "/readyz" in paths:
         insert_at = paths.index("/v1/*") + 1
-        paths.insert(insert_at, "/v/*")
+        if "/v/*" not in paths:
+            paths.insert(insert_at, "/v/*")
+            insert_at += 1
+        else:
+            insert_at = paths.index("/v/*") + 1
+        if "/embed-fast/*" not in paths:
+            paths.insert(insert_at, "/embed-fast/*")
         lines[index] = f"{match.group(1)}path {' '.join(paths)}"
 
 has_snippet_import = any(line.strip() == "import rend_active_control_plane" for line in lines)

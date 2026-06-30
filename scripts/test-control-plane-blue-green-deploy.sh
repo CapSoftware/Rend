@@ -220,8 +220,8 @@ if ! grep -q 'import rend_active_control_plane' "$bootstrap_case/etc/caddy/Caddy
   echo "bootstrap-host-files: expected patched Caddyfile to use managed upstream import" >&2
   exit 1
 fi
-if ! grep -q 'path /v1/\* /v/\* /readyz' "$bootstrap_case/etc/caddy/Caddyfile"; then
-  echo "bootstrap-host-files: expected public Caddy matcher to include API-origin /v/* playback" >&2
+if ! grep -q 'path /v1/\* /v/\* /embed-fast/\* /readyz' "$bootstrap_case/etc/caddy/Caddyfile"; then
+  echo "bootstrap-host-files: expected public Caddy matcher to include API-origin playback and fast embed paths" >&2
   exit 1
 fi
 if ! grep -q 'rend-control-plane-upstream.caddy' "$bootstrap_case/etc/caddy/Caddyfile"; then
