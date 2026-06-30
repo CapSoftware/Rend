@@ -5013,13 +5013,27 @@ async fn origin_playback_progressive_fmp4_response(
         return Err(AppError::not_found("artifact not found"));
     }
 
-    let mut parts = Vec::with_capacity(segment_names.len() + 1);
-    parts.push(hls_progressive_init_artifact(
-        &artifact.asset_id,
-        rendition,
-    )?);
+    let mut segment_names = segment_names.into_iter();
+    let first_segment = segment_names
+        .next()
+        .ok_or_else(|| AppError::not_found("artifact not found"))?;
+    let init_artifact = hls_progressive_init_artifact(&artifact.asset_id, rendition)?;
+    let first_segment_artifact =
+        hls_progressive_segment_artifact(&artifact.asset_id, rendition, &first_segment)?;
+    let (init_part, first_segment_part) = tokio::try_join!(
+        origin_playback_artifact_full_bytes(state.as_ref(), &init_artifact),
+        origin_playback_artifact_full_bytes(state.as_ref(), &first_segment_artifact)
+    )?;
+    let (init_bytes, _, _) = init_part;
+    let (first_segment_bytes, _, _) = first_segment_part;
+    let mut startup_bytes = Vec::with_capacity(init_bytes.len() + first_segment_bytes.len());
+    startup_bytes.extend_from_slice(&init_bytes);
+    startup_bytes.extend_from_slice(&first_segment_bytes);
+    let startup_bytes = Bytes::from(startup_bytes);
+
+    let mut remaining_parts = Vec::new();
     for segment in segment_names {
-        parts.push(hls_progressive_segment_artifact(
+        remaining_parts.push(hls_progressive_segment_artifact(
             &artifact.asset_id,
             rendition,
             &segment,
@@ -5027,8 +5041,11 @@ async fn origin_playback_progressive_fmp4_response(
     }
 
     let stream = stream::try_unfold(
-        (state, parts.into_iter()),
-        |(state, mut parts)| async move {
+        (Some(startup_bytes), state, remaining_parts.into_iter()),
+        |(startup_bytes, state, mut parts)| async move {
+            if let Some(bytes) = startup_bytes {
+                return Ok::<_, std::io::Error>(Some((bytes, (None, state, parts))));
+            }
             let Some(part) = parts.next() else {
                 return Ok::<_, std::io::Error>(None);
             };
@@ -5040,7 +5057,7 @@ async fn origin_playback_progressive_fmp4_response(
                         part.artifact_path, error.message
                     ))
                 })?;
-            Ok::<_, std::io::Error>(Some((bytes, (state, parts))))
+            Ok::<_, std::io::Error>(Some((bytes, (None, state, parts))))
         },
     );
 
