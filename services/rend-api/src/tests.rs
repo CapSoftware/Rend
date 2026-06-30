@@ -1556,6 +1556,45 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
 }
 
 #[test]
+fn api_fast_embed_prefers_progressive_startup_without_token_material() {
+    let response = playback_bootstrap_response(
+        Some(asset_record("hls_ready")),
+        &hls_artifact_records(),
+        "https://api.rend.so",
+        &test_issuer(),
+        8,
+        NOW,
+    )
+    .unwrap();
+    let selection = fast_embed_playback_selection(&response, "progressive").unwrap();
+    let html = render_api_fast_embed_html(&response, &selection, true, false, true);
+
+    assert_eq!(selection.label, "progressive_mp4");
+    assert_eq!(selection.artifact_path, "hls/360p/progressive.mp4");
+    assert_eq!(
+        selection.url,
+        "https://api.rend.so/v/asset-123/hls/360p/progressive.mp4"
+    );
+    assert!(html.contains("data-rend-player-selected=\"progressive_mp4\""));
+    assert!(html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
+    assert!(html.contains("rel=\"preload\" as=\"video\""));
+    assert!(!html.contains(&response.playback_token), "{html}");
+    assert!(!html.contains("?token="), "{html}");
+    assert!(
+        !html.to_ascii_lowercase().contains("authorization"),
+        "{html}"
+    );
+}
+
+#[tokio::test]
+async fn api_fast_embed_rejects_malformed_asset_id_without_auth() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let response = route_response(app, "/embed-fast/not-a-uuid", None).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
 fn playback_bootstrap_prefetch_hints_are_bounded() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),

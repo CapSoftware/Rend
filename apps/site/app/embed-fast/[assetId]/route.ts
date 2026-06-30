@@ -59,7 +59,7 @@ function startupMode(value: string | null) {
 }
 
 function bootstrapMode(value: string | null) {
-  return value === "server" ? "server" : "client";
+  return value === "client" ? "client" : "server";
 }
 
 function bootstrapUrlForRequest(request: Request, assetId: string) {

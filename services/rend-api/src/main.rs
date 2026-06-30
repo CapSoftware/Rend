@@ -869,6 +869,24 @@ struct PlaybackOriginQuery {
     token: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct FastEmbedQuery {
+    autoplay: Option<String>,
+    controls: Option<String>,
+    muted: Option<String>,
+    startup: Option<String>,
+    #[serde(rename = "startupMode")]
+    startup_mode: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FastEmbedPlaybackSelection {
+    artifact_path: String,
+    content_type: String,
+    label: &'static str,
+    url: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlaybackPrefetchHint {
     artifact_path: String,
@@ -1348,6 +1366,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .nest("/internal/telemetry", telemetry_routes);
 
     if playback_mode == PlaybackMode::Tigris {
+        app = app.route("/embed-fast/{asset_id}", get(api_fast_embed));
         // This route validates Rend playback cookies/tokens and streams private
         // origin objects without exposing object-store signed URLs.
         app = app.route(
@@ -2288,6 +2307,74 @@ async fn get_asset_playback_inner(
     )
 }
 
+async fn api_fast_embed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+    Query(query): Query<FastEmbedQuery>,
+) -> Response {
+    match api_fast_embed_inner(state, asset_id, query).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn api_fast_embed_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+    query: FastEmbedQuery,
+) -> Result<Response, AppError> {
+    let response = get_public_asset_playback_inner(state.clone(), asset_id).await?;
+    let startup =
+        fast_embed_startup_mode(query.startup_mode.as_deref().or(query.startup.as_deref()));
+    let selection = fast_embed_playback_selection(&response, startup)
+        .ok_or_else(|| AppError::not_found("asset is not playable yet"))?;
+    let auto_play = query_flag(query.autoplay.as_deref(), false);
+    let controls = query_flag(query.controls.as_deref(), true);
+    let muted = query
+        .muted
+        .as_deref()
+        .map(|value| query_flag(Some(value), true))
+        .unwrap_or(auto_play);
+    let html = render_api_fast_embed_html(&response, &selection, auto_play, controls, muted);
+    let mut rendered = Html(html).into_response();
+    let headers = rendered.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("x-rend-fast-embed", HeaderValue::from_static("api"));
+    if let Ok(cookie) = playback_cookie_header(
+        &response.playback_token,
+        response.ttl_seconds,
+        &state.config.playback_base_url,
+        state.config.playback_cookie_domain.as_deref(),
+    )
+    .parse()
+    {
+        headers.insert(header::SET_COOKIE, cookie);
+    }
+    Ok(rendered)
+}
+
+async fn get_public_asset_playback_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+) -> Result<PlaybackBootstrapResponse, AppError> {
+    let asset = fetch_public_asset_playback_record(&state.db, &asset_id).await?;
+    let artifacts = if let Some(asset) = asset.as_ref() {
+        fetch_playback_artifacts(&state.db, &asset.organization_id, &asset.asset_id).await?
+    } else {
+        Vec::new()
+    };
+    let now = current_unix_timestamp().map_err(AppError::internal)?;
+
+    playback_bootstrap_response(
+        asset,
+        &artifacts,
+        &state.config.playback_base_url,
+        &state.config.playback_token_issuer,
+        state.config.playback_bootstrap_prefetch_segments,
+        now,
+    )
+}
+
 async fn playback_origin_artifact(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<PlaybackOriginPath>,
@@ -3047,6 +3134,40 @@ async fn fetch_asset_playback_record(
     ))
 }
 
+async fn fetch_public_asset_playback_record(
+    db: &PgPool,
+    asset_id: &str,
+) -> Result<Option<AssetPlaybackRecord>, AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "
+        SELECT asset.id::text,
+               asset.organization_id::text,
+               asset.source_state,
+               asset.playable_state
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+          AND asset.deleted_at IS NULL
+          AND asset.suspended_at IS NULL
+          AND org.suspended_at IS NULL
+        ",
+    )
+    .bind(asset_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(row.map(
+        |(asset_id, organization_id, source_state, playable_state)| AssetPlaybackRecord {
+            asset_id,
+            organization_id,
+            source_state,
+            playable_state,
+        },
+    ))
+}
+
 async fn fetch_playback_artifacts(
     db: &PgPool,
     organization_id: &str,
@@ -3450,6 +3571,204 @@ fn playback_bootstrap_response(
         manifest_content_type,
         prefetch_hints,
     })
+}
+
+fn query_flag(value: Option<&str>, fallback: bool) -> bool {
+    match value.map(str::trim) {
+        None => fallback,
+        Some("") | Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        Some(_) => fallback,
+    }
+}
+
+fn fast_embed_startup_mode(value: Option<&str>) -> &'static str {
+    match value {
+        Some("opener") => "opener",
+        Some("hls") | Some("native") => "hls",
+        _ => "progressive",
+    }
+}
+
+fn fast_embed_playback_selection(
+    response: &PlaybackBootstrapResponse,
+    startup: &str,
+) -> Option<FastEmbedPlaybackSelection> {
+    if startup == "opener" {
+        if let Some(url) = response.opener_url.as_ref() {
+            return Some(FastEmbedPlaybackSelection {
+                artifact_path: "opener.mp4".to_owned(),
+                content_type: response
+                    .opener_content_type
+                    .clone()
+                    .unwrap_or_else(|| "video/mp4".to_owned()),
+                label: "opener",
+                url: url.clone(),
+            });
+        }
+    }
+
+    if startup == "progressive"
+        && let Some(selection) = fast_embed_progressive_selection(response)
+    {
+        return Some(selection);
+    }
+
+    if response.playable_state == "hls_ready"
+        && let Some(url) = response.manifest_url.as_ref()
+    {
+        return Some(FastEmbedPlaybackSelection {
+            artifact_path: "hls/master.m3u8".to_owned(),
+            content_type: response
+                .manifest_content_type
+                .clone()
+                .unwrap_or_else(|| "application/vnd.apple.mpegurl".to_owned()),
+            label: "native_hls",
+            url: url.clone(),
+        });
+    }
+
+    if let Some(url) = response.opener_url.as_ref() {
+        return Some(FastEmbedPlaybackSelection {
+            artifact_path: "opener.mp4".to_owned(),
+            content_type: response
+                .opener_content_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_owned()),
+            label: "opener",
+            url: url.clone(),
+        });
+    }
+
+    response
+        .playback_url
+        .as_ref()
+        .map(|url| FastEmbedPlaybackSelection {
+            artifact_path: if response.playable_state == "hls_ready" {
+                "hls/master.m3u8".to_owned()
+            } else {
+                "opener.mp4".to_owned()
+            },
+            content_type: response.playback_content_type.clone().unwrap_or_default(),
+            label: "primary",
+            url: url.clone(),
+        })
+}
+
+fn fast_embed_progressive_selection(
+    response: &PlaybackBootstrapResponse,
+) -> Option<FastEmbedPlaybackSelection> {
+    if response.playable_state != "hls_ready" {
+        return None;
+    }
+    let manifest_url = response.manifest_url.as_ref()?;
+    let rendition = fast_embed_progressive_rendition(&response.prefetch_hints)?;
+    let mut parsed = reqwest::Url::parse(manifest_url).ok()?;
+    let prefix = format!("/v/{}/", response.asset_id);
+    if !parsed.path().starts_with(&prefix) {
+        return None;
+    }
+    let artifact_path = format!("hls/{rendition}/progressive.mp4");
+    parsed.set_path(&format!("{prefix}{artifact_path}"));
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    Some(FastEmbedPlaybackSelection {
+        artifact_path,
+        content_type: "video/mp4".to_owned(),
+        label: "progressive_mp4",
+        url: parsed.to_string(),
+    })
+}
+
+fn fast_embed_progressive_rendition(hints: &[PlaybackPrefetchHint]) -> Option<String> {
+    let mut by_rendition = HashMap::<&str, (bool, bool)>::new();
+    for hint in hints {
+        let parts = hint.artifact_path.split('/').collect::<Vec<_>>();
+        let ["hls", rendition, name] = parts.as_slice() else {
+            continue;
+        };
+        let entry = by_rendition.entry(rendition).or_insert((false, false));
+        entry.0 |= *name == format!("init_{rendition}.mp4");
+        entry.1 |= *name == "segment_00000.m4s";
+    }
+
+    HLS_STARTUP_RENDITION_ORDER.iter().find_map(|rendition| {
+        by_rendition
+            .get(rendition)
+            .copied()
+            .filter(|(has_init, has_segment)| *has_init && *has_segment)
+            .map(|_| (*rendition).to_owned())
+    })
+}
+
+fn html_escape(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn render_api_fast_embed_html(
+    response: &PlaybackBootstrapResponse,
+    selection: &FastEmbedPlaybackSelection,
+    auto_play: bool,
+    controls: bool,
+    muted: bool,
+) -> String {
+    let auto_play_attr = if auto_play { " autoplay" } else { "" };
+    let controls_attr = if controls { " controls" } else { "" };
+    let muted_attr = if muted { " muted" } else { "" };
+    let poster_attr = "";
+    let preload_link = if selection.content_type == "video/mp4" {
+        format!(
+            r#"<link rel="preload" as="video" href="{}" type="{}" crossorigin="use-credentials" fetchpriority="high">"#,
+            html_escape(&selection.url),
+            html_escape(&selection.content_type)
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Rend player</title>
+{preload_link}
+<style>
+html,body{{margin:0;width:100%;height:100%;background:#050505;color:#f7f7f7}}
+body{{overflow:hidden}}
+.rend-fast{{position:fixed;inset:0;display:grid;place-items:center;background:#050505;font-family:Inter,ui-sans-serif,system-ui,sans-serif}}
+.rend-fast__video{{width:100%;height:100%;display:block;object-fit:contain;background:#000}}
+.rend-fast__message{{position:absolute;left:16px;bottom:14px;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.64);font-size:13px;line-height:1.2;color:#fff}}
+.rend-fast[data-rend-player-state="ready"] .rend-fast__message,.rend-fast[data-rend-player-state="playing"] .rend-fast__message{{display:none}}
+</style>
+</head>
+<body>
+<main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="native" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
+<video class="rend-fast__video" src="{url}" type="{content_type}"{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="use-credentials"></video>
+<div class="rend-fast__message" role="status" aria-live="polite">Ready</div>
+</main>
+<script>
+(()=>{{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const mark=(name)=>{{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))}};const dims=()=>{{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))}};video.addEventListener("loadedmetadata",()=>{{dims();mark("data-rend-metadata-ms")}},{{once:true}});video.addEventListener("canplay",()=>{{dims();mark("data-rend-canplay-ms")}},{{once:true}});video.addEventListener("playing",()=>{{root.setAttribute("data-rend-player-state","playing");dims()}});if("requestVideoFrameCallback"in video){{video.requestVideoFrameCallback(()=>{{dims();mark("data-rend-first-frame-ms")}})}}else{{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{{once:true}})}}if({auto_play_js})video.play().catch(()=>{{}})}})();
+</script>
+</body>
+</html>"#,
+        asset_id = html_escape(&response.asset_id),
+        artifact_path = html_escape(&selection.artifact_path),
+        auto_play_js = if auto_play { "true" } else { "false" },
+        content_type = html_escape(&selection.content_type),
+        label = html_escape(selection.label),
+        playable_state = html_escape(&response.playable_state),
+        source_state = html_escape(&response.source_state),
+        url = html_escape(&selection.url),
+    )
 }
 
 fn playback_artifacts(asset_id: &str, records: &[PlaybackArtifactRecord]) -> Vec<PlaybackArtifact> {
