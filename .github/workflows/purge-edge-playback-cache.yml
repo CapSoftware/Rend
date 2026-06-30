@@ -126,28 +126,28 @@ jobs:
                 --data-binary "@$payload_file"
             )"
             python3 - "$label" "$status_code" "$body_file" <<'PY'
-            import json
-            import sys
+          import json
+          import sys
 
-            label, status, body_path = sys.argv[1:4]
-            try:
-                with open(body_path, encoding="utf-8") as file:
-                    body = json.load(file)
-            except Exception:
-                body = {}
+          label, status, body_path = sys.argv[1:4]
+          try:
+              with open(body_path, encoding="utf-8") as file:
+                  body = json.load(file)
+          except Exception:
+              body = {}
 
-            summary = {
-                "edge": label,
-                "status": int(status),
-                "purged": len(body.get("purged") or []),
-                "missing": len(body.get("missing") or []),
-                "rejected": len(body.get("rejected") or []),
-                "errors": len(body.get("errors") or []),
-            }
-            print(json.dumps(summary, sort_keys=True))
-            if summary["status"] != 200 or summary["rejected"] or summary["errors"]:
-                raise SystemExit(1)
-            PY
+          summary = {
+              "edge": label,
+              "status": int(status),
+              "purged": len(body.get("purged") or []),
+              "missing": len(body.get("missing") or []),
+              "rejected": len(body.get("rejected") or []),
+              "errors": len(body.get("errors") or []),
+          }
+          print(json.dumps(summary, sort_keys=True))
+          if summary["status"] != 200 or summary["rejected"] or summary["errors"]:
+              raise SystemExit(1)
+          PY
           }
 
           purge_edge "ash" "http://127.0.0.1:14100"
