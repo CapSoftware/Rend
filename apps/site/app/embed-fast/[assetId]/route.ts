@@ -14,7 +14,7 @@ type FastEmbedRenderOptions = {
   bootstrapMs?: number;
   controls: boolean;
   muted: boolean;
-  startupMode: "hls" | "opener";
+  startupMode: "hls" | "opener" | "progressive";
 };
 
 const GEO_HEADER_NAMES = [
@@ -51,7 +51,9 @@ function flag(value: string | null, fallback: boolean) {
 }
 
 function startupMode(value: string | null) {
-  return value === "opener" ? "opener" : "hls";
+  if (value === "opener") return "opener";
+  if (value === "hls" || value === "native") return "hls";
+  return "progressive";
 }
 
 function bootstrapUrlForRequest(request: Request, assetId: string) {
@@ -111,7 +113,7 @@ function jsString(value: string) {
 
 function playbackSelection(
   bootstrap: WatchPlaybackBootstrapResponse | null,
-  mode: "hls" | "opener",
+  mode: "hls" | "opener" | "progressive",
 ) {
   if (bootstrap?.status !== "ready") return null;
 
@@ -122,6 +124,18 @@ function playbackSelection(
       label: "opener",
       url: bootstrap.opener_url,
     };
+  }
+
+  if (mode === "progressive") {
+    const progressiveUrl = progressivePlaybackUrl(bootstrap);
+    if (progressiveUrl) {
+      return {
+        artifactPath: progressiveUrl.artifactPath,
+        contentType: "video/mp4",
+        label: "progressive_mp4",
+        url: progressiveUrl.url,
+      };
+    }
   }
 
   if (bootstrap.playable_state === "hls_ready" && bootstrap.manifest_url) {
@@ -155,6 +169,45 @@ function playbackSelection(
     };
   }
 
+  return null;
+}
+
+function progressivePlaybackUrl(bootstrap: WatchPlaybackBootstrapReady) {
+  if (bootstrap.playable_state !== "hls_ready" || !bootstrap.manifest_url) {
+    return null;
+  }
+  const rendition = progressiveStartupRendition(bootstrap);
+  if (!rendition) return null;
+
+  try {
+    const parsed = new URL(bootstrap.manifest_url);
+    const prefix = `/v/${bootstrap.asset_id}/`;
+    if (!parsed.pathname.startsWith(prefix)) return null;
+    const artifactPath = `hls/${rendition}/progressive.mp4`;
+    parsed.pathname = `${prefix}${artifactPath}`;
+    parsed.search = "";
+    parsed.hash = "";
+    return { artifactPath, url: parsed.toString() };
+  } catch {
+    return null;
+  }
+}
+
+function progressiveStartupRendition(bootstrap: WatchPlaybackBootstrapReady) {
+  const byRendition = new Map<string, { init: boolean; segment: boolean }>();
+  for (const hint of bootstrap.prefetch_hints) {
+    const match = /^hls\/([^/]+)\/([^/]+)$/.exec(hint.artifact_path);
+    if (!match) continue;
+    const [, rendition, name] = match;
+    const state = byRendition.get(rendition) ?? { init: false, segment: false };
+    state.init ||= name === `init_${rendition}.mp4`;
+    state.segment ||= name === "segment_00000.m4s";
+    byRendition.set(rendition, state);
+  }
+  for (const rendition of ["360p", "480p", "720p", "1080p", "2k", "4k"]) {
+    const state = byRendition.get(rendition);
+    if (state?.init && state.segment) return rendition;
+  }
   return null;
 }
 

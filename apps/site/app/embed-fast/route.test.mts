@@ -25,7 +25,18 @@ function readyBootstrap(): WatchPlaybackBootstrapResponse {
     manifest_content_type: "application/vnd.apple.mpegurl",
     poster_url: "https://api.rend.so/v/00000000-0000-0000-0000-000000000001/thumbnail.jpg",
     poster_content_type: "image/jpeg",
-    prefetch_hints: [],
+    prefetch_hints: [
+      {
+        artifact_path: "hls/360p/init_360p.mp4",
+        content_type: "video/mp4",
+        url: "https://api.rend.so/v/00000000-0000-0000-0000-000000000001/hls/360p/init_360p.mp4",
+      },
+      {
+        artifact_path: "hls/360p/segment_00000.m4s",
+        content_type: "video/mp4",
+        url: "https://api.rend.so/v/00000000-0000-0000-0000-000000000001/hls/360p/segment_00000.m4s",
+      },
+    ],
   };
 }
 
@@ -46,6 +57,23 @@ test("fast embed renders a direct native HLS video without exposing playback sec
   assert.match(html, /data-rend-player-artifact="hls\/master\.m3u8"/);
   assert.match(html, /data-rend-bootstrap-ms="42"/);
   assert.match(html, /rel="preconnect" href="https:\/\/api\.rend\.so" crossorigin/);
+  assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
+});
+
+test("fast embed defaults to progressive fMP4 when startup hints support it", () => {
+  const html = renderFastEmbedHtml({
+    assetId: ASSET_ID,
+    autoPlay: true,
+    bootstrap: readyBootstrap(),
+    bootstrapMs: 42,
+    controls: false,
+    muted: true,
+    startupMode: "progressive",
+  });
+
+  assert.match(html, /src="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4"/);
+  assert.match(html, /data-rend-player-selected="progressive_mp4"/);
+  assert.match(html, /data-rend-player-artifact="hls\/360p\/progressive\.mp4"/);
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 

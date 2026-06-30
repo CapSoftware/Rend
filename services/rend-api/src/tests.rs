@@ -719,6 +719,48 @@ fn origin_playback_cache_ttl_is_limited_to_startup_artifacts() {
     );
 }
 
+#[test]
+fn origin_playback_artifact_accepts_virtual_progressive_fmp4() {
+    let artifact = origin_playback_artifact(
+        "00000000-0000-0000-0000-000000000001",
+        "hls/360p/progressive.mp4",
+    )
+    .unwrap();
+
+    assert_eq!(artifact.artifact_path, "hls/360p/progressive.mp4");
+    assert_eq!(artifact.content_type, "video/mp4");
+    assert_eq!(
+        artifact.object_key,
+        "videos/00000000-0000-0000-0000-000000000001/hls/360p/progressive.mp4"
+    );
+}
+
+#[test]
+fn hls_progressive_segment_names_accepts_only_local_fmp4_segments() {
+    let playlist = r#"
+#EXTM3U
+#EXT-X-MAP:URI="init_360p.mp4"
+#EXTINF:1.000000,
+segment_00000.m4s
+#EXTINF:1.000000,
+../segment_00001.m4s
+#EXTINF:1.000000,
+segment_latest.m4s
+#EXTINF:1.000000,
+segment_00002.ts
+#EXTINF:1.000000,
+segment_00003.m4s
+"#;
+
+    assert_eq!(
+        hls_progressive_segment_names(playlist),
+        vec![
+            "segment_00000.m4s".to_owned(),
+            "segment_00003.m4s".to_owned()
+        ]
+    );
+}
+
 #[tokio::test]
 async fn local_dev_key_auth_uses_seeded_local_org() {
     let state = test_state();

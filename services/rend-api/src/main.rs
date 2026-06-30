@@ -2320,6 +2320,10 @@ async fn playback_origin_artifact_inner(
     )
     .map_err(|_| AppError::unauthorized("unauthorized playback token"))?;
 
+    if hls_progressive_rendition(&artifact.artifact_path).is_some() {
+        return origin_playback_progressive_fmp4_response(state, artifact).await;
+    }
+
     let range_header = if is_hls_manifest_artifact_path(&artifact.artifact_path) {
         None
     } else {
@@ -2330,44 +2334,14 @@ async fn playback_origin_artifact_inner(
     };
 
     let cache_ttl = origin_playback_cache_ttl(&artifact);
-    if let Some(ttl) = cache_ttl
-        && let Some(entry) = state.origin_playback_cache.get(&artifact.object_key, ttl)
-    {
-        return Ok(origin_playback_artifact_bytes_response(
-            artifact,
-            entry.bytes,
-            entry.content_type,
-            "HIT",
-            range_header.as_deref(),
-        ));
-    }
-
     if cache_ttl.is_some() {
-        let object = state
-            .s3
-            .get_object()
-            .bucket(&state.config.s3_bucket)
-            .key(&artifact.object_key)
-            .send()
-            .await
-            .map_err(|error| origin_playback_artifact_error(&artifact, error))?;
-        let bytes = object
-            .body
-            .collect()
-            .await
-            .map_err(|error| origin_playback_artifact_error(&artifact, error))?
-            .into_bytes();
-        state.origin_playback_cache.insert(
-            artifact.object_key.clone(),
-            bytes.clone(),
-            artifact.content_type,
-        );
-        let content_type = artifact.content_type;
+        let (bytes, content_type, cache_status) =
+            origin_playback_artifact_full_bytes(state.as_ref(), &artifact).await?;
         return Ok(origin_playback_artifact_bytes_response(
             artifact,
             bytes,
             content_type,
-            "MISS",
+            cache_status,
             range_header.as_deref(),
         ));
     }
@@ -4507,6 +4481,11 @@ fn origin_playback_artifact(
         {
             "application/vnd.apple.mpegurl"
         }
+        ["hls", rendition, "progressive.mp4"]
+            if rend_playback_auth::is_valid_hls_rendition_name(rendition) =>
+        {
+            "video/mp4"
+        }
         ["hls", rendition, init]
             if rend_playback_auth::is_valid_hls_rendition_name(rendition)
                 && rend_playback_auth::is_valid_hls_init_segment_name(init) =>
@@ -4536,6 +4515,59 @@ fn hls_segment_content_type(segment: &str) -> &'static str {
     } else {
         "video/mp2t"
     }
+}
+
+fn hls_progressive_rendition(path: &str) -> Option<&str> {
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["hls", rendition, "progressive.mp4"]
+            if rend_playback_auth::is_valid_hls_rendition_name(rendition) =>
+        {
+            Some(rendition)
+        }
+        _ => None,
+    }
+}
+
+fn hls_progressive_init_artifact(
+    asset_id: &str,
+    rendition: &str,
+) -> Result<OriginPlaybackArtifact, AppError> {
+    origin_playback_artifact(asset_id, &format!("hls/{rendition}/init_{rendition}.mp4"))
+}
+
+fn hls_progressive_playlist_artifact(
+    asset_id: &str,
+    rendition: &str,
+) -> Result<OriginPlaybackArtifact, AppError> {
+    origin_playback_artifact(asset_id, &format!("hls/{rendition}/index.m3u8"))
+}
+
+fn hls_progressive_segment_artifact(
+    asset_id: &str,
+    rendition: &str,
+    segment: &str,
+) -> Result<OriginPlaybackArtifact, AppError> {
+    origin_playback_artifact(asset_id, &format!("hls/{rendition}/{segment}"))
+}
+
+fn hls_progressive_segment_names(playlist: &str) -> Vec<String> {
+    playlist
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.contains('/')
+                || line.contains('\\')
+                || line.contains("..")
+                || !line.ends_with(".m4s")
+                || !rend_playback_auth::is_valid_hls_segment_name(line)
+            {
+                return None;
+            }
+            Some(line.to_owned())
+        })
+        .collect()
 }
 
 fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
@@ -4606,6 +4638,98 @@ fn origin_playback_artifact_error(
         "failed to fetch playback artifact from Tigris",
     );
     AppError::bad_gateway("artifact fetch failed")
+}
+
+async fn origin_playback_artifact_full_bytes(
+    state: &AppState,
+    artifact: &OriginPlaybackArtifact,
+) -> Result<(Bytes, &'static str, &'static str), AppError> {
+    let cache_ttl = origin_playback_cache_ttl(artifact);
+    if let Some(ttl) = cache_ttl
+        && let Some(entry) = state.origin_playback_cache.get(&artifact.object_key, ttl)
+    {
+        return Ok((entry.bytes, entry.content_type, "HIT"));
+    }
+
+    let object = state
+        .s3
+        .get_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&artifact.object_key)
+        .send()
+        .await
+        .map_err(|error| origin_playback_artifact_error(artifact, error))?;
+    let bytes = object
+        .body
+        .collect()
+        .await
+        .map_err(|error| origin_playback_artifact_error(artifact, error))?
+        .into_bytes();
+
+    if cache_ttl.is_some() {
+        state.origin_playback_cache.insert(
+            artifact.object_key.clone(),
+            bytes.clone(),
+            artifact.content_type,
+        );
+        return Ok((bytes, artifact.content_type, "MISS"));
+    }
+
+    Ok((bytes, artifact.content_type, "BYPASS"))
+}
+
+async fn origin_playback_progressive_fmp4_response(
+    state: Arc<AppState>,
+    artifact: OriginPlaybackArtifact,
+) -> Result<Response, AppError> {
+    let rendition = hls_progressive_rendition(&artifact.artifact_path)
+        .ok_or_else(|| AppError::not_found("artifact not found"))?;
+    let playlist_artifact = hls_progressive_playlist_artifact(&artifact.asset_id, rendition)?;
+    let (playlist_bytes, _, _) =
+        origin_playback_artifact_full_bytes(state.as_ref(), &playlist_artifact).await?;
+    let playlist = std::str::from_utf8(&playlist_bytes)
+        .map_err(|_| AppError::bad_gateway("invalid media playlist"))?;
+    let segment_names = hls_progressive_segment_names(playlist);
+    if segment_names.is_empty() {
+        return Err(AppError::not_found("artifact not found"));
+    }
+
+    let mut parts = Vec::with_capacity(segment_names.len() + 1);
+    parts.push(hls_progressive_init_artifact(
+        &artifact.asset_id,
+        rendition,
+    )?);
+    for segment in segment_names {
+        parts.push(hls_progressive_segment_artifact(
+            &artifact.asset_id,
+            rendition,
+            &segment,
+        )?);
+    }
+
+    let stream = stream::try_unfold(
+        (state, parts.into_iter()),
+        |(state, mut parts)| async move {
+            let Some(part) = parts.next() else {
+                return Ok::<_, std::io::Error>(None);
+            };
+            let (bytes, _, _) = origin_playback_artifact_full_bytes(state.as_ref(), &part)
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to stream progressive playback artifact {}: {}",
+                        part.artifact_path, error.message
+                    ))
+                })?;
+            Ok::<_, std::io::Error>(Some((bytes, (state, parts))))
+        },
+    );
+
+    Ok(
+        origin_playback_artifact_response_builder(artifact, "video/mp4", StatusCode::OK, "STREAM")
+            .body(Body::from_stream(stream))
+            .expect("progressive origin artifact response headers are valid"),
+    )
 }
 
 fn origin_playback_cache_ttl(artifact: &OriginPlaybackArtifact) -> Option<Duration> {
@@ -4757,7 +4881,9 @@ fn origin_playback_artifact_response_builder(
         .header("timing-allow-origin", "https://www.rend.so")
         .header("x-rend-origin", "tigris")
         .header("x-rend-cache", cache_status);
-    if artifact.content_type != "application/vnd.apple.mpegurl" {
+    if artifact.content_type != "application/vnd.apple.mpegurl"
+        && hls_progressive_rendition(&artifact.artifact_path).is_none()
+    {
         builder = builder.header(header::ACCEPT_RANGES, "bytes");
     }
     builder

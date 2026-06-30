@@ -226,6 +226,7 @@ pub fn is_asset_playback_path(artifact_path: &str) -> bool {
     match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
         ["hls", segment_name] => is_valid_hls_segment_name(segment_name),
         ["hls", rendition_name, "index.m3u8"] => is_valid_hls_rendition_name(rendition_name),
+        ["hls", rendition_name, "progressive.mp4"] => is_valid_hls_rendition_name(rendition_name),
         ["hls", rendition_name, media_name] => {
             is_valid_hls_rendition_name(rendition_name)
                 && (is_valid_hls_segment_name(media_name)
@@ -570,6 +571,7 @@ mod tests {
             "hls/480p/init_480p.mp4",
             "hls/480p/segment_00000.m4s",
             "hls/720p/index.m3u8",
+            "hls/720p/progressive.mp4",
             "hls/720p/segment_00000.ts",
             "hls/720p/init_720p.mp4",
             "hls/720p/segment_00000.m4s",
@@ -588,6 +590,7 @@ mod tests {
             "hls/720p/init_latest.mp4",
             "hls/720p/init_00000.mp4",
             "hls/720p/playlist.m3u8",
+            "hls/720p/startup.mp4",
             "hls/720p/nested/segment_00000.ts",
             "hls/720p/segment_latest.ts",
             "hls/../opener.mp4",
