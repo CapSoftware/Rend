@@ -260,7 +260,7 @@ require_contains docs/templates/control-plane-upstream.Caddyfile "reverse_proxy 
 
 require_contains docs/templates/edge-host.Caddyfile "path /internal/* /metrics"
 require_contains docs/templates/edge-host.Caddyfile "path_regexp canonical_playback ^/v/[0-9a-f]{8}"
-require_contains docs/templates/edge-host.Caddyfile "hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts)"
+require_contains docs/templates/edge-host.Caddyfile "hls/(360p|480p|720p|1080p|2k|4k)/(index\\.m3u8|init_(360p|480p|720p|1080p|2k|4k)\\.mp4|segment_[0-9]+\\.(ts|m4s))"
 require_contains docs/templates/edge-host.Caddyfile "reverse_proxy 127.0.0.1:4100"
 require_contains docs/templates/edge-host.Caddyfile 'remote_ip {$REND_EDGE_ALLOWED_PRIVATE_IPS}'
 require_contains docs/templates/edge-host.Caddyfile 'REND_EDGE_PRIVATE_HOSTNAME'
@@ -305,7 +305,7 @@ require_contains scripts/verify-edge-registry-over-ssh.sh "all expected edges ar
 require_contains scripts/sync-edge-deploy-env-over-ssh.sh "REND_EDGE_CORS_ALLOWED_ORIGINS"
 require_contains scripts/sync-edge-deploy-env-over-ssh.sh "REND_EDGE_ID"
 require_contains scripts/sync-edge-deploy-env-over-ssh.sh "REND_EXPECTED_EDGES"
-require_contains scripts/sync-edge-caddy-playback-routes.sh "hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts)"
+require_contains scripts/sync-edge-caddy-playback-routes.sh "hls/{renditions}/(index\\.m3u8|{init}|{segment})"
 require_contains scripts/deploy-release-over-ssh.sh "scripts/sync-edge-caddy-playback-routes.sh"
 require_contains scripts/deploy-release-over-ssh.sh "systemd-run"
 require_contains scripts/deploy-release-over-ssh.sh "bootstrap-control-plane-host-files.sh"

@@ -91,14 +91,14 @@ function fakeClient(overrides = {}) {
           manifest_content_type: "application/vnd.apple.mpegurl",
           prefetch_hints: [
             {
-              artifact_path: "hls/720p/index.m3u8",
+              artifact_path: "hls/360p/index.m3u8",
               url: "http://rend-edge:4100/internal/cache/inspect?token=secret",
               content_type: "application/vnd.apple.mpegurl",
             },
             {
-              artifact_path: "hls/720p/segment_00000.ts",
-              url: `https://ash-1.play.rend.so/v/${assetId}/hls/720p/segment_00000.ts`,
-              content_type: "video/mp2t",
+              artifact_path: "hls/360p/init_360p.mp4",
+              url: `https://ash-1.play.rend.so/v/${assetId}/hls/360p/init_360p.mp4`,
+              content_type: "video/mp4",
             },
           ],
         };

@@ -83,7 +83,7 @@ specific hot playback bytes are present on the node-local cache filesystem:
 ```sh
 curl -fsS \
   -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
-  "https://$REND_EDGE_PRIVATE_HOSTNAME/internal/cache/inspect?asset_id=$ASSET_ID&artifact_path=hls%2Fsegment_00000.ts"
+  "https://$REND_EDGE_PRIVATE_HOSTNAME/internal/cache/inspect?asset_id=$ASSET_ID&artifact_path=hls%2F360p%2Fsegment_00000.m4s"
 ```
 
 The response is intentionally redacted. It includes the requested
@@ -501,12 +501,13 @@ curl -fsS \
   -X POST "$EDGE_INTERNAL_BASE/internal/warm" \
   -H "x-rend-internal-token: $REND_EDGE_INTERNAL_TOKEN" \
   -H "content-type: application/json" \
-  --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"hls/720p/index.m3u8\",\"hls/720p/segment_00000.ts\",\"hls/720p/segment_00001.ts\",\"hls/1080p/index.m3u8\",\"hls/1080p/segment_00000.ts\",\"hls/1080p/segment_00001.ts\"]}"
+  --data "{\"asset_id\":\"$ASSET_ID\",\"artifact_paths\":[\"hls/master.m3u8\",\"hls/360p/index.m3u8\",\"hls/360p/init_360p.mp4\",\"hls/360p/segment_00000.m4s\",\"hls/480p/index.m3u8\",\"hls/480p/init_480p.mp4\",\"hls/480p/segment_00000.m4s\",\"hls/720p/index.m3u8\",\"hls/720p/init_720p.mp4\",\"hls/720p/segment_00000.m4s\"]}"
 ```
 
 With the default `REND_EDGE_WARM_MAX_ARTIFACTS=16`, the control plane can warm
 the HLS master, every generated variant playlist, and the first two media
-segments for each generated `720p`/`1080p`/`2k`/`4k` tier.
+startup playlists, init segments, and first fragments across each generated
+`360p`/`480p`/`720p`/`1080p`/`2k`/`4k` tier.
 
 Registry fanout check. After an upload reaches `hls_ready`, the asset lifecycle
 events should include `edge.warming_succeeded` with an `edges` array listing

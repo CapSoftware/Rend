@@ -236,7 +236,7 @@ Edge:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `REND_EDGE_INTERNAL_TOKEN`
-- `REND_EDGE_WARM_MAX_ARTIFACTS` (default `16`; enough for the HLS master, four variant playlists, and the first two segments for each generated tier)
+- `REND_EDGE_WARM_MAX_ARTIFACTS` (default `16`; enough for the HLS master plus startup playlists, init segments, and first fragments across the generated ladder)
 - `REND_EDGE_MAX_IN_FLIGHT_FILLS`
 - `REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES`
 - `REND_INTERNAL_TELEMETRY_TOKEN`

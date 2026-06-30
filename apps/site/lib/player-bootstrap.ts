@@ -19,7 +19,7 @@ export type UpstreamPlaybackResponse = {
 };
 
 const MAX_PREFETCH_HINTS = 4;
-const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
+const HLS_RENDITION_NAMES = new Set(["360p", "480p", "720p", "1080p", "2k", "4k"]);
 
 function safeString(value: unknown) {
   return typeof value === "string" ? value : undefined;
@@ -33,11 +33,20 @@ function safeArtifactPath(value: string | undefined) {
   if (!value || value.includes("\\") || value.includes("..")) return undefined;
   if (value === "opener.mp4" || value === "thumbnail.jpg" || value === "hls/master.m3u8") return value;
   const parts = value.split("/");
-  if (parts.length === 2 && parts[0] === "hls" && /^segment_[0-9]+\.ts$/.test(parts[1] ?? "")) {
+  if (
+    parts.length === 2 &&
+    parts[0] === "hls" &&
+    /^segment_[0-9]+\.(?:ts|m4s)$/.test(parts[1] ?? "")
+  ) {
     return value;
   }
   if (parts.length === 3 && parts[0] === "hls" && HLS_RENDITION_NAMES.has(parts[1] ?? "")) {
-    if (parts[2] === "index.m3u8" || /^segment_[0-9]+\.ts$/.test(parts[2] ?? "")) return value;
+    if (
+      parts[2] === "index.m3u8" ||
+      parts[2] === `init_${parts[1]}.mp4` ||
+      /^segment_[0-9]+\.(?:ts|m4s)$/.test(parts[2] ?? "")
+    )
+      return value;
   }
   return undefined;
 }

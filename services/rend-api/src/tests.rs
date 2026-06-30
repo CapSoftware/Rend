@@ -253,33 +253,38 @@ fn hls_artifact_records() -> Vec<PlaybackArtifactRecord> {
         ),
         artifact_record(
             "manifest",
-            "videos/asset-123/hls/720p/index.m3u8",
+            "videos/asset-123/hls/360p/index.m3u8",
             "application/vnd.apple.mpegurl",
         ),
         artifact_record(
             "manifest",
-            "videos/asset-123/hls/1080p/index.m3u8",
+            "videos/asset-123/hls/480p/index.m3u8",
             "application/vnd.apple.mpegurl",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/720p/segment_00002.ts",
-            "video/mp2t",
+            "videos/asset-123/hls/360p/init_360p.mp4",
+            "video/mp4",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/720p/segment_00000.ts",
-            "video/mp2t",
+            "videos/asset-123/hls/360p/segment_00000.m4s",
+            "video/mp4",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/720p/segment_00001.ts",
-            "video/mp2t",
+            "videos/asset-123/hls/360p/segment_00001.m4s",
+            "video/mp4",
         ),
         artifact_record(
             "segment",
-            "videos/asset-123/hls/1080p/segment_00000.ts",
-            "video/mp2t",
+            "videos/asset-123/hls/480p/init_480p.mp4",
+            "video/mp4",
+        ),
+        artifact_record(
+            "segment",
+            "videos/asset-123/hls/480p/segment_00000.m4s",
+            "video/mp4",
         ),
     ]
 }
@@ -1308,7 +1313,7 @@ fn playback_bootstrap_hls_ready_returns_manifest_and_ladder_prefetch_hints() {
     assert_eq!(response.prefetch_hints.len(), 2);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/720p/index.m3u8"
+        "hls/360p/index.m3u8"
     );
     assert_eq!(
         response.prefetch_hints[0].content_type,
@@ -1316,12 +1321,12 @@ fn playback_bootstrap_hls_ready_returns_manifest_and_ladder_prefetch_hints() {
     );
     assert_eq!(
         response.prefetch_hints[1].artifact_path,
-        "hls/720p/segment_00000.ts"
+        "hls/360p/init_360p.mp4"
     );
 }
 
 #[test]
-fn playback_bootstrap_hls_prefetch_reaches_1080p_when_budget_allows() {
+fn playback_bootstrap_hls_prefetch_reaches_next_rendition_when_budget_allows() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
         &hls_artifact_records(),
@@ -1339,10 +1344,10 @@ fn playback_bootstrap_hls_prefetch_reaches_1080p_when_budget_allows() {
             .map(|hint| hint.artifact_path.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "hls/720p/index.m3u8",
-            "hls/720p/segment_00000.ts",
-            "hls/1080p/index.m3u8",
-            "hls/1080p/segment_00000.ts",
+            "hls/360p/index.m3u8",
+            "hls/360p/init_360p.mp4",
+            "hls/360p/segment_00000.m4s",
+            "hls/480p/index.m3u8",
         ]
     );
 }
@@ -1425,7 +1430,7 @@ fn playback_bootstrap_prefetch_hints_are_bounded() {
     assert_eq!(response.prefetch_hints.len(), 1);
     assert_eq!(
         response.prefetch_hints[0].artifact_path,
-        "hls/720p/index.m3u8"
+        "hls/360p/index.m3u8"
     );
 }
 
@@ -1488,44 +1493,50 @@ fn edge_warm_request_is_absent_when_no_artifacts_are_selected() {
 fn edge_warm_artifact_paths_prioritize_abr_startup_playlist_and_first_segments() {
     let generated = vec![
         "hls/master.m3u8".to_owned(),
-        "hls/1080p/index.m3u8".to_owned(),
-        "hls/720p/segment_00002.ts".to_owned(),
-        "hls/720p/segment_00000.ts".to_owned(),
+        "hls/480p/index.m3u8".to_owned(),
+        "hls/360p/segment_00002.m4s".to_owned(),
+        "hls/360p/segment_00000.m4s".to_owned(),
         "thumbnail.jpg".to_owned(),
-        "hls/720p/index.m3u8".to_owned(),
-        "hls/720p/segment_00001.ts".to_owned(),
-        "hls/1080p/segment_00000.ts".to_owned(),
-    ];
-
-    assert_eq!(
-        edge_warm_artifact_paths("hls_ready", &generated, 4),
-        vec![
-            "hls/master.m3u8".to_owned(),
-            "hls/720p/index.m3u8".to_owned(),
-            "hls/720p/segment_00000.ts".to_owned(),
-            "hls/1080p/index.m3u8".to_owned(),
-        ]
-    );
-}
-
-#[test]
-fn edge_warm_artifact_paths_reach_1080p_first_segment_when_budget_allows() {
-    let generated = vec![
-        "hls/master.m3u8".to_owned(),
-        "hls/1080p/index.m3u8".to_owned(),
-        "hls/720p/index.m3u8".to_owned(),
-        "hls/720p/segment_00000.ts".to_owned(),
-        "hls/1080p/segment_00000.ts".to_owned(),
+        "hls/360p/index.m3u8".to_owned(),
+        "hls/360p/init_360p.mp4".to_owned(),
+        "hls/360p/segment_00001.m4s".to_owned(),
+        "hls/480p/init_480p.mp4".to_owned(),
     ];
 
     assert_eq!(
         edge_warm_artifact_paths("hls_ready", &generated, 5),
         vec![
             "hls/master.m3u8".to_owned(),
-            "hls/720p/index.m3u8".to_owned(),
-            "hls/720p/segment_00000.ts".to_owned(),
-            "hls/1080p/index.m3u8".to_owned(),
-            "hls/1080p/segment_00000.ts".to_owned(),
+            "hls/360p/index.m3u8".to_owned(),
+            "hls/360p/init_360p.mp4".to_owned(),
+            "hls/360p/segment_00000.m4s".to_owned(),
+            "hls/480p/index.m3u8".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn edge_warm_artifact_paths_reach_480p_first_fragment_when_budget_allows() {
+    let generated = vec![
+        "hls/master.m3u8".to_owned(),
+        "hls/480p/index.m3u8".to_owned(),
+        "hls/360p/index.m3u8".to_owned(),
+        "hls/360p/init_360p.mp4".to_owned(),
+        "hls/360p/segment_00000.m4s".to_owned(),
+        "hls/480p/init_480p.mp4".to_owned(),
+        "hls/480p/segment_00000.m4s".to_owned(),
+    ];
+
+    assert_eq!(
+        edge_warm_artifact_paths("hls_ready", &generated, 7),
+        vec![
+            "hls/master.m3u8".to_owned(),
+            "hls/360p/index.m3u8".to_owned(),
+            "hls/360p/init_360p.mp4".to_owned(),
+            "hls/360p/segment_00000.m4s".to_owned(),
+            "hls/480p/index.m3u8".to_owned(),
+            "hls/480p/init_480p.mp4".to_owned(),
+            "hls/480p/segment_00000.m4s".to_owned(),
         ]
     );
 }
@@ -1534,17 +1545,19 @@ fn edge_warm_artifact_paths_reach_1080p_first_segment_when_budget_allows() {
 fn edge_warm_artifact_paths_include_opener_only_when_present_and_hls_budget_remains() {
     let generated = vec![
         "hls/master.m3u8".to_owned(),
-        "hls/720p/index.m3u8".to_owned(),
-        "hls/720p/segment_00000.ts".to_owned(),
+        "hls/360p/index.m3u8".to_owned(),
+        "hls/360p/init_360p.mp4".to_owned(),
+        "hls/360p/segment_00000.m4s".to_owned(),
         "opener.mp4".to_owned(),
     ];
 
     assert_eq!(
-        edge_warm_artifact_paths("hls_ready", &generated, 4),
+        edge_warm_artifact_paths("hls_ready", &generated, 5),
         vec![
             "hls/master.m3u8".to_owned(),
-            "hls/720p/index.m3u8".to_owned(),
-            "hls/720p/segment_00000.ts".to_owned(),
+            "hls/360p/index.m3u8".to_owned(),
+            "hls/360p/init_360p.mp4".to_owned(),
+            "hls/360p/segment_00000.m4s".to_owned(),
             "opener.mp4".to_owned(),
         ]
     );
@@ -1554,36 +1567,45 @@ fn edge_warm_artifact_paths_include_opener_only_when_present_and_hls_budget_rema
 fn edge_warm_artifact_paths_default_budget_covers_full_ladder_startup() {
     let generated = vec![
         "hls/master.m3u8".to_owned(),
-        "hls/4k/segment_00001.ts".to_owned(),
-        "hls/720p/segment_00001.ts".to_owned(),
+        "hls/4k/segment_00001.m4s".to_owned(),
+        "hls/360p/segment_00001.m4s".to_owned(),
+        "hls/360p/segment_00000.m4s".to_owned(),
+        "hls/480p/index.m3u8".to_owned(),
+        "hls/360p/init_360p.mp4".to_owned(),
         "hls/1080p/index.m3u8".to_owned(),
-        "hls/2k/segment_00000.ts".to_owned(),
+        "hls/2k/segment_00000.m4s".to_owned(),
         "hls/720p/index.m3u8".to_owned(),
         "hls/4k/index.m3u8".to_owned(),
-        "hls/1080p/segment_00000.ts".to_owned(),
+        "hls/1080p/segment_00000.m4s".to_owned(),
         "hls/2k/index.m3u8".to_owned(),
-        "hls/720p/segment_00000.ts".to_owned(),
-        "hls/1080p/segment_00001.ts".to_owned(),
-        "hls/4k/segment_00000.ts".to_owned(),
-        "hls/2k/segment_00001.ts".to_owned(),
+        "hls/360p/index.m3u8".to_owned(),
+        "hls/720p/segment_00000.m4s".to_owned(),
+        "hls/1080p/segment_00001.m4s".to_owned(),
+        "hls/4k/segment_00000.m4s".to_owned(),
+        "hls/2k/segment_00001.m4s".to_owned(),
+        "hls/480p/init_480p.mp4".to_owned(),
+        "hls/480p/segment_00000.m4s".to_owned(),
     ];
 
     assert_eq!(
         edge_warm_artifact_paths("hls_ready", &generated, DEFAULT_EDGE_WARM_MAX_ARTIFACTS),
         vec![
             "hls/master.m3u8".to_owned(),
+            "hls/360p/index.m3u8".to_owned(),
+            "hls/360p/init_360p.mp4".to_owned(),
+            "hls/360p/segment_00000.m4s".to_owned(),
+            "hls/480p/index.m3u8".to_owned(),
+            "hls/480p/init_480p.mp4".to_owned(),
+            "hls/480p/segment_00000.m4s".to_owned(),
             "hls/720p/index.m3u8".to_owned(),
-            "hls/720p/segment_00000.ts".to_owned(),
+            "hls/720p/segment_00000.m4s".to_owned(),
             "hls/1080p/index.m3u8".to_owned(),
-            "hls/1080p/segment_00000.ts".to_owned(),
+            "hls/1080p/segment_00000.m4s".to_owned(),
             "hls/2k/index.m3u8".to_owned(),
-            "hls/2k/segment_00000.ts".to_owned(),
+            "hls/2k/segment_00000.m4s".to_owned(),
             "hls/4k/index.m3u8".to_owned(),
-            "hls/4k/segment_00000.ts".to_owned(),
-            "hls/720p/segment_00001.ts".to_owned(),
-            "hls/1080p/segment_00001.ts".to_owned(),
-            "hls/2k/segment_00001.ts".to_owned(),
-            "hls/4k/segment_00001.ts".to_owned(),
+            "hls/4k/segment_00000.m4s".to_owned(),
+            "hls/360p/segment_00001.m4s".to_owned(),
         ]
     );
 }

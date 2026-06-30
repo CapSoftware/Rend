@@ -71,11 +71,14 @@ from pathlib import Path
 
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
-ladder = r"hls/(720p|1080p|2k|4k)/(index\.m3u8|segment_[0-9]+\.ts)"
+renditions = r"(360p|480p|720p|1080p|2k|4k)"
+segment = r"segment_[0-9]+\.(ts|m4s)"
+init = r"init_(360p|480p|720p|1080p|2k|4k)\.mp4"
+ladder = rf"hls/{renditions}/(index\.m3u8|{init}|{segment})"
 strict_pattern = (
     r"^/v/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}/"
-    r"(opener\.mp4|hls/master\.m3u8|hls/segment_[0-9]+\.ts|"
+    rf"(opener\.mp4|hls/master\.m3u8|hls/{segment}|"
     + ladder
     + r")$"
 )
@@ -93,15 +96,15 @@ for line in lines:
         "path_regexp" in line
         and "^/v/" in line
         and "hls/master\\.m3u8" in line
-        and "hls/segment_[0-9]+\\.ts" in line
+        and "hls/segment_" in line
     ):
         found = True
-        if ladder in stripped:
+        if strict_pattern in stripped:
             output.append(line)
             continue
-        if not stripped.endswith(")$"):
+        if not tokens or not tokens[-1].startswith("^/v/"):
             raise SystemExit("signed playback regexp has an unsupported shape")
-        output.append(f"{stripped[:-2]}|{ladder})${newline}")
+        output.append(f"{leading}{' '.join(tokens[:-1])} {strict_pattern}{newline}")
         changed = True
     elif (
         len(tokens) >= 2

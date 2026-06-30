@@ -26,7 +26,7 @@ type PlaybackBaseDecision = {
   playbackBaseUrl: string | null;
 };
 
-const HLS_RENDITION_NAMES = new Set(["720p", "1080p", "2k", "4k"]);
+const HLS_RENDITION_NAMES = new Set(["360p", "480p", "720p", "1080p", "2k", "4k"]);
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
@@ -60,7 +60,7 @@ function safeArtifactPath(value: string | undefined) {
   if (
     parts.length === 2 &&
     parts[0] === "hls" &&
-    /^segment_[0-9]+\.ts$/.test(parts[1] ?? "")
+    /^segment_[0-9]+\.(?:ts|m4s)$/.test(parts[1] ?? "")
   ) {
     return value;
   }
@@ -71,7 +71,8 @@ function safeArtifactPath(value: string | undefined) {
   ) {
     if (
       parts[2] === "index.m3u8" ||
-      /^segment_[0-9]+\.ts$/.test(parts[2] ?? "")
+      parts[2] === `init_${parts[1]}.mp4` ||
+      /^segment_[0-9]+\.(?:ts|m4s)$/.test(parts[2] ?? "")
     )
       return value;
   }
@@ -272,7 +273,10 @@ function rewriteManifest(
     .split(/\r?\n/)
     .map((line) => {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) return line;
+      if (!trimmed) return line;
+      if (trimmed.startsWith("#")) {
+        return rewriteHlsMapLine(line, baseUrl, assetId, playbackBaseUrl);
+      }
       try {
         const artifactUrl = new URL(trimmed, baseUrl);
         const artifactPath = artifactPathFromEdgeUrl(artifactUrl, assetId);
@@ -284,6 +288,26 @@ function rewriteManifest(
       }
     })
     .join("\n");
+}
+
+function rewriteHlsMapLine(
+  line: string,
+  baseUrl: URL,
+  assetId: string,
+  playbackBaseUrl: string | null,
+) {
+  if (!line.trimStart().startsWith("#EXT-X-MAP:")) return line;
+  return line.replace(/URI="([^"]+)"/, (match, uri: string) => {
+    try {
+      const artifactUrl = new URL(uri, baseUrl);
+      const artifactPath = artifactPathFromEdgeUrl(artifactUrl, assetId);
+      return artifactPath
+        ? `URI="${proxiedArtifactUrl(assetId, artifactPath, playbackBaseUrl)}"`
+        : match;
+    } catch {
+      return match;
+    }
+  });
 }
 
 async function artifactResponseFromEdge(

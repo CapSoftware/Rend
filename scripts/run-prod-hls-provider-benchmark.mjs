@@ -1419,7 +1419,11 @@ async function runDaytonaBenchmark(env, options, pages) {
 async function preparePages(env, options, assetId) {
   const prefix = `videos/${assetId}/hls/`;
   const keys = (await listObjectKeys(env, prefix)).filter(
-    (key) => key.endsWith(".m3u8") || key.endsWith(".ts"),
+    (key) =>
+      key.endsWith(".m3u8") ||
+      key.endsWith(".ts") ||
+      key.endsWith(".m4s") ||
+      /\/init_(360p|480p|720p|1080p|2k|4k)\.mp4$/.test(key),
   );
   if (!keys.some((key) => key.endsWith("/master.m3u8"))) {
     throw new Error(

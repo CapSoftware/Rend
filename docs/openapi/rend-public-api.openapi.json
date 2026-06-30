@@ -364,14 +364,14 @@
                       "manifest_content_type": "application/vnd.apple.mpegurl",
                       "prefetch_hints": [
                         {
-                          "artifact_path": "hls/720p/index.m3u8",
-                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/720p/index.m3u8",
+                          "artifact_path": "hls/360p/index.m3u8",
+                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/360p/index.m3u8",
                           "content_type": "application/vnd.apple.mpegurl"
                         },
                         {
-                          "artifact_path": "hls/720p/segment_00000.ts",
-                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/720p/segment_00000.ts",
-                          "content_type": "video/mp2t"
+                          "artifact_path": "hls/360p/init_360p.mp4",
+                          "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/360p/init_360p.mp4",
+                          "content_type": "video/mp4"
                         }
                       ]
                     }
@@ -766,7 +766,7 @@
       },
       "PlaybackArtifactPath": {
         "type": "string",
-        "pattern": "^(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts|hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts))$"
+        "pattern": "^(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.(ts|m4s)|hls/(360p|480p|720p|1080p|2k|4k)/(index\\.m3u8|init_(360p|480p|720p|1080p|2k|4k)\\.mp4|segment_[0-9]+\\.(ts|m4s)))$"
       },
       "PlaybackPrefetchHint": {
         "type": "object",
@@ -776,7 +776,7 @@
           "artifact_path": { "$ref": "#/components/schemas/PlaybackArtifactPath" },
           "url": {
             "type": "string",
-            "pattern": "^(?:/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts|hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts))(\\?playbackBaseUrl=[^\\s]+)?|https://(?:rend\\.so|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.rend\\.so)(?::[0-9]+)?(?:/[A-Za-z0-9._~-]+)*/v/[0-9a-fA-F-]+/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.ts|hls/(720p|1080p|2k|4k)/(index\\.m3u8|segment_[0-9]+\\.ts)))$"
+            "pattern": "^(?:/api/player/[0-9a-fA-F-]+/artifact/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.(ts|m4s)|hls/(360p|480p|720p|1080p|2k|4k)/(index\\.m3u8|init_(360p|480p|720p|1080p|2k|4k)\\.mp4|segment_[0-9]+\\.(ts|m4s)))(\\?playbackBaseUrl=[^\\s]+)?|https://(?:rend\\.so|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.rend\\.so)(?::[0-9]+)?(?:/[A-Za-z0-9._~-]+)*/v/[0-9a-fA-F-]+/(opener\\.mp4|hls/master\\.m3u8|hls/segment_[0-9]+\\.(ts|m4s)|hls/(360p|480p|720p|1080p|2k|4k)/(index\\.m3u8|init_(360p|480p|720p|1080p|2k|4k)\\.mp4|segment_[0-9]+\\.(ts|m4s))))$"
           },
           "content_type": { "type": "string", "minLength": 1, "maxLength": 128 }
         }

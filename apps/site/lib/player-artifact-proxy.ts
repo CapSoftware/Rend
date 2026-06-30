@@ -24,9 +24,10 @@ const PRIVATE_IMMUTABLE_MEDIA_CACHE_CONTROL =
 const PRIVATE_MANIFEST_CACHE_CONTROL =
   "private, max-age=60, stale-while-revalidate=300";
 const HLS_TIMING_ALLOW_ORIGIN = "https://www.rend.so";
-const HLS_VARIANT_MANIFEST_PATH_RE = /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/;
+const HLS_VARIANT_MANIFEST_PATH_RE = /^hls\/(?:360p|480p|720p|1080p|2k|4k)\/index\.m3u8$/;
+const HLS_INIT_SEGMENT_PATH_RE = /^hls\/(360p|480p|720p|1080p|2k|4k)\/init_\1\.mp4$/;
 const HLS_SEGMENT_PATH_RE =
-  /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/;
+  /^hls\/(?:(?:360p|480p|720p|1080p|2k|4k)\/)?segment_[0-9]+\.(?:ts|m4s)$/;
 
 export function isHlsManifestArtifactPath(artifactPath: string | undefined) {
   return (
@@ -38,6 +39,7 @@ export function isHlsManifestArtifactPath(artifactPath: string | undefined) {
 function isHlsTimingArtifactPath(artifactPath: string | undefined) {
   return (
     isHlsManifestArtifactPath(artifactPath) ||
+    HLS_INIT_SEGMENT_PATH_RE.test(artifactPath ?? "") ||
     HLS_SEGMENT_PATH_RE.test(artifactPath ?? "")
   );
 }

@@ -20,8 +20,8 @@ use crate::{
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 const HLS_X264_PRESET: &str = "superfast";
 const HLS_AUDIO_BITRATE: &str = "96k";
-const HLS_TARGET_SEGMENT_SECONDS: u32 = 2;
-const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 48;
+const HLS_TARGET_SEGMENT_SECONDS: u32 = 1;
+const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 30;
 const HLS_MIN_KEYFRAME_INTERVAL_FRAMES: u32 = 12;
 const HLS_MAX_KEYFRAME_INTERVAL_FRAMES: u32 = 240;
 
@@ -35,7 +35,23 @@ struct HlsRendition {
     resolution_tier: &'static str,
 }
 
-const HLS_RENDITIONS: [HlsRendition; 4] = [
+const HLS_RENDITIONS: [HlsRendition; 6] = [
+    HlsRendition {
+        name: "360p",
+        max_dimension: 640,
+        video_bitrate: "800k",
+        maxrate: "950k",
+        bufsize: "1600k",
+        resolution_tier: "720p",
+    },
+    HlsRendition {
+        name: "480p",
+        max_dimension: 854,
+        video_bitrate: "1400k",
+        maxrate: "1700k",
+        bufsize: "2800k",
+        resolution_tier: "720p",
+    },
     HlsRendition {
         name: "720p",
         max_dimension: 1280,
@@ -401,8 +417,17 @@ async fn generate_and_upload_hls(
             hls_dir.display()
         )
     })?;
+    for rendition in &renditions {
+        let variant_dir = hls_dir.join(rendition.name);
+        fs::create_dir_all(&variant_dir).await.with_context(|| {
+            format!(
+                "failed to create HLS variant directory {}",
+                variant_dir.display()
+            )
+        })?;
+    }
     let manifest_path = hls_dir.join("master.m3u8");
-    let segment_pattern = hls_dir.join("%v").join("segment_%05d.ts");
+    let segment_pattern = hls_dir.join("%v").join("segment_%05d.m4s");
     let variant_playlist_pattern = hls_dir.join("%v").join("index.m3u8");
 
     let mut args = vec![
@@ -470,8 +495,12 @@ async fn generate_and_upload_hls(
         os(&target_segment_seconds),
         os("-hls_playlist_type"),
         os("vod"),
+        os("-hls_segment_type"),
+        os("fmp4"),
         os("-hls_flags"),
         os("independent_segments"),
+        os("-hls_fmp4_init_filename"),
+        os("init_%v.mp4"),
         os("-hls_segment_filename"),
         segment_pattern.as_os_str().to_owned(),
         os("-master_pl_name"),
@@ -533,7 +562,7 @@ async fn generate_and_upload_hls(
             )
         })? {
             let path = entry.path();
-            if path.extension().is_some_and(|extension| extension == "ts") {
+            if is_hls_media_fragment_path(&path) {
                 segment_paths.push(path);
             }
         }
@@ -552,15 +581,20 @@ async fn generate_and_upload_hls(
                 .to_string_lossy()
                 .into_owned();
             let duration_key = format!("{}/{}", rendition.name, file_name);
-            let duration_ms = segment_durations
-                .get(&duration_key)
-                .copied()
-                .or(Some(2_000));
+            let is_init_segment = is_hls_init_segment_name(&file_name);
+            let duration_ms = if is_init_segment {
+                None
+            } else {
+                segment_durations
+                    .get(&duration_key)
+                    .copied()
+                    .or(Some(i64::from(HLS_TARGET_SEGMENT_SECONDS) * 1_000))
+            };
             let artifact = upload_generated_file(
                 request,
                 &segment_path,
                 hls_segment_object_key(&request.asset_id, rendition.name, &file_name),
-                "video/mp2t",
+                "video/mp4",
                 "segment",
                 duration_ms,
                 Some(rendition.resolution_tier),
@@ -1001,11 +1035,39 @@ fn classify_resolution_tier(width: i32, height: i32) -> &'static str {
 }
 
 fn hls_renditions_for_source(source_probe: &SourceProbe) -> Vec<HlsRendition> {
-    let source_tier_index = HLS_RENDITIONS
+    let source_max_dimension = source_probe.width.max(source_probe.height);
+    let renditions = HLS_RENDITIONS
         .iter()
-        .position(|rendition| rendition.resolution_tier == source_probe.resolution_tier)
-        .unwrap_or(0);
-    HLS_RENDITIONS[..=source_tier_index].to_vec()
+        .copied()
+        .filter(|rendition| rendition.max_dimension <= source_max_dimension)
+        .collect::<Vec<_>>();
+    if renditions.is_empty() {
+        vec![HLS_RENDITIONS[0]]
+    } else {
+        renditions
+    }
+}
+
+fn is_hls_media_fragment_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| is_hls_init_segment_name(name) || is_hls_media_segment_name(name))
+}
+
+fn is_hls_init_segment_name(name: &str) -> bool {
+    name.strip_prefix("init_")
+        .and_then(|value| value.strip_suffix(".mp4"))
+        .is_some_and(|rendition| HLS_RENDITIONS.iter().any(|item| item.name == rendition))
+}
+
+fn is_hls_media_segment_name(name: &str) -> bool {
+    let Some(number) = name
+        .strip_prefix("segment_")
+        .and_then(|value| value.strip_suffix(".m4s"))
+    else {
+        return false;
+    };
+    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn hls_video_label(rendition: &HlsRendition) -> String {
@@ -1206,8 +1268,12 @@ mod tests {
             "videos/asset-123/hls/720p/index.m3u8"
         );
         assert_eq!(
-            hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
-            "videos/asset-123/hls/720p/segment_00000.ts"
+            hls_segment_object_key("asset-123", "480p", "init_480p.mp4"),
+            "videos/asset-123/hls/480p/init_480p.mp4"
+        );
+        assert_eq!(
+            hls_segment_object_key("asset-123", "720p", "segment_00000.m4s"),
+            "videos/asset-123/hls/720p/segment_00000.m4s"
         );
     }
 
@@ -1216,15 +1282,23 @@ mod tests {
         let artifacts = vec![
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "1080p", "segment_00001.ts"),
-                content_type: "video/mp2t",
+                object_key: hls_segment_object_key("asset-123", "1080p", "segment_00001.m4s"),
+                content_type: "video/mp4",
                 byte_size: 1,
-                duration_ms: Some(2_000),
+                duration_ms: Some(1_000),
                 resolution_tier: Some("1080p".to_owned()),
             },
             UploadedArtifact {
                 kind: "manifest",
-                object_key: hls_variant_playlist_object_key("asset-123", "720p"),
+                object_key: hls_variant_playlist_object_key("asset-123", "1080p"),
+                content_type: "application/vnd.apple.mpegurl",
+                byte_size: 1,
+                duration_ms: Some(0),
+                resolution_tier: Some("1080p".to_owned()),
+            },
+            UploadedArtifact {
+                kind: "manifest",
+                object_key: hls_variant_playlist_object_key("asset-123", "480p"),
                 content_type: "application/vnd.apple.mpegurl",
                 byte_size: 1,
                 duration_ms: Some(0),
@@ -1240,10 +1314,18 @@ mod tests {
             },
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
-                content_type: "video/mp2t",
+                object_key: hls_segment_object_key("asset-123", "480p", "init_480p.mp4"),
+                content_type: "video/mp4",
                 byte_size: 1,
-                duration_ms: Some(2_000),
+                duration_ms: None,
+                resolution_tier: Some("720p".to_owned()),
+            },
+            UploadedArtifact {
+                kind: "segment",
+                object_key: hls_segment_object_key("asset-123", "480p", "segment_00000.m4s"),
+                content_type: "video/mp4",
+                byte_size: 1,
+                duration_ms: Some(1_000),
                 resolution_tier: Some("720p".to_owned()),
             },
             UploadedArtifact {
@@ -1260,9 +1342,11 @@ mod tests {
             playback_artifact_paths("asset-123", &artifacts, "hls_ready"),
             vec![
                 "hls/master.m3u8".to_owned(),
-                "hls/720p/index.m3u8".to_owned(),
-                "hls/1080p/segment_00001.ts".to_owned(),
-                "hls/720p/segment_00000.ts".to_owned(),
+                "hls/1080p/index.m3u8".to_owned(),
+                "hls/480p/index.m3u8".to_owned(),
+                "hls/1080p/segment_00001.m4s".to_owned(),
+                "hls/480p/init_480p.mp4".to_owned(),
+                "hls/480p/segment_00000.m4s".to_owned(),
             ]
         );
     }
@@ -1280,10 +1364,10 @@ mod tests {
             },
             UploadedArtifact {
                 kind: "segment",
-                object_key: hls_segment_object_key("asset-123", "720p", "segment_00000.ts"),
-                content_type: "video/mp2t",
+                object_key: hls_segment_object_key("asset-123", "720p", "segment_00000.m4s"),
+                content_type: "video/mp4",
                 byte_size: 1,
-                duration_ms: Some(2_000),
+                duration_ms: Some(1_000),
                 resolution_tier: Some("720p".to_owned()),
             },
         ];
@@ -1328,15 +1412,15 @@ mod tests {
                 .iter()
                 .map(|rendition| rendition.name)
                 .collect::<Vec<_>>(),
-            vec!["720p", "1080p"]
+            vec!["360p", "480p", "720p", "1080p"]
         );
         assert_eq!(
             hls_variant_stream_map(&renditions, true),
-            "v:0,a:0,name:720p v:1,a:1,name:1080p"
+            "v:0,a:0,name:360p v:1,a:1,name:480p v:2,a:2,name:720p v:3,a:3,name:1080p"
         );
         assert_eq!(
             hls_variant_stream_map(&renditions, false),
-            "v:0,name:720p v:1,name:1080p"
+            "v:0,name:360p v:1,name:480p v:2,name:720p v:3,name:1080p"
         );
     }
 
@@ -1349,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn hls_keyframe_interval_is_fps_aware_for_two_second_segments() {
+    fn hls_keyframe_interval_is_fps_aware_for_one_second_segments() {
         let mut source_probe = SourceProbe {
             duration_ms: 12_000,
             width: 1920,
@@ -1359,11 +1443,11 @@ mod tests {
             frame_rate: Some(30.0),
         };
 
-        assert_eq!(hls_keyframe_interval_frames(&source_probe), 60);
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 30);
         source_probe.frame_rate = Some(24.0);
-        assert_eq!(hls_keyframe_interval_frames(&source_probe), 48);
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 24);
         source_probe.frame_rate = Some(60.0);
-        assert_eq!(hls_keyframe_interval_frames(&source_probe), 120);
+        assert_eq!(hls_keyframe_interval_frames(&source_probe), 60);
         source_probe.frame_rate = None;
         assert_eq!(
             hls_keyframe_interval_frames(&source_probe),
@@ -1377,7 +1461,7 @@ mod tests {
             r#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXTINF:2.000000,
-segment_00000.ts
+segment_00000.m4s
 #EXTINF:1.234,
 hls/segment_00001.ts
 #EXT-X-ENDLIST
@@ -1385,7 +1469,7 @@ hls/segment_00001.ts
             "720p",
         );
 
-        assert_eq!(durations["720p/segment_00000.ts"], 2_000);
+        assert_eq!(durations["720p/segment_00000.m4s"], 2_000);
         assert_eq!(durations["hls/segment_00001.ts"], 1_234);
     }
 }

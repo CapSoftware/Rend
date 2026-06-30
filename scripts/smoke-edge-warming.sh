@@ -299,6 +299,56 @@ fetch_once() {
   fi
 }
 
+first_variant_path() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if re.fullmatch(r"(360p|480p|720p|1080p|2k|4k)/index\.m3u8", line):
+            print(line)
+            raise SystemExit(0)
+raise SystemExit("master manifest did not contain a supported variant playlist")
+PY
+}
+
+startup_hls_media_paths() {
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+variant_path = sys.argv[2]
+rendition = variant_path.split("/", 1)[0]
+init_name = None
+segment_name = None
+map_pattern = re.compile(r'^#EXT-X-MAP:URI="([^"]+)"')
+segment_pattern = re.compile(r"^segment_[0-9]+\.(ts|m4s)$")
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    for raw_line in f:
+        line = raw_line.strip()
+        match = map_pattern.match(line)
+        if match:
+            init_name = match.group(1)
+            continue
+        if segment_pattern.fullmatch(line):
+            segment_name = line
+            break
+
+if not init_name or "/" in init_name:
+    raise SystemExit("variant manifest did not contain a local fMP4 init segment")
+if init_name != f"init_{rendition}.mp4":
+    raise SystemExit(f"variant init segment did not match rendition: {init_name}")
+if not segment_name:
+    raise SystemExit("variant manifest did not contain a local media segment")
+
+print(f"hls/{rendition}/{init_name}")
+print(f"hls/{rendition}/{segment_name}")
+PY
+}
+
 expect_warm_rejected "missing-token" ""
 expect_warm_rejected "wrong-token" "wrong-token"
 
@@ -310,23 +360,24 @@ warm_artifacts "initial" "opener.mp4" "hls/master.m3u8"
 fetch_once "manifest-first" "$manifest_url" "HIT" "application/vnd.apple.mpegurl" "$manifest_body"
 fetch_once "opener-first" "$opener_url" "HIT" "video/mp4" "$tmp_dir/opener-first.body"
 
-segment_name="$(
-  python3 - "$manifest_body" <<'PY'
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith(".ts") and "/" not in line:
-            print(line)
-            raise SystemExit(0)
-raise SystemExit("manifest did not contain a local .ts segment")
-PY
-)"
+variant_path="$(first_variant_path "$manifest_body")"
+variant_url="$edge_base/v/$asset_id/hls/$variant_path"
+variant_body="$tmp_dir/variant-first.body"
+warm_artifacts "variant" "hls/$variant_path"
+fetch_once "variant-first" "$variant_url" "HIT" "application/vnd.apple.mpegurl" "$variant_body"
 
-warm_artifacts "segment" "hls/$segment_name"
-segment_url="$edge_base/v/$asset_id/hls/$segment_name"
-fetch_once "segment-first" "$segment_url" "HIT" "video/mp2t" "$tmp_dir/segment-first.body"
+media_paths="$(startup_hls_media_paths "$variant_body" "$variant_path")"
+init_artifact_path="$(printf '%s\n' "$media_paths" | sed -n '1p')"
+segment_artifact_path="$(printf '%s\n' "$media_paths" | sed -n '2p')"
+segment_content_type="video/mp2t"
+if [[ "$segment_artifact_path" == *.m4s ]]; then
+  segment_content_type="video/mp4"
+fi
 
-echo "edge warming smoke passed for asset $asset_id with warmed segment $segment_name"
+warm_artifacts "startup-media" "$init_artifact_path" "$segment_artifact_path"
+init_url="$edge_base/v/$asset_id/$init_artifact_path"
+segment_url="$edge_base/v/$asset_id/$segment_artifact_path"
+fetch_once "init-first" "$init_url" "HIT" "video/mp4" "$tmp_dir/init-first.body"
+fetch_once "segment-first" "$segment_url" "HIT" "$segment_content_type" "$tmp_dir/segment-first.body"
+
+echo "edge warming smoke passed for asset $asset_id with warmed variant $variant_path and segment $segment_artifact_path"

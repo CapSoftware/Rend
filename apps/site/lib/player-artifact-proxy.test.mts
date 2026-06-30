@@ -19,7 +19,7 @@ test("rewritten manifest headers use transformed body length and drop range meta
     "content-type": "application/vnd.apple.mpegurl",
     "x-rend-cache": "HIT",
   });
-  const body = "#EXTM3U\n/api/player/asset/artifact/hls/segment_00000.ts\n";
+  const body = "#EXTM3U\n/api/player/asset/artifact/hls/360p/segment_00000.m4s\n";
 
   const headers = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "hls/master.m3u8",
@@ -65,7 +65,10 @@ test("versioned public playback artifacts use private immutable browser caching"
     artifactPath: "opener.mp4",
   });
   const segmentHeaders = playbackArtifactResponseHeaders(upstream, {
-    artifactPath: "hls/segment_00000.ts",
+    artifactPath: "hls/360p/segment_00000.m4s",
+  });
+  const initHeaders = playbackArtifactResponseHeaders(upstream, {
+    artifactPath: "hls/360p/init_360p.mp4",
   });
   const thumbnailHeaders = playbackArtifactResponseHeaders(upstream, {
     artifactPath: "thumbnail.jpg",
@@ -81,9 +84,11 @@ test("versioned public playback artifacts use private immutable browser caching"
   assert.equal(openerHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(thumbnailHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(segmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(initHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(variantSegmentHeaders.get("cache-control"), "private, max-age=31536000, immutable");
   assert.equal(failedHeaders.get("cache-control"), "no-store");
   assert.equal(segmentHeaders.get("timing-allow-origin"), "https://www.rend.so");
+  assert.equal(initHeaders.get("timing-allow-origin"), "https://www.rend.so");
   assert.equal(variantSegmentHeaders.get("timing-allow-origin"), "https://www.rend.so");
   assert.equal(openerHeaders.get("timing-allow-origin"), null);
   assert.equal(thumbnailHeaders.get("timing-allow-origin"), null);
@@ -106,7 +111,7 @@ test("binary artifact fetches preserve range requests", () => {
   const headers = playbackArtifactFetchHeaders(
     new Headers({ range: "bytes=0-99" }),
     "cookie-value",
-    "hls/720p/segment_00000.ts"
+    "hls/360p/segment_00000.m4s"
   );
 
   assert.equal(headers.get("range"), "bytes=0-99");
@@ -115,9 +120,11 @@ test("binary artifact fetches preserve range requests", () => {
 
 test("manifest path helper recognizes master and variant playlists only", () => {
   assert.equal(isHlsManifestArtifactPath("hls/master.m3u8"), true);
+  assert.equal(isHlsManifestArtifactPath("hls/360p/index.m3u8"), true);
   assert.equal(isHlsManifestArtifactPath("hls/720p/index.m3u8"), true);
+  assert.equal(isHlsManifestArtifactPath("hls/360p/init_360p.mp4"), false);
   assert.equal(isHlsManifestArtifactPath("hls/720p/segment_00000.ts"), false);
-  assert.equal(isHlsManifestArtifactPath("hls/480p/index.m3u8"), false);
+  assert.equal(isHlsManifestArtifactPath("hls/240p/index.m3u8"), false);
 });
 
 test("proxy playback cookie is scoped to one asset artifact path", () => {

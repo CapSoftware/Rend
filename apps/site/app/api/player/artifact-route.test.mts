@@ -123,19 +123,22 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
       url: String(url),
       headers: new Headers(init?.headers),
     });
-    return new Response("#EXTM3U\n#EXTINF:2.000000,\nsegment_00000.ts\n", {
+    return new Response(
+      '#EXTM3U\n#EXT-X-MAP:URI="init_360p.mp4"\n#EXTINF:1.000000,\nsegment_00000.m4s\n',
+      {
       status: 200,
       headers: {
         "content-type": "application/vnd.apple.mpegurl",
         "x-rend-cache": "HIT",
       },
-    });
+      },
+    );
   }) as typeof fetch;
 
   try {
     const response = await getPlaybackArtifact(
       new Request(
-        `https://rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8`,
+        `https://rend.so/api/player/${ASSET_ID}/artifact/hls/360p/index.m3u8`,
         {
           headers: {
             cookie: "__rend_playback=v1.claims.signature",
@@ -145,7 +148,7 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
-          artifactPath: ["hls", "720p", "index.m3u8"],
+          artifactPath: ["hls", "360p", "index.m3u8"],
         }),
       },
     );
@@ -154,12 +157,18 @@ test("artifact route rewrites variant playlist segment URLs", async () => {
     assert.equal(response.status, 200);
     assert.equal(
       fetches[0]?.url,
-      `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+      `https://edge.rend.so/v/${ASSET_ID}/hls/360p/index.m3u8`,
     );
     assert.match(
       body,
       new RegExp(
-        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts`,
+        `/api/player/${ASSET_ID}/artifact/hls/360p/init_360p\\.mp4`,
+      ),
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/360p/segment_00000\\.m4s`,
       ),
     );
     assert.doesNotMatch(body, /playbackBaseUrl=/);
@@ -206,19 +215,22 @@ test("artifact route uses Tigris origin with playback cookie when bootstrap cach
       url: String(url),
       headers: new Headers(init?.headers),
     });
-    return new Response("#EXTM3U\n#EXTINF:2.000000,\nsegment_00000.ts\n", {
+    return new Response(
+      '#EXTM3U\n#EXT-X-MAP:URI="init_360p.mp4"\n#EXTINF:1.000000,\nsegment_00000.m4s\n',
+      {
       status: 200,
       headers: {
         "content-type": "application/vnd.apple.mpegurl",
         "x-rend-origin": "tigris",
       },
-    });
+      },
+    );
   }) as typeof fetch;
 
   try {
     const response = await getPlaybackArtifact(
       new Request(
-        `https://www.rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8`,
+        `https://www.rend.so/api/player/${ASSET_ID}/artifact/hls/360p/index.m3u8`,
         {
           headers: {
             cookie: "__rend_playback=v1.claims.signature",
@@ -228,7 +240,7 @@ test("artifact route uses Tigris origin with playback cookie when bootstrap cach
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
-          artifactPath: ["hls", "720p", "index.m3u8"],
+          artifactPath: ["hls", "360p", "index.m3u8"],
         }),
       },
     );
@@ -238,7 +250,7 @@ test("artifact route uses Tigris origin with playback cookie when bootstrap cach
     assert.equal(fetches.length, 1);
     assert.equal(
       fetches[0]?.url,
-      `https://api.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+      `https://api.rend.so/v/${ASSET_ID}/hls/360p/index.m3u8`,
     );
     assert.equal(
       fetches[0]?.headers.get("cookie"),
@@ -247,7 +259,13 @@ test("artifact route uses Tigris origin with playback cookie when bootstrap cach
     assert.match(
       body,
       new RegExp(
-        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts`,
+        `/api/player/${ASSET_ID}/artifact/hls/360p/init_360p\\.mp4`,
+      ),
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/360p/segment_00000\\.m4s`,
       ),
     );
     assert.doesNotMatch(body, /playbackBaseUrl=/);
@@ -291,19 +309,22 @@ test("artifact route keeps playback base query for explicit allowlisted override
       url: String(url),
       headers: new Headers(init?.headers),
     });
-    return new Response("#EXTM3U\n#EXTINF:2.000000,\nsegment_00000.ts\n", {
+    return new Response(
+      '#EXTM3U\n#EXT-X-MAP:URI="init_360p.mp4"\n#EXTINF:1.000000,\nsegment_00000.m4s\n',
+      {
       status: 200,
       headers: {
         "content-type": "application/vnd.apple.mpegurl",
         "x-rend-cache": "HIT",
       },
-    });
+      },
+    );
   }) as typeof fetch;
 
   try {
     const response = await getPlaybackArtifact(
       new Request(
-        `https://rend.so/api/player/${ASSET_ID}/artifact/hls/720p/index.m3u8?playbackBaseUrl=https%3A%2F%2Fedge.rend.so`,
+        `https://rend.so/api/player/${ASSET_ID}/artifact/hls/360p/index.m3u8?playbackBaseUrl=https%3A%2F%2Fedge.rend.so`,
         {
           headers: {
             cookie: "__rend_playback=v1.claims.signature",
@@ -313,7 +334,7 @@ test("artifact route keeps playback base query for explicit allowlisted override
       {
         params: Promise.resolve({
           assetId: ASSET_ID,
-          artifactPath: ["hls", "720p", "index.m3u8"],
+          artifactPath: ["hls", "360p", "index.m3u8"],
         }),
       },
     );
@@ -322,12 +343,18 @@ test("artifact route keeps playback base query for explicit allowlisted override
     assert.equal(response.status, 200);
     assert.equal(
       fetches[0]?.url,
-      `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+      `https://edge.rend.so/v/${ASSET_ID}/hls/360p/index.m3u8`,
     );
     assert.match(
       body,
       new RegExp(
-        `/api/player/${ASSET_ID}/artifact/hls/720p/segment_00000\\.ts\\?playbackBaseUrl=`,
+        `/api/player/${ASSET_ID}/artifact/hls/360p/init_360p\\.mp4\\?playbackBaseUrl=`,
+      ),
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `/api/player/${ASSET_ID}/artifact/hls/360p/segment_00000\\.m4s\\?playbackBaseUrl=`,
       ),
     );
   } finally {

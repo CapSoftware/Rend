@@ -12,6 +12,7 @@ use sha2::Sha256;
 
 const TOKEN_VERSION: &str = "v1";
 pub const POLICY_ASSET_PLAYBACK_V1: &str = "asset_playback_v1";
+const HLS_RENDITION_NAMES: [&str; 6] = ["360p", "480p", "720p", "1080p", "2k", "4k"];
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -225,26 +226,57 @@ pub fn is_asset_playback_path(artifact_path: &str) -> bool {
     match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
         ["hls", segment_name] => is_valid_hls_segment_name(segment_name),
         ["hls", rendition_name, "index.m3u8"] => is_valid_hls_rendition_name(rendition_name),
-        ["hls", rendition_name, segment_name] => {
-            is_valid_hls_rendition_name(rendition_name) && is_valid_hls_segment_name(segment_name)
+        ["hls", rendition_name, media_name] => {
+            is_valid_hls_rendition_name(rendition_name)
+                && (is_valid_hls_segment_name(media_name)
+                    || is_valid_hls_init_segment_name_for_rendition(media_name, rendition_name))
         }
         _ => false,
     }
 }
 
 pub fn is_valid_hls_rendition_name(rendition_name: &str) -> bool {
-    matches!(rendition_name, "720p" | "1080p" | "2k" | "4k")
+    HLS_RENDITION_NAMES.contains(&rendition_name)
 }
 
 pub fn is_valid_hls_segment_name(segment_name: &str) -> bool {
-    let Some(number) = segment_name
-        .strip_prefix("segment_")
-        .and_then(|name| name.strip_suffix(".ts"))
+    let Some(number) = segment_name.strip_prefix("segment_").and_then(|name| {
+        name.strip_suffix(".ts")
+            .or_else(|| name.strip_suffix(".m4s"))
+    }) else {
+        return false;
+    };
+
+    is_non_empty_ascii_digits(number)
+}
+
+pub fn is_valid_hls_init_segment_name(segment_name: &str) -> bool {
+    let Some(rendition_name) = segment_name
+        .strip_prefix("init_")
+        .and_then(|name| name.strip_suffix(".mp4"))
     else {
         return false;
     };
 
-    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    is_valid_hls_rendition_name(rendition_name)
+}
+
+pub fn is_valid_hls_init_segment_name_for_rendition(
+    segment_name: &str,
+    rendition_name: &str,
+) -> bool {
+    let Some(init_rendition_name) = segment_name
+        .strip_prefix("init_")
+        .and_then(|name| name.strip_suffix(".mp4"))
+    else {
+        return false;
+    };
+
+    init_rendition_name == rendition_name && is_valid_hls_rendition_name(init_rendition_name)
+}
+
+fn is_non_empty_ascii_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn sign_claims(claims: &PlaybackClaims, secret: &[u8]) -> Result<String, PlaybackAuthError> {
@@ -530,8 +562,17 @@ mod tests {
             "opener.mp4",
             "hls/master.m3u8",
             "hls/segment_00000.ts",
+            "hls/segment_00000.m4s",
+            "hls/360p/index.m3u8",
+            "hls/360p/init_360p.mp4",
+            "hls/360p/segment_00000.m4s",
+            "hls/480p/index.m3u8",
+            "hls/480p/init_480p.mp4",
+            "hls/480p/segment_00000.m4s",
             "hls/720p/index.m3u8",
             "hls/720p/segment_00000.ts",
+            "hls/720p/init_720p.mp4",
+            "hls/720p/segment_00000.m4s",
             "hls/1080p/index.m3u8",
             "hls/2k/segment_00001.ts",
             "hls/4k/segment_00010.ts",
@@ -543,7 +584,9 @@ mod tests {
         }
 
         for artifact_path in [
-            "hls/480p/index.m3u8",
+            "hls/720p/init_480p.mp4",
+            "hls/720p/init_latest.mp4",
+            "hls/720p/init_00000.mp4",
             "hls/720p/playlist.m3u8",
             "hls/720p/nested/segment_00000.ts",
             "hls/720p/segment_latest.ts",

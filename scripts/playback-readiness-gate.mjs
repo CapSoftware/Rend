@@ -608,11 +608,15 @@ function artifactPathFromUrl(urlValue, assetId) {
 }
 
 function isHlsRenditionManifestPath(artifactPath) {
-  return /^hls\/(?:720p|1080p|2k|4k)\/index\.m3u8$/.test(artifactPath);
+  return /^hls\/(?:360p|480p|720p|1080p|2k|4k)\/index\.m3u8$/.test(artifactPath);
+}
+
+function isHlsInitSegmentPath(artifactPath) {
+  return /^hls\/(360p|480p|720p|1080p|2k|4k)\/init_\1\.mp4$/.test(artifactPath);
 }
 
 function isHlsSegmentPath(artifactPath) {
-  return /^hls\/(?:(?:720p|1080p|2k|4k)\/)?segment_[0-9]+\.ts$/.test(artifactPath);
+  return /^hls\/(?:(?:360p|480p|720p|1080p|2k|4k)\/)?segment_[0-9]+\.(?:ts|m4s)$/.test(artifactPath);
 }
 
 function extractBootstrapArtifacts(bootstrap, assetId) {
@@ -620,11 +624,14 @@ function extractBootstrapArtifacts(bootstrap, assetId) {
   const renditionManifest = hints.find((hint) =>
     typeof hint.artifact_path === "string" && isHlsRenditionManifestPath(hint.artifact_path) && hint.url
   );
+  const initSegment = hints.find((hint) =>
+    typeof hint.artifact_path === "string" && isHlsInitSegmentPath(hint.artifact_path) && hint.url
+  );
   const firstSegment = hints.find((hint) =>
     typeof hint.artifact_path === "string" && isHlsSegmentPath(hint.artifact_path) && hint.url
   );
-  if (!bootstrap.manifest_url || !renditionManifest?.url || !firstSegment?.url) {
-    throw new SafeError("playback bootstrap did not include HLS master, startup playlist, and first segment hints");
+  if (!bootstrap.manifest_url || !renditionManifest?.url || !initSegment?.url || !firstSegment?.url) {
+    throw new SafeError("playback bootstrap did not include HLS master, startup playlist, init, and first segment hints");
   }
   const artifacts = [
     {
@@ -638,9 +645,14 @@ function extractBootstrapArtifacts(bootstrap, assetId) {
       content_type: renditionManifest.content_type || "application/vnd.apple.mpegurl",
     },
     {
+      label: "init",
+      artifact_path: artifactPathFromUrl(initSegment.url, assetId),
+      content_type: initSegment.content_type || "video/mp4",
+    },
+    {
       label: "segment",
       artifact_path: artifactPathFromUrl(firstSegment.url, assetId),
-      content_type: firstSegment.content_type || "video/mp2t",
+      content_type: firstSegment.content_type || "video/mp4",
     },
   ];
   if (bootstrap.opener_url) {
@@ -656,7 +668,10 @@ function extractBootstrapArtifacts(bootstrap, assetId) {
   if (!isHlsRenditionManifestPath(artifacts[1].artifact_path)) {
     throw new SafeError("playback bootstrap startup playlist did not use a supported HLS rendition path");
   }
-  if (!isHlsSegmentPath(artifacts[2].artifact_path)) {
+  if (!isHlsInitSegmentPath(artifacts[2].artifact_path)) {
+    throw new SafeError("playback bootstrap init segment did not use a supported HLS init path");
+  }
+  if (!isHlsSegmentPath(artifacts[3].artifact_path)) {
     throw new SafeError("playback bootstrap first segment did not use a supported HLS segment path");
   }
   return artifacts;

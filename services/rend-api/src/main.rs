@@ -64,11 +64,11 @@ static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 const DEFAULT_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const HARD_EDGE_WARM_MAX_ARTIFACTS: usize = 16;
 const EDGE_WARM_LOG_BODY_LIMIT_BYTES: usize = 1024;
-const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 2;
+const DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
 const HARD_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: usize = 8;
 const HLS_STARTUP_SEGMENTS_PER_RENDITION: usize = 2;
-const HLS_RENDITION_ORDER: [&str; 4] = ["720p", "1080p", "2k", "4k"];
-const HLS_STARTUP_RENDITION_ORDER: [&str; 4] = ["720p", "1080p", "2k", "4k"];
+const HLS_RENDITION_ORDER: [&str; 6] = ["360p", "480p", "720p", "1080p", "2k", "4k"];
+const HLS_STARTUP_RENDITION_ORDER: [&str; 6] = ["360p", "480p", "720p", "1080p", "2k", "4k"];
 const DEFAULT_ASSET_LIST_LIMIT: usize = 50;
 const MAX_ASSET_LIST_LIMIT: usize = 100;
 const DEFAULT_ASSET_EVENTS_LIMIT: usize = 50;
@@ -3398,7 +3398,7 @@ fn playback_artifact_from_record(
     let is_supported = match record.kind.as_str() {
         "opener" => artifact_path == "opener.mp4",
         "manifest" => is_hls_manifest_artifact_path(artifact_path),
-        "segment" => is_hls_segment_artifact_path(artifact_path),
+        "segment" => is_hls_media_artifact_path(artifact_path),
         _ => false,
     };
 
@@ -3495,6 +3495,12 @@ fn hls_startup_prefetch_paths<'a>(
                 }
             }
 
+            if let Some(init_segment) = hls_startup_init_for_tier(artifacts, tier) {
+                if push_prefetch_hint(&mut hints, limit, init_segment) {
+                    return hints;
+                }
+            }
+
             if let Some(segment) = segments.first() {
                 if push_prefetch_hint(&mut hints, limit, segment) {
                     return hints;
@@ -3542,6 +3548,16 @@ fn hls_startup_segments_for_tier<'a>(
     segments
 }
 
+fn hls_startup_init_for_tier<'a>(
+    artifacts: &'a [PlaybackArtifact],
+    tier: &str,
+) -> Option<&'a PlaybackArtifact> {
+    let init_path = format!("hls/{tier}/init_{tier}.mp4");
+    artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_path == init_path)
+}
+
 fn push_prefetch_hint<'a>(
     hints: &mut Vec<&'a PlaybackArtifact>,
     limit: usize,
@@ -3579,9 +3595,16 @@ fn hls_startup_sort_key(path: &str) -> (u8, u8, u32) {
             0,
         );
     }
-    if is_hls_segment_artifact_path(path) {
+    if is_hls_init_artifact_path(path) {
         return (
             2,
+            hls_rendition_rank(hls_rendition_name(path).unwrap_or_default()),
+            0,
+        );
+    }
+    if is_hls_segment_artifact_path(path) {
+        return (
+            3,
             hls_rendition_rank(hls_rendition_name(path).unwrap_or("720p")),
             hls_segment_index(path).unwrap_or(u32::MAX),
         );
@@ -3631,14 +3654,23 @@ fn is_hls_manifest_artifact_path(path: &str) -> bool {
 }
 
 fn is_hls_segment_artifact_path(path: &str) -> bool {
-    path.starts_with("hls/") && path.ends_with(".ts") && is_asset_playback_path(path)
+    path.starts_with("hls/")
+        && (path.ends_with(".ts") || path.ends_with(".m4s"))
+        && is_asset_playback_path(path)
+}
+
+fn is_hls_init_artifact_path(path: &str) -> bool {
+    path.starts_with("hls/") && path.ends_with(".mp4") && is_asset_playback_path(path)
+}
+
+fn is_hls_media_artifact_path(path: &str) -> bool {
+    is_hls_segment_artifact_path(path) || is_hls_init_artifact_path(path)
 }
 
 fn hls_segment_index(path: &str) -> Option<u32> {
-    path.split('/')
-        .next_back()?
-        .strip_prefix("segment_")?
-        .strip_suffix(".ts")?
+    let name = path.split('/').next_back()?.strip_prefix("segment_")?;
+    name.strip_suffix(".ts")
+        .or_else(|| name.strip_suffix(".m4s"))?
         .parse::<u32>()
         .ok()
 }
@@ -4365,17 +4397,26 @@ fn origin_playback_artifact(
     let content_type = match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
         ["opener.mp4"] => "video/mp4",
         ["hls", "master.m3u8"] => "application/vnd.apple.mpegurl",
-        ["hls", segment] if rend_playback_auth::is_valid_hls_segment_name(segment) => "video/mp2t",
+        ["hls", segment] if rend_playback_auth::is_valid_hls_segment_name(segment) => {
+            hls_segment_content_type(segment)
+        }
+        ["hls", init] if rend_playback_auth::is_valid_hls_init_segment_name(init) => "video/mp4",
         ["hls", rendition, "index.m3u8"]
             if rend_playback_auth::is_valid_hls_rendition_name(rendition) =>
         {
             "application/vnd.apple.mpegurl"
         }
+        ["hls", rendition, init]
+            if rend_playback_auth::is_valid_hls_rendition_name(rendition)
+                && rend_playback_auth::is_valid_hls_init_segment_name(init) =>
+        {
+            "video/mp4"
+        }
         ["hls", rendition, segment]
             if rend_playback_auth::is_valid_hls_rendition_name(rendition)
                 && rend_playback_auth::is_valid_hls_segment_name(segment) =>
         {
-            "video/mp2t"
+            hls_segment_content_type(segment)
         }
         _ => return Err(AppError::not_found("artifact not found")),
     };
@@ -4386,6 +4427,14 @@ fn origin_playback_artifact(
         object_key: format!("videos/{asset_id}/{artifact_path}"),
         content_type,
     })
+}
+
+fn hls_segment_content_type(segment: &str) -> &'static str {
+    if segment.ends_with(".m4s") {
+        "video/mp4"
+    } else {
+        "video/mp2t"
+    }
 }
 
 fn playback_token_cookie(headers: &HeaderMap) -> Option<String> {
@@ -4849,6 +4898,17 @@ fn edge_warm_artifact_paths(
                             &mut artifact_paths,
                             max_artifacts,
                             &playlist_path,
+                        ) {
+                            return artifact_paths;
+                        }
+                    }
+
+                    let init_path = format!("hls/{tier}/init_{tier}.mp4");
+                    if contains_artifact_path(generated_artifact_paths, &init_path) {
+                        if push_limited_unique_artifact_path(
+                            &mut artifact_paths,
+                            max_artifacts,
+                            &init_path,
                         ) {
                             return artifact_paths;
                         }

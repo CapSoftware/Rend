@@ -738,19 +738,27 @@ fn maps_hls_segment_to_goal_three_object_and_cache_key() {
 #[test]
 fn maps_hls_ladder_playlist_and_segment_to_goal_three_object_and_cache_key() {
     assert_eq!(
-        map_playback_artifact("asset-123", "hls/720p/index.m3u8").unwrap(),
+        map_playback_artifact("asset-123", "hls/360p/index.m3u8").unwrap(),
         PlaybackArtifact {
-            object_key: "videos/asset-123/hls/720p/index.m3u8".to_owned(),
-            cache_key: "videos/asset-123/hls/720p/index.m3u8".to_owned(),
+            object_key: "videos/asset-123/hls/360p/index.m3u8".to_owned(),
+            cache_key: "videos/asset-123/hls/360p/index.m3u8".to_owned(),
             content_type: "application/vnd.apple.mpegurl",
         }
     );
     assert_eq!(
-        map_playback_artifact("asset-123", "hls/720p/segment_00000.ts").unwrap(),
+        map_playback_artifact("asset-123", "hls/360p/init_360p.mp4").unwrap(),
         PlaybackArtifact {
-            object_key: "videos/asset-123/hls/720p/segment_00000.ts".to_owned(),
-            cache_key: "videos/asset-123/hls/720p/segment_00000.ts".to_owned(),
-            content_type: "video/mp2t",
+            object_key: "videos/asset-123/hls/360p/init_360p.mp4".to_owned(),
+            cache_key: "videos/asset-123/hls/360p/init_360p.mp4".to_owned(),
+            content_type: "video/mp4",
+        }
+    );
+    assert_eq!(
+        map_playback_artifact("asset-123", "hls/360p/segment_00000.m4s").unwrap(),
+        PlaybackArtifact {
+            object_key: "videos/asset-123/hls/360p/segment_00000.m4s".to_owned(),
+            cache_key: "videos/asset-123/hls/360p/segment_00000.m4s".to_owned(),
+            content_type: "video/mp4",
         }
     );
 }
@@ -763,9 +771,9 @@ fn rejects_unsupported_artifact_paths() {
         "hls",
         "hls/",
         "hls/master.m3u8/extra",
-        "hls/segment_00000.m4s",
         "hls/segment_abc.ts",
-        "hls/480p/index.m3u8",
+        "hls/720p/init_480p.mp4",
+        "hls/720p/init_latest.mp4",
         "hls/720p/playlist.m3u8",
         "hls/720p/segment_latest.ts",
         "hls/nested/segment_00000.ts",
@@ -1271,7 +1279,7 @@ async fn playback_serves_credentialed_cors_for_allowed_origin() {
 async fn playback_allows_resource_timing_only_for_www_rend_origin() {
     let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
     let cache_dir = test_cache_dir("playback-timing-allow-origin");
-    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    let cache_path = cache_dir.join("videos/asset-123/hls/360p/segment_00000.m4s");
     fs::create_dir_all(cache_path.parent().unwrap())
         .await
         .unwrap();
@@ -1281,7 +1289,7 @@ async fn playback_allows_resource_timing_only_for_www_rend_origin() {
 
     let response = get_playback_with_origin(
         app,
-        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        signed_playback_uri("asset-123", "hls/360p/segment_00000.m4s"),
         "https://www.rend.so",
     )
     .await;
@@ -1302,7 +1310,7 @@ async fn playback_allows_resource_timing_only_for_www_rend_origin() {
 async fn playback_serves_hls_segment_range_from_cache_hit() {
     let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
     let cache_dir = test_cache_dir("playback-range-hit");
-    let cache_path = cache_dir.join("videos/asset-123/hls/segment_00000.ts");
+    let cache_path = cache_dir.join("videos/asset-123/hls/360p/segment_00000.m4s");
     fs::create_dir_all(cache_path.parent().unwrap())
         .await
         .unwrap();
@@ -1312,14 +1320,14 @@ async fn playback_serves_hls_segment_range_from_cache_hit() {
 
     let response = get_playback_with_range(
         app,
-        signed_playback_uri("asset-123", "hls/segment_00000.ts"),
+        signed_playback_uri("asset-123", "hls/360p/segment_00000.m4s"),
         "bytes=2-5",
     )
     .await;
 
     assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(response.cache_status.as_deref(), Some("HIT"));
-    assert_eq!(response.content_type.as_deref(), Some("video/mp2t"));
+    assert_eq!(response.content_type.as_deref(), Some("video/mp4"));
     assert_eq!(response.content_length.as_deref(), Some("4"));
     assert_eq!(response.content_range.as_deref(), Some("bytes 2-5/10"));
     assert_eq!(response.accept_ranges.as_deref(), Some("bytes"));
@@ -2133,7 +2141,13 @@ fn playback_auth_accepts_valid_token_for_playback_artifacts() {
     let (keyring, issuer) = test_auth();
     let token = issuer.issue_asset_playback_token("asset-123", NOW).unwrap();
 
-    for artifact_path in ["opener.mp4", "hls/master.m3u8", "hls/segment_00000.ts"] {
+    for artifact_path in [
+        "opener.mp4",
+        "hls/master.m3u8",
+        "hls/segment_00000.ts",
+        "hls/360p/init_360p.mp4",
+        "hls/360p/segment_00000.m4s",
+    ] {
         validate_playback_request(&keyring, "asset-123", artifact_path, Some(&token), NOW + 1)
             .unwrap();
     }

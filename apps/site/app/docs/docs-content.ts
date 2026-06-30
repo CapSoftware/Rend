@@ -269,9 +269,9 @@ export const PLAYBACK_BOOTSTRAP_CODE = `GET https://rend.so/api/player/018f52b2-
   "ttl_seconds": 900,
   "prefetch_hints": [
     {
-      "artifact_path": "hls/1080p/segment_00000.ts",
-      "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/1080p/segment_00000.ts",
-      "content_type": "video/mp2t"
+      "artifact_path": "hls/360p/init_360p.mp4",
+      "url": "/api/player/018f52b2-5401-7f3b-ae2e-4923f4d62120/artifact/hls/360p/init_360p.mp4",
+      "content_type": "video/mp4"
     }
   ]
 }`;

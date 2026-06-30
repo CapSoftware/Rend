@@ -617,7 +617,7 @@ if missing:
     raise SystemExit(f"bootstrap response missing required benchmark fields: {', '.join(missing)}")
 
 hints = response.get("prefetch_hints") or []
-first_segment = next((hint for hint in hints if hint.get("artifact_path", "").endswith(".ts")), None)
+first_segment = next((hint for hint in hints if hint.get("artifact_path", "").endswith((".m4s", ".ts"))), None)
 if not first_segment:
     raise SystemExit("bootstrap response did not include an HLS segment prefetch hint")
 
@@ -638,7 +638,10 @@ artifacts = [
         "label": "segment",
         "artifact_path": first_segment["artifact_path"],
         "url": first_segment["url"],
-        "content_type": first_segment.get("content_type", "video/mp2t"),
+        "content_type": first_segment.get(
+            "content_type",
+            "video/mp4" if first_segment["artifact_path"].endswith(".m4s") else "video/mp2t",
+        ),
     },
 ]
 

@@ -159,14 +159,14 @@ test("site playback bootstrap response is tokenless and matches the OpenAPI sche
     playback_token: "must-not-appear",
     prefetch_hints: [
       {
-        artifact_path: "hls/720p/index.m3u8",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/720p/index.m3u8`,
+        artifact_path: "hls/360p/index.m3u8",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/360p/index.m3u8`,
         content_type: "application/vnd.apple.mpegurl",
       },
       {
-        artifact_path: "hls/720p/segment_00000.ts",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/720p/segment_00000.ts`,
-        content_type: "video/mp2t",
+        artifact_path: "hls/360p/init_360p.mp4",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/360p/init_360p.mp4`,
+        content_type: "video/mp4",
       },
     ],
   } as Parameters<typeof safePlaybackBootstrapResponse>[1] & { playback_token: string };
@@ -201,14 +201,14 @@ test("site playback bootstrap can emit direct edge URLs without token leakage", 
     playback_token: "must-not-appear",
     prefetch_hints: [
       {
-        artifact_path: "hls/1080p/index.m3u8",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/1080p/index.m3u8`,
+        artifact_path: "hls/480p/index.m3u8",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/480p/index.m3u8`,
         content_type: "application/vnd.apple.mpegurl",
       },
       {
-        artifact_path: "hls/1080p/segment_00000.ts",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/1080p/segment_00000.ts`,
-        content_type: "video/mp2t",
+        artifact_path: "hls/480p/segment_00000.m4s",
+        url: `https://edge.rend.so/v/${ASSET_ID}/hls/480p/segment_00000.m4s`,
+        content_type: "video/mp4",
       },
     ],
   } as Parameters<typeof safePlaybackBootstrapResponse>[1] & { playback_token: string };

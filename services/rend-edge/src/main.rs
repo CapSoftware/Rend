@@ -31,7 +31,8 @@ use rend_config::{
     validate_required_url,
 };
 use rend_playback_auth::{
-    PlaybackClaims, SingleKeyring, current_unix_timestamp, is_valid_hls_rendition_name,
+    PlaybackClaims, SingleKeyring, current_unix_timestamp,
+    is_valid_hls_init_segment_name_for_rendition, is_valid_hls_rendition_name,
     is_valid_hls_segment_name, validate_playback_token,
 };
 use serde::{Deserialize, Serialize};
@@ -1315,7 +1316,7 @@ async fn playback_inner(
         });
     }
 
-    if let Some(range_header) = range_header.filter(|_| is_hls_segment_content_type(&artifact)) {
+    if let Some(range_header) = range_header.filter(|_| is_range_media_content_type(&artifact)) {
         let response =
             stream_origin_range_response(state, artifact, range_header, cors_origin).await?;
         return Ok(PlaybackOutcome {
@@ -1403,7 +1404,7 @@ async fn cached_artifact_response(
         );
     }
 
-    if let Some(range_header) = range_header.filter(|_| is_hls_segment_content_type(artifact)) {
+    if let Some(range_header) = range_header.filter(|_| is_range_media_content_type(artifact)) {
         return match parse_byte_range(range_header, content_length) {
             Ok(Some(byte_range)) => {
                 file.seek(SeekFrom::Start(byte_range.start))
@@ -1416,7 +1417,7 @@ async fn cached_artifact_response(
                     })?;
                 Ok(Some(artifact_response_with_status(
                     &state.config,
-                    artifact.content_type,
+                    artifact,
                     cache_status,
                     StatusCode::PARTIAL_CONTENT,
                     file_body(file, byte_range.len()),
@@ -1427,7 +1428,7 @@ async fn cached_artifact_response(
             }
             Ok(None) => Ok(Some(artifact_response(
                 &state.config,
-                artifact.content_type,
+                artifact,
                 cache_status,
                 file_body(file, content_length),
                 Some(content_length),
@@ -1435,7 +1436,7 @@ async fn cached_artifact_response(
             ))),
             Err(()) => Ok(Some(range_not_satisfiable_response(
                 &state.config,
-                artifact.content_type,
+                artifact,
                 cache_status,
                 content_length,
                 cors_origin,
@@ -1445,7 +1446,7 @@ async fn cached_artifact_response(
 
     Ok(Some(artifact_response(
         &state.config,
-        artifact.content_type,
+        artifact,
         cache_status,
         file_body(file, content_length),
         Some(content_length),
@@ -1477,8 +1478,9 @@ fn file_body(file: fs::File, remaining: u64) -> Body {
     Body::from_stream(body_stream)
 }
 
-fn is_hls_segment_content_type(artifact: &PlaybackArtifact) -> bool {
-    artifact.content_type == "video/mp2t"
+fn is_range_media_content_type(artifact: &PlaybackArtifact) -> bool {
+    matches!(artifact.content_type, "video/mp2t")
+        || (artifact.content_type == "video/mp4" && artifact.cache_key.contains("/hls/"))
 }
 
 fn normalize_single_byte_range_header(value: &str) -> Option<String> {
@@ -1599,7 +1601,7 @@ async fn stream_origin_range_response(
 
     Ok(artifact_response_with_status(
         &state.config,
-        artifact.content_type,
+        &artifact,
         "MISS",
         status,
         Body::from_stream(body_stream),
@@ -1672,7 +1674,12 @@ fn record_playback_telemetry(
 fn resolution_tier_from_artifact_path(artifact_path: &str) -> Option<&str> {
     match artifact_path.split('/').collect::<Vec<_>>().as_slice() {
         ["hls", rendition_name, "index.m3u8"] | ["hls", rendition_name, _]
-            if matches!(*rendition_name, "720p" | "1080p" | "2k" | "4k") =>
+            if matches!(*rendition_name, "360p" | "480p" | "720p") =>
+        {
+            Some("720p")
+        }
+        ["hls", rendition_name, "index.m3u8"] | ["hls", rendition_name, _]
+            if matches!(*rendition_name, "1080p" | "2k" | "4k") =>
         {
             Some(*rendition_name)
         }
@@ -1719,7 +1726,7 @@ async fn stream_origin_artifact_response(
 
     Ok(artifact_response(
         &state.config,
-        artifact.content_type,
+        &artifact,
         "MISS",
         Body::from_stream(body_stream),
         content_length,
@@ -2604,17 +2611,19 @@ fn is_trusted_rend_cors_origin(origin: &str) -> bool {
 
 fn playback_timing_allow_origin(
     cors_origin: Option<&str>,
-    content_type: &str,
+    artifact: &PlaybackArtifact,
 ) -> Option<&'static str> {
-    let is_hls_timing_resource =
-        matches!(content_type, "application/vnd.apple.mpegurl" | "video/mp2t");
+    let is_hls_timing_resource = matches!(
+        artifact.content_type,
+        "application/vnd.apple.mpegurl" | "video/mp2t"
+    ) || is_range_media_content_type(artifact);
     (is_hls_timing_resource && cors_origin == Some(PLAYBACK_TIMING_ALLOW_ORIGIN))
         .then_some(PLAYBACK_TIMING_ALLOW_ORIGIN)
 }
 
 fn artifact_response(
     config: &EdgeConfig,
-    content_type: &'static str,
+    artifact: &PlaybackArtifact,
     cache_status: &'static str,
     body: Body,
     content_length: Option<u64>,
@@ -2622,7 +2631,7 @@ fn artifact_response(
 ) -> Response {
     artifact_response_with_status(
         config,
-        content_type,
+        artifact,
         cache_status,
         StatusCode::OK,
         body,
@@ -2634,7 +2643,7 @@ fn artifact_response(
 
 fn artifact_response_with_status(
     config: &EdgeConfig,
-    content_type: &'static str,
+    artifact: &PlaybackArtifact,
     cache_status: &'static str,
     status: StatusCode,
     body: Body,
@@ -2642,8 +2651,9 @@ fn artifact_response_with_status(
     content_range: Option<&str>,
     cors_origin: Option<&str>,
 ) -> Response {
-    let is_hls_segment = content_type == "video/mp2t";
-    let expose_headers = if is_hls_segment {
+    let content_type = artifact.content_type;
+    let is_range_media = is_range_media_content_type(artifact);
+    let expose_headers = if is_range_media {
         "accept-ranges, cache-control, content-length, content-range, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
     } else {
         "cache-control, content-length, content-type, x-rend-cache, x-rend-edge-id, x-rend-region"
@@ -2660,7 +2670,7 @@ fn artifact_response_with_status(
         .header("x-rend-region", &config.region)
         .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose_headers);
 
-    if is_hls_segment {
+    if is_range_media {
         builder = builder.header(header::ACCEPT_RANGES, "bytes");
     }
 
@@ -2670,7 +2680,7 @@ fn artifact_response_with_status(
             .header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
             .header(header::VARY, "Origin");
     }
-    if let Some(origin) = playback_timing_allow_origin(cors_origin, content_type) {
+    if let Some(origin) = playback_timing_allow_origin(cors_origin, artifact) {
         builder = builder.header("timing-allow-origin", origin);
     }
 
@@ -2688,14 +2698,14 @@ fn artifact_response_with_status(
 
 fn range_not_satisfiable_response(
     config: &EdgeConfig,
-    content_type: &'static str,
+    artifact: &PlaybackArtifact,
     cache_status: &'static str,
     content_length: u64,
     cors_origin: Option<&str>,
 ) -> Response {
     artifact_response_with_status(
         config,
-        content_type,
+        artifact,
         cache_status,
         StatusCode::RANGE_NOT_SATISFIABLE,
         Body::empty(),
@@ -3311,6 +3321,13 @@ fn cache_artifact_type(cache_key: &str) -> (CacheArtifactType, Option<u32>) {
                 segment_index_from_name(segment_name),
             )
         }
+        ["videos", asset_id, "hls", rendition_name, init_name]
+            if is_safe_asset_id(asset_id)
+                && is_valid_hls_rendition_name(rendition_name)
+                && is_valid_hls_init_segment_name_for_rendition(init_name, rendition_name) =>
+        {
+            (CacheArtifactType::Segment, None)
+        }
         ["videos", asset_id, "hls", rendition_name, "index.m3u8"]
             if is_safe_asset_id(asset_id) && is_valid_hls_rendition_name(rendition_name) =>
         {
@@ -3345,9 +3362,9 @@ fn cache_artifact_priority(artifact_type: CacheArtifactType, segment_index: Opti
 }
 
 fn segment_index_from_name(segment_name: &str) -> Option<u32> {
-    segment_name
-        .strip_prefix("segment_")?
-        .strip_suffix(".ts")?
+    let name = segment_name.strip_prefix("segment_")?;
+    name.strip_suffix(".ts")
+        .or_else(|| name.strip_suffix(".m4s"))?
         .parse::<u32>()
         .ok()
 }
@@ -3396,7 +3413,7 @@ fn map_playback_artifact(
         ["hls", segment_name] if is_valid_hls_segment_name(segment_name) => Ok(playback_artifact(
             asset_id,
             &format!("hls/{segment_name}"),
-            "video/mp2t",
+            hls_segment_content_type(segment_name),
         )),
         ["hls", rendition_name, "index.m3u8"] if is_valid_hls_rendition_name(rendition_name) => {
             Ok(playback_artifact(
@@ -3412,12 +3429,30 @@ fn map_playback_artifact(
             Ok(playback_artifact(
                 asset_id,
                 &format!("hls/{rendition_name}/{segment_name}"),
-                "video/mp2t",
+                hls_segment_content_type(segment_name),
+            ))
+        }
+        ["hls", rendition_name, init_name]
+            if is_valid_hls_rendition_name(rendition_name)
+                && is_valid_hls_init_segment_name_for_rendition(init_name, rendition_name) =>
+        {
+            Ok(playback_artifact(
+                asset_id,
+                &format!("hls/{rendition_name}/{init_name}"),
+                "video/mp4",
             ))
         }
         _ => Err(PlaybackError::NotFound(
             "unsupported playback path".to_owned(),
         )),
+    }
+}
+
+fn hls_segment_content_type(segment_name: &str) -> &'static str {
+    if segment_name.ends_with(".m4s") {
+        "video/mp4"
+    } else {
+        "video/mp2t"
     }
 }
 

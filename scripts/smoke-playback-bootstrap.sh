@@ -241,7 +241,7 @@ if not hints:
     raise SystemExit("expected at least one HLS prefetch hint")
 if len(hints) > cap:
     raise SystemExit(f"expected at most {cap} prefetch hints, got {len(hints)}")
-valid_artifact = re.compile(r"^(hls/master\.m3u8|hls/segment_[0-9]+\.ts|hls/(720p|1080p|2k|4k)/(index\.m3u8|segment_[0-9]+\.ts))$")
+valid_artifact = re.compile(r"^(hls/master\.m3u8|hls/segment_[0-9]+\.(ts|m4s)|hls/(360p|480p|720p|1080p|2k|4k)/(index\.m3u8|init_(360p|480p|720p|1080p|2k|4k)\.mp4|segment_[0-9]+\.(ts|m4s)))$")
 for hint in hints:
     for key in ["artifact_path", "url", "content_type"]:
         if key not in hint:
@@ -251,7 +251,13 @@ for hint in hints:
     expected_url = f"{edge_base}/v/{asset_id}/{hint['artifact_path']}"
     if hint["url"] != expected_url:
         raise SystemExit(f"prefetch hint did not use tokenless rend-edge shape: {hint['url']}")
-    expected_content_type = "application/vnd.apple.mpegurl" if hint["artifact_path"].endswith(".m3u8") else "video/mp2t"
+    expected_content_type = (
+        "application/vnd.apple.mpegurl"
+        if hint["artifact_path"].endswith(".m3u8")
+        else "video/mp4"
+        if hint["artifact_path"].endswith((".mp4", ".m4s"))
+        else "video/mp2t"
+    )
     if hint["content_type"] != expected_content_type:
         raise SystemExit(f"unexpected prefetch content type: {hint['content_type']}")
 
