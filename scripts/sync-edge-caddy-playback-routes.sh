@@ -9,10 +9,11 @@ usage() {
   cat <<'EOF'
 Usage: scripts/sync-edge-caddy-playback-routes.sh [options]
 
-Patch the edge Caddy public playback matcher so HLS ladder playlists and
-segments reach rend-edge. The script edits only the signed playback regexp,
-backs up the Caddyfile, validates the result, and reloads Caddy. Hosts that
-do not keep a Caddy playback allowlist are left unchanged.
+Patch the edge Caddy public playback matcher so HLS ladder playlists, segments,
+and fast embed pages reach rend-edge. The script edits only the signed playback
+regexp plus the fast embed route, backs up the Caddyfile, validates the result,
+and reloads Caddy. Hosts that do not keep a Caddy playback allowlist are left
+unchanged.
 
 Options:
   --caddyfile FILE  Caddyfile path. Default: /etc/caddy/Caddyfile.
@@ -171,6 +172,63 @@ print("changed" if changed else "unchanged")
 PY
 )"
 
+fast_embed_status="$(
+  python3 - "$tmp" <<'PY'
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+text = target.read_text(encoding="utf-8")
+if "path_regexp fast_embed" in text:
+    print("unchanged")
+    raise SystemExit(0)
+if "path_regexp canonical_playback" not in text and "rend_hls_ladder_playback" not in text:
+    print("not_found")
+    raise SystemExit(0)
+
+block = [
+    "\n",
+    "\t@fast_embed {\n",
+    "\t\tpath_regexp fast_embed ^/embed-fast/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\n",
+    "\t}\n",
+    "\thandle @fast_embed {\n",
+    "\t\treverse_proxy 127.0.0.1:4100\n",
+    "\t}\n",
+]
+lines = text.splitlines(keepends=True)
+output = []
+inserted = False
+seen_public_playback = False
+for line in lines:
+    stripped = line.strip()
+    if (
+        "path_regexp canonical_playback" in line
+        or "rend_hls_ladder_playback" in line
+        or "handle @canonical_playback" in line
+    ):
+        seen_public_playback = True
+    if seen_public_playback and not inserted and stripped == "handle {":
+        output.extend(block)
+        inserted = True
+    output.append(line)
+
+if not inserted:
+    print("not_found")
+    raise SystemExit(0)
+
+target.write_text("".join(output), encoding="utf-8")
+print("changed")
+PY
+)"
+
+if [[ "$fast_embed_status" == "changed" ]]; then
+  patch_status="changed"
+elif [[ "$patch_status" == "not_found" && "$fast_embed_status" == "unchanged" ]]; then
+  patch_status="unchanged"
+elif [[ "$patch_status" != "not_found" && "$fast_embed_status" == "not_found" ]]; then
+  die "managed edge Caddy playback routes were found, but fast embed route insertion failed"
+fi
+
 case "$patch_status" in
   changed | unchanged | not_found) ;;
   *) die "unexpected patch status: $patch_status" ;;
@@ -182,7 +240,7 @@ if [[ "$patch_status" == "not_found" ]]; then
 fi
 
 if [[ "$patch_status" == "unchanged" ]]; then
-  echo "Edge Caddy playback routes already include HLS ladder paths"
+  echo "Edge Caddy playback routes already include HLS ladder and fast embed paths"
   exit 0
 fi
 

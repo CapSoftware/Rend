@@ -61,6 +61,7 @@ const PLAYBACK_TIMING_ALLOW_ORIGIN: &str = "https://www.rend.so";
 const CACHE_METADATA_DIR_NAME: &str = ".rend-edge-cache-meta";
 const CACHE_METADATA_VERSION: u8 = 1;
 const FIRST_SEGMENT_KEEP_COUNT: u32 = 2;
+const DEFAULT_FAST_EMBED_CACHE_TTL_SECS: u64 = 60;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -83,6 +84,8 @@ struct EdgeConfig {
     max_origin_artifact_bytes: u64,
     cache_min_free_bytes: u64,
     control_plane: Option<ControlPlaneConfig>,
+    fast_embed_control_plane_url: Option<String>,
+    fast_embed_cache_ttl: Duration,
     request_timeout: Duration,
     cors_allowed_origins: Vec<String>,
 }
@@ -177,6 +180,12 @@ impl EdgeConfig {
         if let Some(control_plane_url) = control_plane_url.as_deref() {
             validate_required_url(rend_env, "REND_CONTROL_PLANE_URL", control_plane_url)?;
         }
+        let fast_embed_control_plane_url =
+            optional_env_url("REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL")
+                .or_else(|| control_plane_url.clone());
+        if let Some(url) = fast_embed_control_plane_url.as_deref() {
+            validate_required_url(rend_env, "REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL", url)?;
+        }
         if let Some(ingest_url) = playback_telemetry.ingest_url.as_deref() {
             validate_required_url(rend_env, "REND_EDGE_TELEMETRY_INGEST_URL", ingest_url)?;
         }
@@ -212,6 +221,10 @@ impl EdgeConfig {
             cache_max_bytes: cache_max_bytes_i64,
             heartbeat_interval,
         });
+        let fast_embed_cache_ttl = env_duration_secs(
+            "REND_EDGE_FAST_EMBED_CACHE_TTL_SECS",
+            DEFAULT_FAST_EMBED_CACHE_TTL_SECS,
+        )?;
 
         Ok(Self {
             bind_addr,
@@ -236,6 +249,8 @@ impl EdgeConfig {
             max_origin_artifact_bytes,
             cache_min_free_bytes,
             control_plane,
+            fast_embed_control_plane_url,
+            fast_embed_cache_ttl,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
             cors_allowed_origins,
         })
@@ -250,6 +265,7 @@ struct AppState {
     in_flight_fills: Arc<FillRegistry>,
     active_streams: Arc<ActiveStreamRegistry>,
     cache_maintenance: Arc<tokio::sync::Mutex<()>>,
+    fast_embed_cache: Arc<FastEmbedCache>,
     metrics: Arc<EdgeMetrics>,
     telemetry: telemetry::TelemetryHandle,
     started_at: Instant,
@@ -431,6 +447,16 @@ struct PlaybackQuery {
     token: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct FastEmbedQuery {
+    autoplay: Option<String>,
+    controls: Option<String>,
+    muted: Option<String>,
+    startup: Option<String>,
+    #[serde(rename = "startupMode")]
+    startup_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlaybackArtifact {
     object_key: String,
@@ -472,6 +498,19 @@ struct FillRegistry {
 #[derive(Default)]
 struct ActiveStreamRegistry {
     streams: std::sync::Mutex<HashMap<String, ActiveStreamEntry>>,
+}
+
+#[derive(Default)]
+struct FastEmbedCache {
+    entries: std::sync::Mutex<HashMap<String, FastEmbedCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct FastEmbedCacheEntry {
+    body: Bytes,
+    content_type: String,
+    set_cookie: Option<String>,
+    inserted_at: Instant,
 }
 
 #[derive(Default)]
@@ -657,6 +696,22 @@ impl ActiveStreamRegistry {
     }
 }
 
+impl FastEmbedCache {
+    fn get(&self, key: &str, ttl: Duration) -> Option<FastEmbedCacheEntry> {
+        let mut entries = lock_mutex(&self.entries);
+        let entry = entries.get(key)?;
+        if entry.inserted_at.elapsed() > ttl {
+            entries.remove(key);
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    fn insert(&self, key: String, entry: FastEmbedCacheEntry) {
+        lock_mutex(&self.entries).insert(key, entry);
+    }
+}
+
 impl InFlightFill {
     fn new() -> Self {
         Self {
@@ -753,6 +808,7 @@ async fn main() -> Result<()> {
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
         started_at: Instant::now(),
@@ -898,6 +954,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             "/v/{asset_id}/{*artifact_path}",
             options(playback_preflight).route_layer(DefaultBodyLimit::disable()),
         )
+        .route("/embed-fast/{asset_id}", get(fast_embed))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
@@ -1254,6 +1311,180 @@ async fn playback_preflight(
         .header(header::VARY, "Origin")
         .body(Body::empty())
         .expect("preflight response headers are static and valid")
+}
+
+async fn fast_embed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(asset_id): AxumPath<String>,
+    Query(query): Query<FastEmbedQuery>,
+) -> Response {
+    match fast_embed_inner(state, asset_id, query).await {
+        Ok(response) | Err(response) => response,
+    }
+}
+
+async fn fast_embed_inner(
+    state: Arc<AppState>,
+    asset_id: String,
+    query: FastEmbedQuery,
+) -> std::result::Result<Response, Response> {
+    if !is_safe_asset_id(&asset_id) {
+        return Err(error_response(StatusCode::BAD_REQUEST, "invalid asset id"));
+    }
+    let Some(control_plane_url) = state.config.fast_embed_control_plane_url.as_deref() else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "fast embed is not configured on this edge",
+        ));
+    };
+    let Some(control_plane) = state.config.control_plane.as_ref() else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "fast embed is not configured on this edge",
+        ));
+    };
+
+    let cache_key = fast_embed_cache_key(&asset_id, &query, &control_plane.edge_base_url);
+    if let Some(entry) = state
+        .fast_embed_cache
+        .get(&cache_key, state.config.fast_embed_cache_ttl)
+    {
+        return Ok(fast_embed_cached_response(&state.config, entry, "HIT"));
+    }
+
+    let upstream_url = fast_embed_upstream_url(
+        control_plane_url,
+        &control_plane.edge_base_url,
+        &asset_id,
+        &query,
+    )
+    .map_err(|error| {
+        tracing::warn!(error = %error, "failed to build edge fast embed upstream URL");
+        error_response(StatusCode::BAD_REQUEST, "invalid fast embed request")
+    })?;
+    let upstream = state
+        .http
+        .get(upstream_url)
+        .header(header::ACCEPT, "text/html")
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "edge fast embed upstream request failed");
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "fast embed upstream request failed",
+            )
+        })?;
+    if !upstream.status().is_success() {
+        let status =
+            StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        return Err(error_response(
+            status,
+            "fast embed upstream returned an error",
+        ));
+    }
+
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("text/html; charset=utf-8")
+        .to_owned();
+    let set_cookie = upstream
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = upstream.bytes().await.map_err(|error| {
+        tracing::warn!(error = %error, "edge fast embed upstream body read failed");
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            "fast embed upstream body read failed",
+        )
+    })?;
+
+    let entry = FastEmbedCacheEntry {
+        body,
+        content_type,
+        set_cookie,
+        inserted_at: Instant::now(),
+    };
+    state.fast_embed_cache.insert(cache_key, entry.clone());
+    Ok(fast_embed_cached_response(&state.config, entry, "MISS"))
+}
+
+fn fast_embed_cached_response(
+    config: &EdgeConfig,
+    entry: FastEmbedCacheEntry,
+    cache_status: &'static str,
+) -> Response {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, entry.content_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-rend-fast-embed", "edge")
+        .header("x-rend-cache", cache_status)
+        .header("x-rend-edge-id", &config.edge_id)
+        .header("x-rend-region", &config.region);
+    if let Some(set_cookie) = entry.set_cookie {
+        builder = builder.header(header::SET_COOKIE, set_cookie);
+    }
+    builder
+        .body(Body::from(entry.body))
+        .expect("fast embed response headers are valid")
+}
+
+fn fast_embed_cache_key(asset_id: &str, query: &FastEmbedQuery, edge_base_url: &str) -> String {
+    format!(
+        "{asset_id}|{}|{}|{}|{}|{}|{edge_base_url}",
+        query.autoplay.as_deref().unwrap_or_default(),
+        query.controls.as_deref().unwrap_or_default(),
+        query.muted.as_deref().unwrap_or_default(),
+        query.startup.as_deref().unwrap_or_default(),
+        query.startup_mode.as_deref().unwrap_or_default()
+    )
+}
+
+fn fast_embed_upstream_url(
+    control_plane_url: &str,
+    edge_base_url: &str,
+    asset_id: &str,
+    query: &FastEmbedQuery,
+) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(control_plane_url)
+        .with_context(|| format!("invalid fast embed control-plane URL {control_plane_url}"))?;
+    url.set_path(&format!("/embed-fast/{asset_id}"));
+    url.set_query(None);
+    {
+        let mut pairs = url.query_pairs_mut();
+        if let Some(value) = query.autoplay.as_deref() {
+            pairs.append_pair("autoplay", value);
+        }
+        if let Some(value) = query.controls.as_deref() {
+            pairs.append_pair("controls", value);
+        }
+        if let Some(value) = query.muted.as_deref() {
+            pairs.append_pair("muted", value);
+        }
+        if let Some(value) = query.startup.as_deref() {
+            pairs.append_pair("startup", value);
+        }
+        if let Some(value) = query.startup_mode.as_deref() {
+            pairs.append_pair("startupMode", value);
+        }
+        pairs.append_pair("playbackBaseUrl", edge_base_url);
+    }
+    Ok(url)
+}
+
+fn error_response(status: StatusCode, message: &'static str) -> Response {
+    (
+        status,
+        Json(ErrorResponse {
+            error: message.to_owned(),
+        }),
+    )
+        .into_response()
 }
 
 fn record_cache_metrics(state: &AppState, response: &Response) {

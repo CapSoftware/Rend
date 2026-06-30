@@ -113,6 +113,7 @@ struct ApiConfig {
     aws_secret_access_key: String,
     playback_mode: PlaybackMode,
     playback_base_url: String,
+    fast_embed_playback_base_urls: Vec<String>,
     playback_cookie_domain: Option<String>,
     playback_token_issuer: PlaybackTokenIssuer,
     playback_keyring: SingleKeyring,
@@ -217,6 +218,8 @@ impl ApiConfig {
         );
         let playback_mode = PlaybackMode::from_env()?;
         let playback_base_url = playback_base_url_for_mode(playback_mode, rend_env);
+        let fast_embed_playback_base_urls =
+            fast_embed_playback_base_urls_from_env(rend_env, allow_insecure_edge_urls)?;
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
@@ -363,6 +366,7 @@ impl ApiConfig {
             aws_secret_access_key,
             playback_mode,
             playback_base_url,
+            fast_embed_playback_base_urls,
             playback_cookie_domain,
             playback_token_issuer,
             playback_keyring,
@@ -505,6 +509,62 @@ fn is_local_playback_base_url(value: &str) -> bool {
                 | "rend-edge-us-east"
                 | "rend-edge-london"
         )
+}
+
+fn fast_embed_playback_base_urls_from_env(
+    rend_env: RendEnv,
+    allow_insecure_edge_urls: bool,
+) -> Result<Vec<String>> {
+    let configured = env_string("REND_FAST_EMBED_PLAYBACK_BASE_URLS", "");
+    configured
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            normalize_fast_embed_playback_base_url(value, rend_env, allow_insecure_edge_urls)
+        })
+        .collect()
+}
+
+fn normalize_fast_embed_playback_base_url(
+    value: &str,
+    rend_env: RendEnv,
+    allow_insecure_edge_urls: bool,
+) -> Result<String> {
+    let value = normalize_base_url_value(value);
+    let parsed = reqwest::Url::parse(&value).with_context(|| {
+        format!("REND_FAST_EMBED_PLAYBACK_BASE_URLS contains invalid URL {value}")
+    })?;
+    anyhow::ensure!(
+        parsed.scheme() == "http" || parsed.scheme() == "https",
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must use http or https"
+    );
+    anyhow::ensure!(
+        parsed.host_str().is_some(),
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must include a host"
+    );
+    anyhow::ensure!(
+        !rend_env.is_strict() || parsed.scheme() == "https" || allow_insecure_edge_urls,
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must use https in {} mode",
+        rend_env.as_str()
+    );
+    anyhow::ensure!(
+        !rend_env.is_strict() || !is_local_playback_base_url(&value),
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must not point at localhost or a local service name in {} mode",
+        rend_env.as_str()
+    );
+    anyhow::ensure!(
+        parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must be origins without credentials, query, or fragment"
+    );
+    anyhow::ensure!(
+        parsed.path().is_empty() || parsed.path() == "/",
+        "REND_FAST_EMBED_PLAYBACK_BASE_URLS entries must not include a path"
+    );
+    Ok(value)
 }
 
 fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
@@ -878,6 +938,8 @@ struct FastEmbedQuery {
     autoplay: Option<String>,
     controls: Option<String>,
     muted: Option<String>,
+    #[serde(rename = "playbackBaseUrl")]
+    playback_base_url: Option<String>,
     startup: Option<String>,
     #[serde(rename = "startupMode")]
     startup_mode: Option<String>,
@@ -2335,7 +2397,10 @@ async fn api_fast_embed_inner(
     asset_id: String,
     query: FastEmbedQuery,
 ) -> Result<Response, AppError> {
-    let response = get_public_asset_playback_inner(state.clone(), asset_id).await?;
+    let playback_base_url =
+        fast_embed_playback_base_url(state.as_ref(), query.playback_base_url.as_deref())?;
+    let response =
+        get_public_asset_playback_inner(state.clone(), asset_id, &playback_base_url).await?;
     let startup =
         fast_embed_startup_mode(query.startup_mode.as_deref().or(query.startup.as_deref()));
     let selection = fast_embed_playback_selection(&response, startup)
@@ -2382,6 +2447,7 @@ async fn api_fast_embed_inner(
 async fn get_public_asset_playback_inner(
     state: Arc<AppState>,
     asset_id: String,
+    playback_base_url: &str,
 ) -> Result<PlaybackBootstrapResponse, AppError> {
     let asset = fetch_public_asset_playback_record(&state.db, &asset_id).await?;
     let artifacts = if let Some(asset) = asset.as_ref() {
@@ -2394,7 +2460,7 @@ async fn get_public_asset_playback_inner(
     playback_bootstrap_response(
         asset,
         &artifacts,
-        &state.config.playback_base_url,
+        playback_base_url,
         &state.config.playback_token_issuer,
         state.config.playback_bootstrap_prefetch_segments,
         now,
@@ -3616,6 +3682,38 @@ fn fast_embed_startup_mode(value: Option<&str>) -> &'static str {
         Some("progressive") => "progressive",
         _ => "mse",
     }
+}
+
+fn fast_embed_playback_base_url(state: &AppState, value: Option<&str>) -> Result<String, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(state.config.playback_base_url.clone());
+    };
+    let requested = normalize_fast_embed_playback_base_url(
+        value,
+        state.config.edge_registry.rend_env,
+        state.config.edge_registry.allow_insecure_edge_urls,
+    )
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
+
+    let allowed = requested == state.config.playback_base_url
+        || state
+            .config
+            .edge_registry
+            .expected_edges
+            .iter()
+            .any(|edge| edge.base_url == requested)
+        || state
+            .config
+            .fast_embed_playback_base_urls
+            .iter()
+            .any(|base_url| base_url == &requested);
+    if !allowed {
+        return Err(AppError::bad_request(
+            "playbackBaseUrl is not allowed for fast embed",
+        ));
+    }
+
+    Ok(requested)
 }
 
 fn fast_embed_playback_selection(

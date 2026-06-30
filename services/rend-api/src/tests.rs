@@ -91,6 +91,7 @@ fn test_config() -> ApiConfig {
         aws_secret_access_key: "test".to_owned(),
         playback_mode: PlaybackMode::Tigris,
         playback_base_url: "http://127.0.0.1:4000".to_owned(),
+        fast_embed_playback_base_urls: Vec::new(),
         playback_cookie_domain: None,
         playback_token_issuer: test_issuer(),
         playback_keyring: SingleKeyring::from_key(test_signing_key()),
@@ -1620,6 +1621,42 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
         !html.to_ascii_lowercase().contains("authorization"),
         "{html}"
     );
+}
+
+#[tokio::test]
+async fn api_fast_embed_playback_base_override_is_allowlisted() {
+    let mut config = test_config();
+    config.edge_registry.expected_edges = ExpectedEdges::parse(
+        "rend-edge-ams-1=amsterdam=https://ams-1.play.rend.so",
+        RendEnv::Production,
+        false,
+    )
+    .unwrap();
+    config
+        .fast_embed_playback_base_urls
+        .push("https://media.rend.so".to_owned());
+    let s3 = build_s3_client(&config);
+    let state = Arc::new(AppState {
+        config,
+        db: PgPoolOptions::new()
+            .connect_lazy("postgres://rend:rend@localhost:5432/rend")
+            .unwrap(),
+        http: reqwest::Client::new(),
+        origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
+        s3,
+        started_at: Instant::now(),
+        metrics: Arc::new(ApiMetrics::default()),
+    });
+
+    assert_eq!(
+        fast_embed_playback_base_url(state.as_ref(), Some("https://ams-1.play.rend.so")).unwrap(),
+        "https://ams-1.play.rend.so"
+    );
+    assert_eq!(
+        fast_embed_playback_base_url(state.as_ref(), Some("https://media.rend.so")).unwrap(),
+        "https://media.rend.so"
+    );
+    assert!(fast_embed_playback_base_url(state.as_ref(), Some("https://evil.example")).is_err());
 }
 
 #[tokio::test]

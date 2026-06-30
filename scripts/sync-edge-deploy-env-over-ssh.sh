@@ -161,6 +161,10 @@ value = os.environ.get("REND_EDGE_BASE_URL")
 if value is not None:
     updates["REND_EDGE_BASE_URL"] = require_http_url("REND_EDGE_BASE_URL", value)
 
+value = os.environ.get("REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL")
+if value is not None:
+    updates["REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL"] = require_http_url("REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL", value)
+
 expected = os.environ.get("REND_EXPECTED_EDGES")
 if expected is not None:
     expected = require_single_line("REND_EXPECTED_EDGES", expected)

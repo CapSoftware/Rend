@@ -363,6 +363,7 @@ jobs:
             REND_EDGE_ID="$edge_id" \
               REND_EDGE_REGION="$region" \
               REND_EDGE_BASE_URL="$public_base" \
+              REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL="$REND_API_BASE_URL" \
               REND_EXPECTED_EDGES="$expected_edges" \
               scripts/sync-edge-deploy-env-over-ssh.sh \
               --host "$host" \

@@ -50,6 +50,11 @@ struct FakeOriginRequestGuard {
     active_requests: Arc<Mutex<usize>>,
 }
 
+#[derive(Clone)]
+struct FakeFastEmbedState {
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
 #[derive(Deserialize)]
 struct FakeS3Path {
     bucket: String,
@@ -230,6 +235,50 @@ async fn spawn_fake_origin_with_metrics(
     (format!("http://{addr}"), metrics)
 }
 
+async fn fake_fast_embed(
+    State(state): State<FakeFastEmbedState>,
+    AxumPath(asset_id): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let playback_base_url = query.get("playbackBaseUrl").cloned().unwrap_or_default();
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .push(format!("{asset_id}|{playback_base_url}"));
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                header::SET_COOKIE,
+                "__rend_playback=test-token; Path=/v/; HttpOnly; SameSite=Lax",
+            ),
+        ],
+        format!(
+            r#"<!doctype html><video data-rend-player-selected="mse_inline"></video><script>const u="{playback_base_url}/v/{asset_id}/hls/360p/segment_00001.m4s";</script>"#
+        ),
+    )
+        .into_response()
+}
+
+async fn spawn_fake_fast_embed_api() -> (String, Arc<Mutex<Vec<String>>>) {
+    let state = FakeFastEmbedState {
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let requests = state.requests.clone();
+    let app = Router::new()
+        .route("/embed-fast/{asset_id}", get(fake_fast_embed))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (format!("http://{addr}"), requests)
+}
+
 impl FakeOriginObject {
     fn delay(&self) -> Duration {
         match self {
@@ -323,6 +372,8 @@ fn test_state_with_max_in_flight_and_telemetry(
         max_origin_artifact_bytes: DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
         cache_min_free_bytes: 0,
         control_plane: None,
+        fast_embed_control_plane_url: None,
+        fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
         request_timeout: Duration::from_secs(10),
         cors_allowed_origins: vec![
             "https://rend.so".to_owned(),
@@ -338,6 +389,7 @@ fn test_state_with_max_in_flight_and_telemetry(
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
         started_at: Instant::now(),
@@ -371,6 +423,8 @@ fn test_state_with_resource_limits(
         max_origin_artifact_bytes,
         cache_min_free_bytes,
         control_plane: None,
+        fast_embed_control_plane_url: None,
+        fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
         request_timeout: Duration::from_secs(10),
         cors_allowed_origins: vec![
             "https://rend.so".to_owned(),
@@ -386,6 +440,62 @@ fn test_state_with_resource_limits(
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        fast_embed_cache: Arc::new(FastEmbedCache::default()),
+        metrics: Arc::new(EdgeMetrics::default()),
+        telemetry: telemetry::TelemetryHandle::disabled(),
+        started_at: Instant::now(),
+    })
+}
+
+fn test_state_with_fast_embed(
+    cache_dir: PathBuf,
+    origin_endpoint: String,
+    fast_embed_control_plane_url: String,
+    edge_base_url: String,
+) -> Arc<AppState> {
+    let config = EdgeConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        edge_id: "test-edge".to_owned(),
+        region: "test".to_owned(),
+        cache_dir,
+        origin_health_url: format!("{origin_endpoint}/minio/health/ready"),
+        s3_endpoint: origin_endpoint,
+        s3_region: "us-east-1".to_owned(),
+        s3_bucket: "rend-local".to_owned(),
+        aws_access_key_id: "test".to_owned(),
+        aws_secret_access_key: "test".to_owned(),
+        internal_token: "test-internal-token".to_owned(),
+        playback_telemetry: telemetry::TelemetryConfig::disabled(),
+        playback_keyring: test_auth().0,
+        warm_max_artifacts: 4,
+        max_in_flight_fills: DEFAULT_MAX_IN_FLIGHT_FILLS,
+        cache_max_bytes: None,
+        max_origin_artifact_bytes: DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
+        cache_min_free_bytes: 0,
+        control_plane: Some(ControlPlaneConfig {
+            url: fast_embed_control_plane_url.clone(),
+            edge_base_url,
+            cache_max_bytes: None,
+            heartbeat_interval: Duration::from_secs(30),
+        }),
+        fast_embed_control_plane_url: Some(fast_embed_control_plane_url),
+        fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
+        request_timeout: Duration::from_secs(10),
+        cors_allowed_origins: vec![
+            "https://rend.so".to_owned(),
+            "https://www.rend.so".to_owned(),
+        ],
+    };
+    let s3 = build_s3_client(&config);
+
+    Arc::new(AppState {
+        config,
+        http: reqwest::Client::new(),
+        s3,
+        in_flight_fills: Arc::new(FillRegistry::default()),
+        active_streams: Arc::new(ActiveStreamRegistry::default()),
+        cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry: telemetry::TelemetryHandle::disabled(),
         started_at: Instant::now(),
@@ -479,6 +589,7 @@ fn tamper_last_char(value: &str) -> String {
 
 struct PlaybackTestResponse {
     status: StatusCode,
+    set_cookie: Option<String>,
     cache_control: Option<String>,
     cache_status: Option<String>,
     content_type: Option<String>,
@@ -490,6 +601,7 @@ struct PlaybackTestResponse {
     access_control_expose_headers: Option<String>,
     timing_allow_origin: Option<String>,
     vary: Option<String>,
+    fast_embed: Option<String>,
     edge_id: Option<String>,
     region: Option<String>,
     body: Vec<u8>,
@@ -570,6 +682,10 @@ async fn playback_test_response(response: Response) -> PlaybackTestResponse {
 
     PlaybackTestResponse {
         status,
+        set_cookie: headers
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
         cache_control: headers
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok())
@@ -612,6 +728,10 @@ async fn playback_test_response(response: Response) -> PlaybackTestResponse {
             .map(str::to_owned),
         vary: headers
             .get(header::VARY)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        fast_embed: headers
+            .get("x-rend-fast-embed")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         edge_id: headers
@@ -804,6 +924,80 @@ fn rejects_unsafe_asset_ids() {
             "{asset_id} should be rejected"
         );
     }
+}
+
+#[tokio::test]
+async fn edge_fast_embed_proxies_api_html_with_edge_playback_base_and_caches() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let (api_url, api_requests) = spawn_fake_fast_embed_api().await;
+    let state = test_state_with_fast_embed(
+        test_cache_dir("fast-embed"),
+        origin_endpoint,
+        api_url,
+        "https://ams-1.play.rend.so".to_owned(),
+    );
+    let app = build_app(state, Duration::from_secs(10));
+    let asset_id = "00000000-0000-0000-0000-000000000001";
+    let uri = format!("/embed-fast/{asset_id}?autoplay=1&controls=0");
+
+    let first = get_playback(app.clone(), &uri).await;
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.fast_embed.as_deref(), Some("edge"));
+    assert_eq!(first.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(first.edge_id.as_deref(), Some("test-edge"));
+    assert_eq!(first.region.as_deref(), Some("test"));
+    assert!(
+        first
+            .content_type
+            .as_deref()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    assert!(
+        first
+            .set_cookie
+            .as_deref()
+            .unwrap()
+            .starts_with("__rend_playback=")
+    );
+    let first_body = String::from_utf8(first.body).unwrap();
+    assert!(first_body.contains(
+        "https://ams-1.play.rend.so/v/00000000-0000-0000-0000-000000000001/hls/360p/segment_00001.m4s"
+    ));
+    assert!(!first_body.contains("playback_token"));
+    assert!(!first_body.to_ascii_lowercase().contains("authorization"));
+
+    let second = get_playback(app, &uri).await;
+
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.fast_embed.as_deref(), Some("edge"));
+    assert_eq!(second.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(
+        second.set_cookie.as_deref(),
+        Some("__rend_playback=test-token; Path=/v/; HttpOnly; SameSite=Lax")
+    );
+    let second_body = String::from_utf8(second.body).unwrap();
+    assert_eq!(second_body, first_body);
+    assert_eq!(
+        api_requests.lock().unwrap().as_slice(),
+        ["00000000-0000-0000-0000-000000000001|https://ams-1.play.rend.so"]
+    );
+}
+
+#[tokio::test]
+async fn edge_fast_embed_requires_configuration() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let state = test_state(test_cache_dir("fast-embed-disabled"), origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(
+        app,
+        "/embed-fast/00000000-0000-0000-0000-000000000001?autoplay=1",
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

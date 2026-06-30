@@ -16,6 +16,13 @@
 		reverse_proxy 127.0.0.1:4100
 	}
 
+	@fast_embed {
+		path_regexp fast_embed ^/embed-fast/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+	}
+	handle @fast_embed {
+		reverse_proxy 127.0.0.1:4100
+	}
+
 	handle {
 		respond 404
 	}
