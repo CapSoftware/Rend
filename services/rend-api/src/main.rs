@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering as CmpOrdering,
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     convert::Infallible,
     net::SocketAddr,
     pin::Pin,
@@ -89,6 +89,10 @@ const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
 const LOCAL_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
 const LOCAL_SITE_INTERNAL_TOKEN: &str = "local-site-internal-token";
 const PLAYBACK_COOKIE_NAME: &str = "__rend_playback";
+const ORIGIN_PLAYBACK_CACHE_MAX_ENTRIES: usize = 512;
+const ORIGIN_PLAYBACK_CACHE_MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+const ORIGIN_PLAYBACK_CACHE_MEDIA_TTL: Duration = Duration::from_secs(10 * 60);
+const ORIGIN_PLAYBACK_CACHE_MANIFEST_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct ApiConfig {
@@ -516,6 +520,7 @@ fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
             header::CONTENT_RANGE,
             header::CONTENT_TYPE,
             header::HeaderName::from_static("x-rend-origin"),
+            header::HeaderName::from_static("x-rend-cache"),
         ])
 }
 
@@ -524,9 +529,60 @@ struct AppState {
     config: ApiConfig,
     db: PgPool,
     http: reqwest::Client,
+    origin_playback_cache: Arc<OriginPlaybackCache>,
     s3: S3Client,
     started_at: Instant,
     metrics: Arc<ApiMetrics>,
+}
+
+#[derive(Clone)]
+struct OriginPlaybackCacheEntry {
+    bytes: Bytes,
+    content_type: &'static str,
+    inserted_at: Instant,
+}
+
+#[derive(Default)]
+struct OriginPlaybackCache {
+    entries: Mutex<HashMap<String, OriginPlaybackCacheEntry>>,
+}
+
+impl OriginPlaybackCache {
+    fn get(&self, key: &str, ttl: Duration) -> Option<OriginPlaybackCacheEntry> {
+        let mut entries = self.entries.lock().ok()?;
+        let entry = entries.get(key)?;
+        if entry.inserted_at.elapsed() > ttl {
+            entries.remove(key);
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    fn insert(&self, key: String, bytes: Bytes, content_type: &'static str) {
+        if bytes.len() > ORIGIN_PLAYBACK_CACHE_MAX_OBJECT_BYTES {
+            return;
+        }
+
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        if entries.len() >= ORIGIN_PLAYBACK_CACHE_MAX_ENTRIES
+            && let Some(oldest_key) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted_at)
+                .map(|(key, _)| key.clone())
+        {
+            entries.remove(&oldest_key);
+        }
+        entries.insert(
+            key,
+            OriginPlaybackCacheEntry {
+                bytes,
+                content_type,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
 }
 
 #[derive(Default)]
@@ -1106,6 +1162,7 @@ async fn main() -> Result<()> {
         config,
         db,
         http: reqwest::Client::new(),
+        origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
         s3,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
@@ -2271,6 +2328,49 @@ async fn playback_origin_artifact_inner(
             .and_then(|value| value.to_str().ok())
             .and_then(normalize_single_byte_range_header)
     };
+
+    let cache_ttl = origin_playback_cache_ttl(&artifact);
+    if let Some(ttl) = cache_ttl
+        && let Some(entry) = state.origin_playback_cache.get(&artifact.object_key, ttl)
+    {
+        return Ok(origin_playback_artifact_bytes_response(
+            artifact,
+            entry.bytes,
+            entry.content_type,
+            "HIT",
+            range_header.as_deref(),
+        ));
+    }
+
+    if cache_ttl.is_some() {
+        let object = state
+            .s3
+            .get_object()
+            .bucket(&state.config.s3_bucket)
+            .key(&artifact.object_key)
+            .send()
+            .await
+            .map_err(|error| origin_playback_artifact_error(&artifact, error))?;
+        let bytes = object
+            .body
+            .collect()
+            .await
+            .map_err(|error| origin_playback_artifact_error(&artifact, error))?
+            .into_bytes();
+        state.origin_playback_cache.insert(
+            artifact.object_key.clone(),
+            bytes.clone(),
+            artifact.content_type,
+        );
+        let content_type = artifact.content_type;
+        return Ok(origin_playback_artifact_bytes_response(
+            artifact,
+            bytes,
+            content_type,
+            "MISS",
+            range_header.as_deref(),
+        ));
+    }
 
     let mut get_object = state
         .s3
@@ -4508,6 +4608,161 @@ fn origin_playback_artifact_error(
     AppError::bad_gateway("artifact fetch failed")
 }
 
+fn origin_playback_cache_ttl(artifact: &OriginPlaybackArtifact) -> Option<Duration> {
+    if artifact.content_type == "application/vnd.apple.mpegurl" {
+        return Some(ORIGIN_PLAYBACK_CACHE_MANIFEST_TTL);
+    }
+    if artifact.artifact_path == "opener.mp4"
+        || is_hls_init_artifact_path(&artifact.artifact_path)
+        || matches!(hls_segment_index(&artifact.artifact_path), Some(index) if index <= 2)
+    {
+        return Some(ORIGIN_PLAYBACK_CACHE_MEDIA_TTL);
+    }
+
+    None
+}
+
+fn cached_byte_range(
+    range_header: &str,
+    content_length: u64,
+) -> std::result::Result<Option<(u64, u64)>, ()> {
+    let range_spec = range_header.trim().strip_prefix("bytes=").ok_or(())?.trim();
+    let (start, end) = range_spec.split_once('-').ok_or(())?;
+    let start = start.trim();
+    let end = end.trim();
+    if content_length == 0 || (start.is_empty() && end.is_empty()) {
+        return Err(());
+    }
+
+    match (start.is_empty(), end.is_empty()) {
+        (false, false) => {
+            let start = start.parse::<u64>().map_err(|_| ())?;
+            let end = end.parse::<u64>().map_err(|_| ())?;
+            if start >= content_length || start > end {
+                return Err(());
+            }
+            Ok(Some((start, end.min(content_length - 1))))
+        }
+        (false, true) => {
+            let start = start.parse::<u64>().map_err(|_| ())?;
+            if start >= content_length {
+                return Err(());
+            }
+            Ok(Some((start, content_length - 1)))
+        }
+        (true, false) => {
+            let suffix_length = end.parse::<u64>().map_err(|_| ())?;
+            if suffix_length == 0 {
+                return Err(());
+            }
+            let start = content_length.saturating_sub(suffix_length);
+            Ok(Some((start, content_length - 1)))
+        }
+        (true, true) => Err(()),
+    }
+}
+
+fn origin_playback_artifact_bytes_response(
+    artifact: OriginPlaybackArtifact,
+    bytes: Bytes,
+    content_type: &'static str,
+    cache_status: &'static str,
+    range_header: Option<&str>,
+) -> Response {
+    let content_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if let Some(range_header) = range_header {
+        return match cached_byte_range(range_header, content_length) {
+            Ok(Some((start, end))) => {
+                let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
+                let end_usize = usize::try_from(end).unwrap_or(usize::MAX);
+                let body = bytes.slice(start_usize..end_usize.saturating_add(1));
+                origin_playback_artifact_static_response(
+                    artifact,
+                    body,
+                    content_type,
+                    cache_status,
+                    StatusCode::PARTIAL_CONTENT,
+                    Some(end - start + 1),
+                    Some(format!("bytes {start}-{end}/{content_length}")),
+                )
+            }
+            Ok(None) => origin_playback_artifact_static_response(
+                artifact,
+                bytes,
+                content_type,
+                cache_status,
+                StatusCode::OK,
+                Some(content_length),
+                None,
+            ),
+            Err(()) => origin_playback_artifact_static_response(
+                artifact,
+                Bytes::new(),
+                content_type,
+                cache_status,
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some(0),
+                Some(format!("bytes */{content_length}")),
+            ),
+        };
+    }
+
+    origin_playback_artifact_static_response(
+        artifact,
+        bytes,
+        content_type,
+        cache_status,
+        StatusCode::OK,
+        Some(content_length),
+        None,
+    )
+}
+
+fn origin_playback_artifact_static_response(
+    artifact: OriginPlaybackArtifact,
+    body: Bytes,
+    content_type: &'static str,
+    cache_status: &'static str,
+    status: StatusCode,
+    content_length: Option<u64>,
+    content_range: Option<String>,
+) -> Response {
+    let mut builder =
+        origin_playback_artifact_response_builder(artifact, content_type, status, cache_status);
+    if let Some(content_length) = content_length {
+        builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());
+    }
+    if let Some(content_range) = content_range {
+        builder = builder.header(header::CONTENT_RANGE, content_range);
+    }
+
+    builder
+        .body(Body::from(body))
+        .expect("origin artifact response headers are valid")
+}
+
+fn origin_playback_artifact_response_builder(
+    artifact: OriginPlaybackArtifact,
+    content_type: &'static str,
+    status: StatusCode,
+    cache_status: &'static str,
+) -> axum::http::response::Builder {
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CACHE_CONTROL,
+            playback_artifact_cache_control(content_type),
+        )
+        .header("timing-allow-origin", "https://www.rend.so")
+        .header("x-rend-origin", "tigris")
+        .header("x-rend-cache", cache_status);
+    if artifact.content_type != "application/vnd.apple.mpegurl" {
+        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
+    builder
+}
+
 fn origin_playback_artifact_response(
     artifact: OriginPlaybackArtifact,
     object: aws_sdk_s3::operation::get_object::GetObjectOutput,
@@ -4521,18 +4776,12 @@ fn origin_playback_artifact_response(
     } else {
         StatusCode::OK
     };
-    let mut builder = Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, artifact.content_type)
-        .header(
-            header::CACHE_CONTROL,
-            playback_artifact_cache_control(artifact.content_type),
-        )
-        .header("timing-allow-origin", "https://www.rend.so")
-        .header("x-rend-origin", "tigris");
-    if artifact.content_type != "application/vnd.apple.mpegurl" {
-        builder = builder.header(header::ACCEPT_RANGES, "bytes");
-    }
+    let mut builder = origin_playback_artifact_response_builder(
+        artifact.clone(),
+        artifact.content_type,
+        status,
+        "BYPASS",
+    );
     if let Some(content_length) = content_length {
         builder = builder.header(header::CONTENT_LENGTH, content_length.to_string());
     }

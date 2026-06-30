@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   initialPlaybackState,
   initialSourceSelection,
-  playbackEngineForUserAgent,
   startupPreloadHints,
   watchHeartbeatDelta,
 } from "./player-engine.ts";
@@ -107,44 +106,4 @@ test("explicit MSE playback still allows opener startup when requested", () => {
     artifactPath: "opener.mp4",
     url: "https://ash-1.play.rend.so/v/asset/opener.mp4",
   });
-});
-
-test("default playback engine uses MSE for Chromium-family desktop browsers", () => {
-  assert.equal(
-    playbackEngineForUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "mse"
-  );
-  assert.equal(
-    playbackEngineForUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Edg/126.0.0.0 Safari/537.36"
-    ),
-    "mse"
-  );
-  assert.equal(
-    playbackEngineForUserAgent(
-      "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
-    ),
-    "mse"
-  );
-});
-
-test("default playback engine keeps Safari and iOS on native-capable auto", () => {
-  assert.equal(
-    playbackEngineForUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
-        "(KHTML, like Gecko) Version/17.5 Safari/605.1.15"
-    ),
-    "auto"
-  );
-  assert.equal(
-    playbackEngineForUserAgent(
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 " +
-        "(KHTML, like Gecko) CriOS/126.0.0.0 Mobile/15E148 Safari/604.1"
-    ),
-    "auto"
-  );
 });

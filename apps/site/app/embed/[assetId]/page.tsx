@@ -13,7 +13,6 @@ import {
   initialSourceSelection,
   instantPlaybackScript,
   playbackStateMessage,
-  playbackEngineForUserAgent,
   readyBootstrap,
   startupPreloadHints,
   type PlaybackEngine,
@@ -83,9 +82,9 @@ function playerStartupMode(query: Query): StartupMode {
   return requested === "opener" ? "opener" : "hls";
 }
 
-function requestedPlaybackEngine(query: Query): PlaybackEngine | null {
+function playerPlaybackEngine(query: Query): PlaybackEngine {
   const requested = firstValue(query.playbackEngine) ?? firstValue(query.engine);
-  return requested === "mse" || requested === "native" ? requested : null;
+  return requested === "mse" || requested === "native" ? requested : "auto";
 }
 
 function accentColor(value: string | string[] | undefined) {
@@ -130,8 +129,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
   const accent = accentColor(query.accent ?? query.color);
   const startTime = startTimeSeconds(query.t ?? query.start);
   const startupMode = playerStartupMode(query);
-  const playbackEngine =
-    requestedPlaybackEngine(query) ?? playbackEngineForUserAgent(headerStore.get("user-agent"));
+  const playbackEngine = playerPlaybackEngine(query);
 
   const ready = readyBootstrap(initialBootstrap);
   const selection = initialSourceSelection(initialBootstrap, startupMode, playbackEngine);

@@ -7,10 +7,7 @@ import {
   safeWatchBootstrapMs,
   type WatchPlaybackBootstrapResponse,
 } from "../../../lib/watch-bootstrap.ts";
-import {
-  playbackEngineForUserAgent,
-  startupPreloadHints,
-} from "../../../lib/player-engine.ts";
+import { startupPreloadHints } from "../../../lib/player-engine.ts";
 import { WatchInstantPlayer } from "./WatchInstantPlayer";
 
 type WatchPageProps = {
@@ -76,15 +73,12 @@ function playerStartupMode(
 
 function playerPlaybackEngine(
   playbackEngine: string | string[] | undefined,
-  engine: string | string[] | undefined,
-  userAgent: string | null
+  engine: string | string[] | undefined
 ) {
   const requested = Array.isArray(playbackEngine)
     ? playbackEngine[0]
     : playbackEngine ?? (Array.isArray(engine) ? engine[0] : engine);
-  return requested === "mse" || requested === "native"
-    ? requested
-    : playbackEngineForUserAgent(userAgent);
+  return requested === "mse" || requested === "native" ? requested : "auto";
 }
 
 function autoplayEnabled(value: string | string[] | undefined) {
@@ -143,11 +137,7 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
           bootstrapUrl={playerBootstrapUrl(assetId, query.playbackBaseUrl)}
           initialBootstrap={initialBootstrap}
           initialBootstrapMs={initialBootstrapMs}
-          playbackEngine={playerPlaybackEngine(
-            query.playbackEngine,
-            query.engine,
-            headerStore.get("user-agent")
-          )}
+          playbackEngine={playerPlaybackEngine(query.playbackEngine, query.engine)}
           startupMode={startupMode}
           telemetryAppVersion={telemetryAppVersion()}
           telemetryEnabled={telemetryEnabled(query.telemetry)}

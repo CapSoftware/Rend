@@ -158,6 +158,7 @@ fn test_state() -> Arc<AppState> {
         config,
         db,
         http: reqwest::Client::new(),
+        origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
         s3,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
@@ -644,8 +645,77 @@ async fn cors_preflight_allows_dashboard_origin_for_direct_tigris_playback() {
         Some(&HeaderValue::from_static("https://www.rend.so"))
     );
     assert_eq!(
-        response.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
         Some(&HeaderValue::from_static("true"))
+    );
+}
+
+#[tokio::test]
+async fn origin_playback_cache_response_serves_byte_ranges() {
+    let artifact = OriginPlaybackArtifact {
+        asset_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        artifact_path: "hls/360p/segment_00000.m4s".to_owned(),
+        object_key: "videos/00000000-0000-0000-0000-000000000001/hls/360p/segment_00000.m4s"
+            .to_owned(),
+        content_type: "video/mp4",
+    };
+    let response = origin_playback_artifact_bytes_response(
+        artifact,
+        Bytes::from_static(b"0123456789"),
+        "video/mp4",
+        "HIT",
+        Some("bytes=2-5"),
+    );
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers().get("x-rend-cache"),
+        Some(&HeaderValue::from_static("HIT"))
+    );
+    assert_eq!(
+        response.headers().get(header::CONTENT_RANGE),
+        Some(&HeaderValue::from_static("bytes 2-5/10"))
+    );
+    assert_eq!(
+        response.headers().get(header::CONTENT_LENGTH),
+        Some(&HeaderValue::from_static("4"))
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"2345");
+}
+
+#[test]
+fn origin_playback_cache_ttl_is_limited_to_startup_artifacts() {
+    let startup_segment = OriginPlaybackArtifact {
+        asset_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        artifact_path: "hls/360p/segment_00002.m4s".to_owned(),
+        object_key: "videos/00000000-0000-0000-0000-000000000001/hls/360p/segment_00002.m4s"
+            .to_owned(),
+        content_type: "video/mp4",
+    };
+    let later_segment = OriginPlaybackArtifact {
+        artifact_path: "hls/360p/segment_00003.m4s".to_owned(),
+        object_key: "videos/00000000-0000-0000-0000-000000000001/hls/360p/segment_00003.m4s"
+            .to_owned(),
+        ..startup_segment.clone()
+    };
+    let manifest = OriginPlaybackArtifact {
+        artifact_path: "hls/master.m3u8".to_owned(),
+        object_key: "videos/00000000-0000-0000-0000-000000000001/hls/master.m3u8".to_owned(),
+        content_type: "application/vnd.apple.mpegurl",
+        ..startup_segment.clone()
+    };
+
+    assert_eq!(
+        origin_playback_cache_ttl(&startup_segment),
+        Some(ORIGIN_PLAYBACK_CACHE_MEDIA_TTL)
+    );
+    assert_eq!(origin_playback_cache_ttl(&later_segment), None);
+    assert_eq!(
+        origin_playback_cache_ttl(&manifest),
+        Some(ORIGIN_PLAYBACK_CACHE_MANIFEST_TTL)
     );
 }
 
@@ -2010,6 +2080,7 @@ async fn upload_endpoint_rejects_content_length_over_limit_before_db() {
         config,
         db,
         http: reqwest::Client::new(),
+        origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
         s3,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
