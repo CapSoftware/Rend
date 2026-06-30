@@ -146,11 +146,42 @@ function playbackMode(env: EnvLike) {
   return mode === "edge" ? "edge" : "tigris";
 }
 
+function envEnabled(env: EnvLike, name: string, fallback = true) {
+  const value = envString(env, name).toLowerCase();
+  if (!value) return fallback;
+  return !["0", "false", "no", "off"].includes(value);
+}
+
+function isProductionLike(env: EnvLike) {
+  const profile = (
+    envString(env, "REND_ENV_PROFILE") ||
+    envString(env, "REND_ENV") ||
+    envString(env, "NODE_ENV")
+  ).toLowerCase();
+  return profile === "production" || profile === "prod";
+}
+
+function tigrisPlaybackBaseUrlForRequest(request: Request, env: EnvLike) {
+  const configured =
+    envString(env, "REND_TIGRIS_PLAYBACK_BASE_URL") ||
+    envString(env, "REND_PUBLIC_API_BASE_URL") ||
+    envString(env, "REND_API_BASE_URL");
+  if (configured) return normalizePlaybackBaseUrl(configured);
+
+  const host = new URL(request.url).hostname.toLowerCase();
+  if (host === "rend.so" || host === "www.rend.so" || isProductionLike(env)) {
+    return "https://api.rend.so";
+  }
+
+  return "http://127.0.0.1:4000";
+}
+
 export type PlaybackBaseUrlDecision = {
   playbackBaseUrl: string | null;
   source:
     | "manual_override"
-    | "tigris_origin"
+    | "tigris_direct"
+    | "tigris_origin_proxy"
     | "configured_edge"
     | "shared_metal"
     | "configured_edge_fallback"
@@ -182,7 +213,13 @@ export function playbackBaseUrlDecisionForRequest(
     env,
   );
   if (playbackMode(env) !== "edge") {
-    return { playbackBaseUrl: null, source: "tigris_origin" };
+    if (!envEnabled(env, "REND_PLAYER_TIGRIS_DIRECT", true)) {
+      return { playbackBaseUrl: null, source: "tigris_origin_proxy" };
+    }
+    return {
+      playbackBaseUrl: tigrisPlaybackBaseUrlForRequest(request, env),
+      source: "tigris_direct",
+    };
   }
 
   if (configuredEdge && envUsesConfiguredEdgeOverride(env)) {

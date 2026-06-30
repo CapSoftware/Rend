@@ -622,6 +622,34 @@ async fn cors_preflight_allows_dashboard_origin_for_direct_uploads() {
 }
 
 #[tokio::test]
+async fn cors_preflight_allows_dashboard_origin_for_direct_tigris_playback() {
+    let app = build_app(test_state(), Duration::from_secs(10));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v/asset-123/hls/master.m3u8")
+                .header(header::ORIGIN, "https://www.rend.so")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "range")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("https://www.rend.so"))
+    );
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+        Some(&HeaderValue::from_static("true"))
+    );
+}
+
+#[tokio::test]
 async fn local_dev_key_auth_uses_seeded_local_org() {
     let state = test_state();
     let mut headers = HeaderMap::new();

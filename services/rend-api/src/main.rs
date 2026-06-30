@@ -1288,7 +1288,18 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .nest("/internal/site", site_internal_routes)
         .nest("/internal/edges", edge_routes)
         .nest("/internal/operator", operator_routes)
-        .nest("/internal/telemetry", telemetry_routes)
+        .nest("/internal/telemetry", telemetry_routes);
+
+    if playback_mode == PlaybackMode::Tigris {
+        // This route validates Rend playback cookies/tokens and streams private
+        // origin objects without exposing object-store signed URLs.
+        app = app.route(
+            "/v/{asset_id}/{*artifact_path}",
+            get(playback_origin_artifact).route_layer(DefaultBodyLimit::disable()),
+        );
+    }
+
+    app = app
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
@@ -1303,16 +1314,6 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
             request_timeout,
         ))
         .layer(cors);
-
-    if playback_mode == PlaybackMode::Tigris {
-        // Tigris mode intentionally keeps bare-metal playback dormant. This
-        // route validates Rend playback cookies/tokens and streams private
-        // origin objects without exposing object-store signed URLs.
-        app = app.route(
-            "/v/{asset_id}/{*artifact_path}",
-            get(playback_origin_artifact).route_layer(DefaultBodyLimit::disable()),
-        );
-    }
 
     app.with_state(state)
 }
@@ -4527,6 +4528,7 @@ fn origin_playback_artifact_response(
             header::CACHE_CONTROL,
             playback_artifact_cache_control(artifact.content_type),
         )
+        .header("timing-allow-origin", "https://www.rend.so")
         .header("x-rend-origin", "tigris");
     if artifact.content_type != "application/vnd.apple.mpegurl" {
         builder = builder.header(header::ACCEPT_RANGES, "bytes");

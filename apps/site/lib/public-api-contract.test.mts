@@ -187,39 +187,40 @@ test("site playback bootstrap response is tokenless and matches the OpenAPI sche
   assert.equal(/"playback_token"\s*:/.test(serialized), false);
 });
 
-test("site playback bootstrap can emit direct edge URLs without token leakage", () => {
+test("site playback bootstrap can emit direct Tigris URLs without token leakage", () => {
   const upstreamPlayback = {
     asset_id: ASSET_ID,
     source_state: "uploaded",
     playable_state: "hls_ready",
-    playback_url: `https://edge.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
+    playback_url: `https://api.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
     playback_content_type: "application/vnd.apple.mpegurl",
     playback_token_expires_at: 1_781_432_100,
     ttl_seconds: 900,
-    manifest_url: `https://edge.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
+    manifest_url: `https://api.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
     manifest_content_type: "application/vnd.apple.mpegurl",
     playback_token: "must-not-appear",
     prefetch_hints: [
       {
         artifact_path: "hls/480p/index.m3u8",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/480p/index.m3u8`,
+        url: `https://api.rend.so/v/${ASSET_ID}/hls/480p/index.m3u8`,
         content_type: "application/vnd.apple.mpegurl",
       },
       {
         artifact_path: "hls/480p/segment_00000.m4s",
-        url: `https://edge.rend.so/v/${ASSET_ID}/hls/480p/segment_00000.m4s`,
+        url: `https://api.rend.so/v/${ASSET_ID}/hls/480p/segment_00000.m4s`,
         content_type: "video/mp4",
       },
     ],
   } as Parameters<typeof safePlaybackBootstrapResponse>[1] & { playback_token: string };
 
   const response = jsonRoundTrip(
-    safePlaybackBootstrapResponse(ASSET_ID, upstreamPlayback, "https://ash-1.play.rend.so")
+    safePlaybackBootstrapResponse(ASSET_ID, upstreamPlayback, "https://api.rend.so")
   );
 
   assertMatchesResponseSchema(spec, "/api/player/{assetId}", "get", 200, response);
   const serialized = JSON.stringify(response);
-  assert.equal(response?.playback_url, `https://ash-1.play.rend.so/v/${ASSET_ID}/hls/master.m3u8`);
+  assert.equal(response?.playback_url, `https://api.rend.so/v/${ASSET_ID}/hls/master.m3u8`);
+  assert.equal(response?.prefetch_hints[0]?.url, `https://api.rend.so/v/${ASSET_ID}/hls/480p/index.m3u8`);
   assert.equal(serialized.includes("/api/player/"), false);
   assert.equal(serialized.includes("must-not-appear"), false);
   assert.equal(serialized.includes("?token="), false);

@@ -73,7 +73,7 @@ test("configured edge map remains available for local and explicit overrides", (
   );
 });
 
-test("playback base URL defaults to the Tigris origin proxy in production", () => {
+test("playback base URL defaults to direct Tigris origin in production", () => {
   const request = new Request("https://www.rend.so/api/player/asset", {
     headers: {
       "x-vercel-ip-latitude": "51.5072",
@@ -85,18 +85,41 @@ test("playback base URL defaults to the Tigris origin proxy in production", () =
   assert.equal(
     playbackBaseUrlForRequest(request, {
       REND_ENV_PROFILE: "production",
+      REND_API_BASE_URL: "https://api.rend.so",
       REND_PLAYER_EDGE_BASE_URLS:
         "DEFAULT=https://wrong-edge.rend.so,EU=https://wrong-edge.rend.so",
+    }),
+    "https://api.rend.so",
+  );
+  assert.equal(
+    playbackBaseUrlDecisionForRequest(request, {
+      REND_ENV_PROFILE: "production",
+      REND_API_BASE_URL: "https://api.rend.so",
+      REND_PLAYER_EDGE_BASE_URLS:
+        "DEFAULT=https://wrong-edge.rend.so,EU=https://wrong-edge.rend.so",
+    }).source,
+    "tigris_direct",
+  );
+});
+
+test("playback base URL can temporarily fall back to the Tigris origin proxy", () => {
+  const request = new Request("https://www.rend.so/api/player/asset");
+
+  assert.equal(
+    playbackBaseUrlForRequest(request, {
+      REND_ENV_PROFILE: "production",
+      REND_API_BASE_URL: "https://api.rend.so",
+      REND_PLAYER_TIGRIS_DIRECT: "0",
     }),
     null,
   );
   assert.equal(
     playbackBaseUrlDecisionForRequest(request, {
       REND_ENV_PROFILE: "production",
-      REND_PLAYER_EDGE_BASE_URLS:
-        "DEFAULT=https://wrong-edge.rend.so,EU=https://wrong-edge.rend.so",
+      REND_API_BASE_URL: "https://api.rend.so",
+      REND_PLAYER_TIGRIS_DIRECT: "0",
     }).source,
-    "tigris_origin",
+    "tigris_origin_proxy",
   );
 });
 
