@@ -205,7 +205,7 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "Why did Rend serve 1080p and Mux serve 720p?",
-        a: "The benchmark uses Rend's fastest real production setup for this asset: native HLS from the /watch page. Each player then selected its own rendition, so Rend served full 1920 by 1080 while Mux selected 1280 by 720.",
+        a: "The benchmark uses Rend's production setup for this asset: native HLS from the embed player. Each player then selected its own rendition, so Rend served full 1920 by 1080 while Mux selected 1280 by 720.",
       },
       {
         q: "Can I reproduce these numbers?",

@@ -23,12 +23,12 @@ const publicRoot = path.join(
 );
 
 const defaultProviderUrls = {
-  rend: "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+  rend: "https://www.rend.so/embed/c12881f9-8b01-4675-b66c-c4f25de3b702",
   mux: "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk",
   cloudfront: "https://v.cap.so/mezzanine.mp4",
   rend_edge_static: "http://127.0.0.1:8125/index.html",
   rend_prod_embed:
-    "https://www.rend.so/embed/83971e6c-4fb1-4620-9bfd-6fe71b8b672f",
+    "https://www.rend.so/embed/c12881f9-8b01-4675-b66c-c4f25de3b702",
   rend_tigris_hls: "http://127.0.0.1:8125/rend-tigris-hls/index.html",
 };
 

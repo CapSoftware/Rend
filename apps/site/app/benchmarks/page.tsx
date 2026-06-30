@@ -47,18 +47,20 @@ const durationSeconds = Math.round(
 const ms = (n: number) => `${Math.round(n).toLocaleString("en-US")} ms`;
 const resOf = (rendition: string) =>
   `${rendition.split("x")[1]}p (${rendition.replace("x", " × ")})`;
-const pctSooner = Math.round(
-  (1 -
-    rend.metrics.timeToFirstFrameMs.median /
-      mux.metrics.timeToFirstFrameMs.median) *
-    100,
-);
-const europePctSooner = Math.round(
-  (1 -
-    europeRend.metrics.timeToFirstFrameMs.median /
-      europeMux.metrics.timeToFirstFrameMs.median) *
-    100,
-);
+const firstFrameComparison = (
+  region: string,
+  rendMedian: number,
+  muxMedian: number,
+) => {
+  const gap = ms(Math.abs(rendMedian - muxMedian));
+  if (rendMedian < muxMedian) {
+    return `In the ${region} run, Rend reached the first frame about ${gap} before Mux on median.`;
+  }
+  if (muxMedian < rendMedian) {
+    return `In the ${region} run, Mux reached the first frame about ${gap} before Rend on median.`;
+  }
+  return `In the ${region} run, both providers reached the first frame at the same median time.`;
+};
 const browserLabel = `${latest.environment.browser.automation} ${latest.environment.browser.version}`;
 const europeBrowserLabel = `${europe.environment.browser.automation} ${europe.environment.browser.version}`;
 
@@ -129,20 +131,20 @@ const spread = [
 ];
 
 const method = [
-  `The same source video, ${durationSeconds} seconds long, uploaded to both Rend and Mux.`,
+  `The benchmark test video is ${durationSeconds} seconds long.`,
   `${latest.run.sampleCountTarget} samples per provider in each region, with provider order randomized each round.`,
   "A fresh browser context for every sample: no cookies, no stored state, and the cache disabled.",
   `A ${Math.round(latest.run.watchWindowMs / 1000)} second watch window per sample, timing the first painted frame and counting any stalls.`,
   `${browserLabel}, run on a Daytona sandbox with the region set to US for the US results.`,
   `${europeBrowserLabel}, run on a Daytona sandbox with the region set to Europe for the Europe results.`,
-  "Rend is measured on the production native-HLS /watch path with playback assigned from the initial page.",
+  "Rend is measured on the production native-HLS embed path with playback assigned from the initial page.",
 ];
 
 const caveats = [
   "This is one video, one region, one browser profile, and one run. It is not a universal claim about either service.",
   "We did not purge or warm any CDN. Mux serves from its own network and Rend from ours, each in whatever cache state it happened to be in.",
   "Encoders, packaging and player implementations differ between the two providers.",
-  "This is the fastest real Rend playback path, not a forced-resolution run. Rend selected 1080p and Mux selected 720p in the benchmark viewport.",
+  "This is Rend's production playback path, not a forced-resolution run. Rend selected 1080p and Mux selected 720p in the benchmark viewport.",
   "The Europe run used a Daytona sandbox requested in Europe; Daytona reported the sandbox target as eu.",
   "Source file identity is not independently verified beyond matching duration and observable metadata.",
 ];
@@ -211,9 +213,10 @@ export default function BenchmarksPage() {
           </h2>
           <p className="mt-2 max-w-[680px] text-[15px] leading-[1.6] text-muted">
             Time to first frame, median of {latest.run.sampleCountTarget}{" "}
-            samples per provider. The US run was on {runDate} in a Daytona
-            sandbox. The Europe run was on {europeRunDate} in a Daytona Europe
-            sandbox. Both use Rend&apos;s production playback path.
+            samples per provider. The US run was on {runDate}{" "}
+            in a Daytona sandbox. The Europe run was on {europeRunDate}{" "}
+            in a Daytona Europe sandbox. Both use Rend&apos;s production
+            playback path.
           </p>
 
           <div className="mt-6 max-w-[860px] overflow-x-auto">
@@ -269,12 +272,20 @@ export default function BenchmarksPage() {
           </div>
 
           <p className="mt-5 max-w-[680px] text-[14px] leading-[1.6] text-muted">
-            Same source video ({durationSeconds} seconds). Rend selected native
-            HLS at {resOf(rend.observed.selectedRendition)} while Mux selected{" "}
-            {resOf(mux.observed.selectedRendition)} in both regional runs. In
-            the US run, Rend reached the first frame about {pctSooner}% sooner
-            on median. In the Europe run, Rend reached it about{" "}
-            {europePctSooner}% sooner on median. Rend had zero stalls and zero
+            Benchmark test video: {durationSeconds} seconds. Rend selected
+            native HLS at {resOf(rend.observed.selectedRendition)} while Mux selected{" "}
+            {resOf(mux.observed.selectedRendition)} in both regional runs.{" "}
+            {firstFrameComparison(
+              "US",
+              rend.metrics.timeToFirstFrameMs.median,
+              mux.metrics.timeToFirstFrameMs.median,
+            )}{" "}
+            {firstFrameComparison(
+              "Europe",
+              europeRend.metrics.timeToFirstFrameMs.median,
+              europeMux.metrics.timeToFirstFrameMs.median,
+            )}{" "}
+            Both providers had zero stalls in both regions. Rend reported zero
             browser network errors in both regions.
           </p>
 

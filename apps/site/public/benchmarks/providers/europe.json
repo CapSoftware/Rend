@@ -1,15 +1,15 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-17T09:04:06.230Z",
+  "generatedAt": "2026-06-30T16:36:16.153Z",
   "run": {
-    "id": "20260617T085824Z",
+    "id": "20260630T163034Z",
     "status": "completed",
-    "startedAt": "2026-06-17T08:58:24.811Z",
-    "finishedAt": "2026-06-17T09:04:06.229Z",
+    "startedAt": "2026-06-30T16:30:34.879Z",
+    "finishedAt": "2026-06-30T16:36:16.152Z",
     "region": "daytona-eu",
     "regionLabel": "Daytona eu (eu requested)",
     "runnerKind": "daytona",
-    "runnerLabel": "56a11abe-34ca-48c3-ac94-bd19b2d4d4f2",
+    "runnerLabel": "a7276bca-e840-4429-9799-d80c4f8579d7",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
@@ -32,14 +32,14 @@
         "rend"
       ],
       [
-        "mux",
-        "rend"
+        "rend",
+        "mux"
       ]
     ]
   },
   "source": {
     "urls": {
-      "rend": "https://www.rend.so/watch/83971e6c-4fb1-4620-9bfd-6fe71b8b672f?autoplay=1",
+      "rend": "https://www.rend.so/embed/<asset-id>",
       "mux": "https://player.mux.com/A6oZoUWVZjOIVZB6XnBMLagYnXE6xhDhp8Hcyky018hk"
     },
     "verification": {
@@ -75,14 +75,15 @@
       "One video does not represent every workload, codec ladder, region, or viewer device.",
       "The harness does not purge or manipulate Mux CDN caches.",
       "The harness does not warm only Rend during direct comparisons.",
-      "Selected resolutions and rendition ladders may differ; current Rend media generation emits an ABR ladder using the supported 720p/1080p/2k/4k billing tiers.",
+      "Selected resolutions and rendition ladders may differ; current Rend media generation emits a startup-oriented ABR ladder from 360p through the highest applicable tier.",
+      "Direct object-storage HLS pages use Rend-generated HLS artifacts but bypass Rend's edge cache, site route, and production player shell.",
       "Resource timing is summarized only as aggregate counts because detailed URLs can expose provider internals."
     ]
   },
   "environment": {
     "browser": {
       "automation": "Playwright Chromium",
-      "requestedChannel": "chrome",
+      "requestedChannel": null,
       "version": "149.0.7827.55"
     },
     "device": {
@@ -102,7 +103,7 @@
     "runner": {
       "platform": "linux",
       "arch": "x64",
-      "osRelease": "6.8.0-63-generic",
+      "osRelease": "6.17.0-1007-oracle",
       "node": "v24.16.0",
       "bun": null
     }
@@ -111,7 +112,7 @@
     {
       "id": "rend",
       "name": "Rend",
-      "url": "https://www.rend.so/watch/83971e6c-4fb1-4620-9bfd-6fe71b8b672f?autoplay=1",
+      "url": "https://www.rend.so/embed/<asset-id>",
       "playerHost": "www.rend.so"
     },
     {
@@ -137,6 +138,7 @@
     "metricLabels": {
       "timeToPlayerReadyMs": "Navigation to player ready",
       "timeToMetadataMs": "Time to metadata",
+      "timeToLoadedDataMs": "Time to first loaded frame",
       "timeToCanplayMs": "Time to canplay",
       "timeToFirstFrameMs": "Time to first frame",
       "totalDurationMs": "Total test duration",
@@ -152,43 +154,51 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 703.3,
-            "median": 737.2,
-            "p75": 774.8,
-            "p95": 1127.7,
-            "max": 1215.9
+            "min": 880.9,
+            "median": 1021.6,
+            "p75": 1032.3,
+            "p95": 2312.6,
+            "max": 2632.7
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 658.2,
-            "median": 692.6,
-            "p75": 727,
-            "p95": 1074.8,
-            "max": 1161.7
+            "min": 570.7,
+            "median": 703.9,
+            "p75": 716,
+            "p95": 1531.3,
+            "max": 1735.1
+          },
+          "timeToLoadedDataMs": {
+            "count": 5,
+            "min": 571.4,
+            "median": 704.3,
+            "p75": 716.3,
+            "p95": 1531.7,
+            "max": 1735.5
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 661,
-            "median": 694.9,
-            "p75": 729.1,
-            "p95": 1077,
-            "max": 1164
+            "min": 571.8,
+            "median": 704.8,
+            "p75": 716.8,
+            "p95": 1531.8,
+            "max": 1735.5
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 703.3,
-            "median": 737.2,
-            "p75": 774.8,
-            "p95": 1127.7,
-            "max": 1215.9
+            "min": 880.9,
+            "median": 1021.6,
+            "p75": 1032.3,
+            "p95": 2312.6,
+            "max": 2632.7
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30676.2,
-            "median": 30710.9,
-            "p75": 30741.4,
-            "p95": 31093.3,
-            "max": 31181.3
+            "min": 30581.7,
+            "median": 30714.2,
+            "p75": 30726.5,
+            "p95": 31646.1,
+            "max": 31876
           },
           "stallCount": {
             "count": 5,
@@ -217,7 +227,7 @@
             "max": 75.2
           },
           "naturalResolution": "1920x1080",
-          "renderedResolution": "1078x606",
+          "renderedResolution": "1280x720",
           "playbackMode": "hls",
           "selectedRendition": "1920x1080"
         },
@@ -231,43 +241,51 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 764.8,
-            "median": 790.8,
-            "p75": 1891.8,
-            "p95": 1982.2,
-            "max": 2004.8
+            "min": 595.8,
+            "median": 996.8,
+            "p75": 1710,
+            "p95": 1838.5,
+            "max": 1870.6
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 742,
-            "median": 772.4,
-            "p75": 1882.6,
-            "p95": 1929.5,
-            "max": 1941.2
+            "min": 568.7,
+            "median": 988.8,
+            "p75": 1704.6,
+            "p95": 1788.8,
+            "max": 1809.9
+          },
+          "timeToLoadedDataMs": {
+            "count": 5,
+            "min": 579,
+            "median": 999.3,
+            "p75": 1715.7,
+            "p95": 1831.2,
+            "max": 1860.1
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 773.5,
-            "median": 806.7,
-            "p75": 1895.7,
-            "p95": 1988.2,
-            "max": 2011.3
+            "min": 579,
+            "median": 999.4,
+            "p75": 1715.9,
+            "p95": 1831.3,
+            "max": 1860.1
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 764.8,
-            "median": 790.8,
-            "p75": 1891.8,
-            "p95": 1982.2,
-            "max": 2004.8
+            "min": 595.8,
+            "median": 996.8,
+            "p75": 1710,
+            "p95": 1838.5,
+            "max": 1870.6
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30806.3,
-            "median": 30924.9,
-            "p75": 31997.6,
-            "p95": 32053.4,
-            "max": 32067.3
+            "min": 30620,
+            "median": 31023,
+            "p75": 31741.7,
+            "p95": 31858.7,
+            "max": 31888
           },
           "stallCount": {
             "count": 5,
@@ -305,12 +323,12 @@
     }
   },
   "artifacts": {
-    "machineReadableUrl": "/benchmarks/providers/europe.json",
-    "rawSamplesUrl": "/benchmarks/providers/europe.samples.json"
+    "machineReadableUrl": "/benchmarks/providers/latest.json",
+    "rawSamplesUrl": "/benchmarks/providers/latest.samples.json"
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-17T09:04:06.231Z",
+    "checkedAt": "2026-06-30T16:36:16.154Z",
     "patternsVersion": 1,
     "findings": []
   }
