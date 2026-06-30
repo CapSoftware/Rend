@@ -7,6 +7,7 @@ import {
   safeWatchBootstrapMs,
   type WatchPlaybackBootstrapResponse,
 } from "../../../lib/watch-bootstrap.ts";
+import { startupPreloadHints } from "../../../lib/player-engine.ts";
 import { WatchInstantPlayer } from "./WatchInstantPlayer";
 
 type WatchPageProps = {
@@ -106,7 +107,9 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
   const [{ assetId }, query, headerStore] = await Promise.all([params, searchParams, headers()]);
   const initialBootstrap = decodeWatchBootstrapHeader(headerStore.get(WATCH_BOOTSTRAP_HEADER));
   const initialBootstrapMs = safeWatchBootstrapMs(headerStore.get(WATCH_BOOTSTRAP_MS_HEADER));
+  const startupMode = playerStartupMode(query.startupMode, query.startup);
   const edgeHint = playbackEdgeHint(initialBootstrap);
+  const preloadHints = startupPreloadHints(initialBootstrap, startupMode);
 
   return (
     <main className="rend-embed-page">
@@ -116,6 +119,17 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
           <link rel="preconnect" href={edgeHint.origin} crossOrigin="" />
         </>
       )}
+      {preloadHints.map((hint) => (
+        <link
+          key={`${hint.artifactPath}:${hint.url}`}
+          rel="preload"
+          as={hint.as}
+          href={hint.url}
+          type={hint.contentType}
+          crossOrigin="use-credentials"
+          data-rend-startup-preload={hint.artifactPath}
+        />
+      ))}
       <section className="rend-embed-shell" aria-label="Rend video player">
         <WatchInstantPlayer
           assetId={assetId}
@@ -124,7 +138,7 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
           initialBootstrap={initialBootstrap}
           initialBootstrapMs={initialBootstrapMs}
           playbackEngine={playerPlaybackEngine(query.playbackEngine, query.engine)}
-          startupMode={playerStartupMode(query.startupMode, query.startup)}
+          startupMode={startupMode}
           telemetryAppVersion={telemetryAppVersion()}
           telemetryEnabled={telemetryEnabled(query.telemetry)}
           telemetryOrganizationId={

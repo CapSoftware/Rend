@@ -13,6 +13,13 @@ export type SourceSelection = {
   url: string;
 };
 
+export type StartupPreloadHint = {
+  artifactPath: string;
+  as: "fetch" | "image" | "video";
+  contentType?: string;
+  url: string;
+};
+
 export type AttachPlaybackOptions = {
   assetId: string;
   autoPlay: boolean;
@@ -78,6 +85,7 @@ const HLS_STARTUP_CONFIG = {
 const WATCH_HEARTBEAT_INTERVAL_MS = 10_000;
 const WATCH_HEARTBEAT_MAX_DELTA_MS = 30_000;
 const WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS = 1_000;
+const MAX_STARTUP_PRELOAD_HINTS = 10;
 
 export function watchHeartbeatDelta(
   previousPositionMs: number | null,
@@ -168,6 +176,60 @@ export function playbackStateMessage(data: WatchPlaybackBootstrapResponse | null
     default:
       return "Playback is unavailable";
   }
+}
+
+export function startupPreloadHints(
+  data: WatchPlaybackBootstrapResponse | null,
+  startupMode: StartupMode
+): StartupPreloadHint[] {
+  const ready = readyBootstrap(data);
+  if (!ready) return [];
+
+  const seen = new Set<string>();
+  const hints: StartupPreloadHint[] = [];
+  const push = (hint: StartupPreloadHint) => {
+    if (!hint.url || seen.has(hint.url) || hints.length >= MAX_STARTUP_PRELOAD_HINTS) return;
+    seen.add(hint.url);
+    hints.push(hint);
+  };
+
+  if (startupMode === "opener" && ready.opener_url) {
+    push({
+      artifactPath: "opener.mp4",
+      as: "video",
+      contentType: ready.opener_content_type ?? "video/mp4",
+      url: ready.opener_url,
+    });
+  }
+
+  if (ready.manifest_url) {
+    push({
+      artifactPath: "hls/master.m3u8",
+      as: "fetch",
+      contentType: ready.manifest_content_type ?? "application/vnd.apple.mpegurl",
+      url: ready.manifest_url,
+    });
+  }
+
+  for (const hint of ready.prefetch_hints) {
+    push({
+      artifactPath: hint.artifact_path,
+      as: "fetch",
+      contentType: hint.content_type,
+      url: hint.url,
+    });
+  }
+
+  if (ready.poster_url) {
+    push({
+      artifactPath: "thumbnail.jpg",
+      as: "image",
+      contentType: ready.poster_content_type,
+      url: ready.poster_url,
+    });
+  }
+
+  return hints;
 }
 
 function hlsSource(

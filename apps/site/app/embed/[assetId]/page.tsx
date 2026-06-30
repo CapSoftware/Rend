@@ -14,6 +14,7 @@ import {
   instantPlaybackScript,
   playbackStateMessage,
   readyBootstrap,
+  startupPreloadHints,
   type PlaybackEngine,
   type StartupMode,
 } from "../../../lib/player-engine.ts";
@@ -136,6 +137,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
   const poster = ready?.poster_url;
   const message = playbackStateMessage(initialBootstrap, state);
   const edgeHint = playbackEdgeHint(initialBootstrap);
+  const preloadHints = startupPreloadHints(initialBootstrap, startupMode);
 
   const playerId = `rend-embed-${assetId}`;
   const sectionStyle = accent ? ({ "--rend-accent": accent } as CSSProperties) : undefined;
@@ -153,6 +155,17 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
           <link rel="preconnect" href={edgeHint.origin} crossOrigin="" />
         </>
       )}
+      {preloadHints.map((hint) => (
+        <link
+          key={`${hint.artifactPath}:${hint.url}`}
+          rel="preload"
+          as={hint.as}
+          href={hint.url}
+          type={hint.contentType}
+          crossOrigin="use-credentials"
+          data-rend-startup-preload={hint.artifactPath}
+        />
+      ))}
       <section
         id={playerId}
         className={sectionClassName}
