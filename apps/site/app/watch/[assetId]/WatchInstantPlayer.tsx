@@ -41,8 +41,12 @@ export function WatchInstantPlayer({
 }: WatchInstantPlayerProps) {
   const playerId = `rend-watch-${assetId}`;
   const ready = readyBootstrap(initialBootstrap);
-  const selection = initialSourceSelection(initialBootstrap, startupMode);
-  const state = initialPlaybackState(initialBootstrap, selection);
+  const selection = initialSourceSelection(initialBootstrap, startupMode, playbackEngine);
+  const state = initialPlaybackState(
+    initialBootstrap,
+    selection,
+    playbackEngine === "mse" && Boolean(ready?.manifest_url)
+  );
   const poster = ready?.poster_url;
   const message = playbackStateMessage(initialBootstrap, state);
 

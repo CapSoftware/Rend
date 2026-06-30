@@ -122,13 +122,18 @@ export function isNativeHlsSupported(video: HTMLVideoElement) {
 
 export function initialSourceSelection(
   data: WatchPlaybackBootstrapResponse | null,
-  startupMode: StartupMode
+  startupMode: StartupMode,
+  playbackEngine: PlaybackEngine = "auto"
 ): SourceSelection | null {
   const ready = readyBootstrap(data);
   if (!ready) return null;
 
   if (startupMode === "opener" && ready.opener_url) {
     return { label: "opener", artifactPath: "opener.mp4", url: ready.opener_url };
+  }
+
+  if (playbackEngine === "mse" && ready.playable_state === "hls_ready" && ready.manifest_url) {
+    return null;
   }
 
   if (ready.playable_state === "hls_ready" && ready.manifest_url) {
@@ -156,10 +161,11 @@ export function initialSourceSelection(
 
 export function initialPlaybackState(
   data: WatchPlaybackBootstrapResponse | null,
-  selection: SourceSelection | null
+  selection: SourceSelection | null,
+  clientPlaybackPending = false
 ) {
   if (!data) return "loading";
-  if (data.status === "ready") return selection ? "ready" : "not_playable";
+  if (data.status === "ready") return selection || clientPlaybackPending ? "ready" : "not_playable";
   if (data.status === "not_playable") return "not_playable";
   if (data.status === "unavailable") return "unavailable";
   return "bootstrap_failure";
@@ -199,24 +205,6 @@ export function startupPreloadHints(
       as: "video",
       contentType: ready.opener_content_type ?? "video/mp4",
       url: ready.opener_url,
-    });
-  }
-
-  if (ready.manifest_url) {
-    push({
-      artifactPath: "hls/master.m3u8",
-      as: "fetch",
-      contentType: ready.manifest_content_type ?? "application/vnd.apple.mpegurl",
-      url: ready.manifest_url,
-    });
-  }
-
-  for (const hint of ready.prefetch_hints) {
-    push({
-      artifactPath: hint.artifact_path,
-      as: "fetch",
-      contentType: hint.content_type,
-      url: hint.url,
     });
   }
 

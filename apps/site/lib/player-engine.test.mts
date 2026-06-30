@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startupPreloadHints, watchHeartbeatDelta } from "./player-engine.ts";
+import {
+  initialPlaybackState,
+  initialSourceSelection,
+  startupPreloadHints,
+  watchHeartbeatDelta,
+} from "./player-engine.ts";
 
 const READY_BOOTSTRAP = {
   status: "ready" as const,
@@ -73,35 +78,32 @@ test("watch heartbeat clamps large deltas and reseeds after seeks", () => {
   });
 });
 
-test("startup preload hints prioritize manifest and startup media", () => {
+test("startup preload hints avoid duplicating native HLS startup requests", () => {
   assert.deepEqual(
     startupPreloadHints(READY_BOOTSTRAP, "hls").map((hint) => [
       hint.artifactPath,
       hint.as,
       hint.url,
     ]),
-    [
-      [
-        "hls/master.m3u8",
-        "fetch",
-        "https://ash-1.play.rend.so/v/asset/hls/master.m3u8",
-      ],
-      [
-        "hls/360p/index.m3u8",
-        "fetch",
-        "https://ash-1.play.rend.so/v/asset/hls/360p/index.m3u8",
-      ],
-      [
-        "hls/360p/init_360p.mp4",
-        "fetch",
-        "https://ash-1.play.rend.so/v/asset/hls/360p/init_360p.mp4",
-      ],
-      ["thumbnail.jpg", "image", "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"],
-    ]
+    [["thumbnail.jpg", "image", "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"]]
   );
 });
 
 test("startup preload hints include opener first only when requested", () => {
-  assert.equal(startupPreloadHints(READY_BOOTSTRAP, "hls")[0]?.artifactPath, "hls/master.m3u8");
+  assert.equal(startupPreloadHints(READY_BOOTSTRAP, "hls")[0]?.artifactPath, "thumbnail.jpg");
   assert.equal(startupPreloadHints(READY_BOOTSTRAP, "opener")[0]?.artifactPath, "opener.mp4");
+});
+
+test("explicit MSE playback defers initial HLS assignment to the client", () => {
+  const selection = initialSourceSelection(READY_BOOTSTRAP, "hls", "mse");
+  assert.equal(selection, null);
+  assert.equal(initialPlaybackState(READY_BOOTSTRAP, selection, true), "ready");
+});
+
+test("explicit MSE playback still allows opener startup when requested", () => {
+  assert.deepEqual(initialSourceSelection(READY_BOOTSTRAP, "opener", "mse"), {
+    label: "opener",
+    artifactPath: "opener.mp4",
+    url: "https://ash-1.play.rend.so/v/asset/opener.mp4",
+  });
 });
