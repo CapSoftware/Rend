@@ -47,7 +47,7 @@ export type WatchPlaybackBootstrapResponse =
     };
 
 const MAX_BOOTSTRAP_HEADER_BYTES = 12_000;
-const MAX_PREFETCH_HINTS = 4;
+const MAX_PREFETCH_HINTS = 8;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));

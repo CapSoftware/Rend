@@ -18,7 +18,7 @@ export type UpstreamPlaybackResponse = {
   prefetch_hints?: unknown;
 };
 
-const MAX_PREFETCH_HINTS = 4;
+const MAX_PREFETCH_HINTS = 8;
 const HLS_RENDITION_NAMES = new Set(["360p", "480p", "720p", "1080p", "2k", "4k"]);
 
 function safeString(value: unknown) {
