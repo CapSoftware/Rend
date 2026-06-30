@@ -164,6 +164,7 @@ jobs:
       CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
       REND_API_CORS_ALLOWED_ORIGINS: ${{ vars.REND_API_CORS_ALLOWED_ORIGINS || 'https://rend.so,https://www.rend.so' }}
       REND_EDGE_CORS_ALLOWED_ORIGINS: ${{ vars.REND_EDGE_CORS_ALLOWED_ORIGINS || 'https://rend.so,https://www.rend.so' }}
+      REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS: ${{ vars.REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS || '8' }}
       AUTUMN_SECRET_KEY: ${{ secrets.AUTUMN_SECRET_KEY }}
       AUTUMN_API_URL: ${{ vars.AUTUMN_API_URL || 'https://api.useautumn.com/v1' }}
       AUTUMN_API_VERSION: ${{ vars.AUTUMN_API_VERSION || '2.3.0' }}

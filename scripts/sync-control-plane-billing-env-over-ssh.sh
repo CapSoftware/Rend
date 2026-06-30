@@ -32,6 +32,8 @@ Environment:
   CLICKHOUSE_PASSWORD   Required ClickHouse password.
   REND_API_CORS_ALLOWED_ORIGINS
                         API CORS allowlist. Defaults to production Rend origins.
+  REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS
+                        Playback bootstrap prefetch hint budget. Defaults to 8.
   AUTUMN_SECRET_KEY     Required live Autumn secret key.
   REND_SSH_KEY_PATH     Optional private key path passed to ssh/scp.
   REND_SSH_EXTRA_OPTS   Optional extra ssh options, split by shell words.
@@ -130,6 +132,7 @@ defaults = {
     "REND_API_AUTO_MIGRATE": "false",
     "CLICKHOUSE_DATABASE": "rend",
     "REND_API_CORS_ALLOWED_ORIGINS": "https://rend.so,https://www.rend.so",
+    "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS": "8",
     "REND_BILLING_MODE": "autumn",
     "AUTUMN_API_URL": "https://api.useautumn.com/v1",
     "AUTUMN_API_VERSION": "2.3.0",
@@ -154,6 +157,7 @@ keys = [
     "CLICKHOUSE_USER",
     "CLICKHOUSE_PASSWORD",
     "REND_API_CORS_ALLOWED_ORIGINS",
+    "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS",
     "REND_BILLING_MODE",
     "AUTUMN_SECRET_KEY",
     "AUTUMN_API_URL",
@@ -254,4 +258,4 @@ scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
 remote_command="python3 $(shell_quote "$remote_merge") $(shell_quote "$remote_fragment") $(shell_quote "$api_env") $(shell_quote "$worker_env")"
 ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$remote_command")"
 ssh "${ssh_args[@]}" "$target" "rm -rf $remote_dir_q"
-echo "Control-plane env sync completed for keys: REND_API_AUTO_MIGRATE CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
+echo "Control-plane env sync completed for keys: REND_API_AUTO_MIGRATE CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
