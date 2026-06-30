@@ -1567,7 +1567,7 @@ fn api_fast_embed_prefers_progressive_startup_without_token_material() {
     )
     .unwrap();
     let selection = fast_embed_playback_selection(&response, "progressive").unwrap();
-    let html = render_api_fast_embed_html(&response, &selection, true, false, true);
+    let html = render_api_fast_embed_html(&response, &selection, None, true, false, true);
 
     assert_eq!(selection.label, "progressive_mp4");
     assert_eq!(selection.artifact_path, "hls/360p/progressive.mp4");
@@ -1578,6 +1578,42 @@ fn api_fast_embed_prefers_progressive_startup_without_token_material() {
     assert!(html.contains("data-rend-player-selected=\"progressive_mp4\""));
     assert!(html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(html.contains("rel=\"preload\" as=\"video\""));
+    assert!(!html.contains(&response.playback_token), "{html}");
+    assert!(!html.contains("?token="), "{html}");
+    assert!(
+        !html.to_ascii_lowercase().contains("authorization"),
+        "{html}"
+    );
+}
+
+#[test]
+fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
+    let response = playback_bootstrap_response(
+        Some(asset_record("hls_ready")),
+        &hls_artifact_records(),
+        "https://api.rend.so",
+        &test_issuer(),
+        8,
+        NOW,
+    )
+    .unwrap();
+    let selection = fast_embed_playback_selection(&response, "mse").unwrap();
+    let inline = FastEmbedInlineStartup {
+        artifact_path: "hls/360p/init_360p.mp4+hls/360p/segment_00000.m4s".to_owned(),
+        mime_type: "video/mp4; codecs=\"avc1.64001f,mp4a.40.2\"".to_owned(),
+        startup_b64: BASE64_STANDARD.encode([0, 1, 2, 3]),
+        segment_urls: vec!["https://api.rend.so/v/asset-123/hls/360p/segment_00001.m4s".to_owned()],
+    };
+    let html = render_api_fast_embed_html(&response, &selection, Some(&inline), true, false, true);
+
+    assert_eq!(fast_embed_startup_mode(None), "mse");
+    assert_eq!(selection.label, "progressive_mp4");
+    assert!(html.contains("data-rend-player-selected=\"mse_inline\""));
+    assert!(html.contains("data-rend-playback-engine=\"mse-inline\""));
+    assert!(html.contains("\"mimeType\":\"video/mp4; codecs=\\\"avc1.64001f,mp4a.40.2\\\"\""));
+    assert!(html.contains("segment_00001.m4s"));
+    assert!(html.contains("rel=\"preload\" as=\"fetch\""));
+    assert!(!html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(!html.contains(&response.playback_token), "{html}");
     assert!(!html.contains("?token="), "{html}");
     assert!(

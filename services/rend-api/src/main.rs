@@ -27,7 +27,10 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+};
 use bytes::Bytes;
 use futures_util::stream;
 use hmac::{Hmac, Mac};
@@ -93,6 +96,7 @@ const ORIGIN_PLAYBACK_CACHE_MAX_ENTRIES: usize = 512;
 const ORIGIN_PLAYBACK_CACHE_MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 const ORIGIN_PLAYBACK_CACHE_MEDIA_TTL: Duration = Duration::from_secs(10 * 60);
 const ORIGIN_PLAYBACK_CACHE_MANIFEST_TTL: Duration = Duration::from_secs(60);
+const FAST_EMBED_INLINE_STARTUP_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Clone)]
 struct ApiConfig {
@@ -885,6 +889,14 @@ struct FastEmbedPlaybackSelection {
     content_type: String,
     label: &'static str,
     url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FastEmbedInlineStartup {
+    artifact_path: String,
+    mime_type: String,
+    startup_b64: String,
+    segment_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -2335,7 +2347,21 @@ async fn api_fast_embed_inner(
         .as_deref()
         .map(|value| query_flag(Some(value), true))
         .unwrap_or(auto_play);
-    let html = render_api_fast_embed_html(&response, &selection, auto_play, controls, muted);
+    let inline_startup = if startup == "mse" {
+        fast_embed_inline_startup(state.as_ref(), &response, &selection)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    let html = render_api_fast_embed_html(
+        &response,
+        &selection,
+        inline_startup.as_ref(),
+        auto_play,
+        controls,
+        muted,
+    );
     let mut rendered = Html(html).into_response();
     let headers = rendered.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -3584,9 +3610,11 @@ fn query_flag(value: Option<&str>, fallback: bool) -> bool {
 
 fn fast_embed_startup_mode(value: Option<&str>) -> &'static str {
     match value {
+        Some("mse") | Some("inline") | Some("inline-mse") => "mse",
         Some("opener") => "opener",
         Some("hls") | Some("native") => "hls",
-        _ => "progressive",
+        Some("progressive") => "progressive",
+        _ => "mse",
     }
 }
 
@@ -3608,7 +3636,7 @@ fn fast_embed_playback_selection(
         }
     }
 
-    if startup == "progressive"
+    if matches!(startup, "mse" | "progressive")
         && let Some(selection) = fast_embed_progressive_selection(response)
     {
         return Some(selection);
@@ -3702,6 +3730,107 @@ fn fast_embed_progressive_rendition(hints: &[PlaybackPrefetchHint]) -> Option<St
     })
 }
 
+async fn fast_embed_inline_startup(
+    state: &AppState,
+    response: &PlaybackBootstrapResponse,
+    selection: &FastEmbedPlaybackSelection,
+) -> Result<Option<FastEmbedInlineStartup>, AppError> {
+    let Some(rendition) = hls_progressive_rendition(&selection.artifact_path) else {
+        return Ok(None);
+    };
+
+    let master_artifact = origin_playback_artifact(&response.asset_id, "hls/master.m3u8")?;
+    let playlist_artifact = hls_progressive_playlist_artifact(&response.asset_id, rendition)?;
+    let init_artifact = hls_progressive_init_artifact(&response.asset_id, rendition)?;
+
+    let (master_part, playlist_part) = tokio::try_join!(
+        origin_playback_artifact_full_bytes(state, &master_artifact),
+        origin_playback_artifact_full_bytes(state, &playlist_artifact)
+    )?;
+    let (master_bytes, _, _) = master_part;
+    let (playlist_bytes, _, _) = playlist_part;
+    let master = std::str::from_utf8(&master_bytes)
+        .map_err(|_| AppError::bad_gateway("invalid master playlist"))?;
+    let playlist = std::str::from_utf8(&playlist_bytes)
+        .map_err(|_| AppError::bad_gateway("invalid media playlist"))?;
+    let segment_names = hls_progressive_segment_names(playlist);
+    let Some(first_segment) = segment_names.first() else {
+        return Ok(None);
+    };
+
+    let first_segment_artifact =
+        hls_progressive_segment_artifact(&response.asset_id, rendition, first_segment)?;
+    let (init_part, first_segment_part) = tokio::try_join!(
+        origin_playback_artifact_full_bytes(state, &init_artifact),
+        origin_playback_artifact_full_bytes(state, &first_segment_artifact)
+    )?;
+    let (init_bytes, _, _) = init_part;
+    let (first_segment_bytes, _, _) = first_segment_part;
+
+    let startup_len = init_bytes.len() + first_segment_bytes.len();
+    if startup_len > FAST_EMBED_INLINE_STARTUP_MAX_BYTES {
+        return Ok(None);
+    }
+
+    let mut startup = Vec::with_capacity(startup_len);
+    startup.extend_from_slice(&init_bytes);
+    startup.extend_from_slice(&first_segment_bytes);
+
+    let mime_type = hls_master_codecs_for_rendition(master, rendition)
+        .map(|codecs| format!("video/mp4; codecs=\"{codecs}\""))
+        .unwrap_or_else(|| "video/mp4".to_owned());
+    let segment_urls = segment_names
+        .iter()
+        .skip(1)
+        .map(|segment| {
+            artifact_url(
+                &state.config.playback_base_url,
+                &response.asset_id,
+                &format!("hls/{rendition}/{segment}"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(FastEmbedInlineStartup {
+        artifact_path: format!(
+            "hls/{rendition}/init_{rendition}.mp4+hls/{rendition}/{first_segment}"
+        ),
+        mime_type,
+        startup_b64: BASE64_STANDARD.encode(startup),
+        segment_urls,
+    }))
+}
+
+fn hls_master_codecs_for_rendition(master: &str, rendition: &str) -> Option<String> {
+    let rendition_path = format!("{rendition}/index.m3u8");
+    let mut pending_codecs = None;
+    for line in master.lines().map(str::trim) {
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            pending_codecs = hls_attribute_value(line, "CODECS");
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let matches_rendition =
+            line == rendition_path || line.ends_with(&format!("/{rendition_path}"));
+        if matches_rendition {
+            return pending_codecs;
+        }
+        pending_codecs = None;
+    }
+    None
+}
+
+fn hls_attribute_value(line: &str, name: &str) -> Option<String> {
+    let attributes = line.split_once(':')?.1;
+    let prefix = format!("{name}=\"");
+    let start = attributes.find(&prefix)? + prefix.len();
+    let value = &attributes[start..];
+    let end = value.find('"')?;
+    Some(value[..end].to_owned())
+}
+
 fn html_escape(value: impl AsRef<str>) -> String {
     value
         .as_ref()
@@ -3711,9 +3840,28 @@ fn html_escape(value: impl AsRef<str>) -> String {
         .replace('"', "&quot;")
 }
 
+fn script_json(value: serde_json::Value) -> String {
+    serde_json::to_string(&value)
+        .unwrap_or_else(|_| "null".to_owned())
+        .replace('<', "\\u003c")
+}
+
+fn inline_startup_script_json(inline_startup: Option<&FastEmbedInlineStartup>) -> String {
+    match inline_startup {
+        Some(inline) => script_json(serde_json::json!({
+            "artifactPath": inline.artifact_path,
+            "mimeType": inline.mime_type,
+            "startup": inline.startup_b64,
+            "segmentUrls": inline.segment_urls,
+        })),
+        None => "null".to_owned(),
+    }
+}
+
 fn render_api_fast_embed_html(
     response: &PlaybackBootstrapResponse,
     selection: &FastEmbedPlaybackSelection,
+    inline_startup: Option<&FastEmbedInlineStartup>,
     auto_play: bool,
     controls: bool,
     muted: bool,
@@ -3722,7 +3870,40 @@ fn render_api_fast_embed_html(
     let controls_attr = if controls { " controls" } else { "" };
     let muted_attr = if muted { " muted" } else { "" };
     let poster_attr = "";
-    let preload_link = if selection.content_type == "video/mp4" {
+    let selected_label = if inline_startup.is_some() {
+        "mse_inline"
+    } else {
+        selection.label
+    };
+    let selected_artifact = inline_startup
+        .map(|inline| inline.artifact_path.as_str())
+        .unwrap_or(&selection.artifact_path);
+    let playback_engine = if inline_startup.is_some() {
+        "mse-inline"
+    } else {
+        "native"
+    };
+    let source_attrs = if inline_startup.is_some() {
+        String::new()
+    } else {
+        format!(
+            r#" src="{}" type="{}""#,
+            html_escape(&selection.url),
+            html_escape(&selection.content_type)
+        )
+    };
+    let preload_link = if let Some(inline) = inline_startup {
+        inline
+            .segment_urls
+            .first()
+            .map(|url| {
+                format!(
+                    r#"<link rel="preload" as="fetch" href="{}" type="video/mp4" crossorigin="use-credentials" fetchpriority="high">"#,
+                    html_escape(url)
+                )
+            })
+            .unwrap_or_default()
+    } else if selection.content_type == "video/mp4" {
         format!(
             r#"<link rel="preload" as="video" href="{}" type="{}" crossorigin="use-credentials" fetchpriority="high">"#,
             html_escape(&selection.url),
@@ -3731,6 +3912,13 @@ fn render_api_fast_embed_html(
     } else {
         String::new()
     };
+    let inline_startup_json = inline_startup_script_json(inline_startup);
+    let fallback_json = script_json(serde_json::json!({
+        "artifactPath": selection.artifact_path,
+        "contentType": selection.content_type,
+        "label": selection.label,
+        "url": selection.url,
+    }));
 
     format!(
         r#"<!doctype html>
@@ -3751,23 +3939,25 @@ body{{overflow:hidden}}
 </style>
 </head>
 <body>
-<main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="native" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
-<video class="rend-fast__video" src="{url}" type="{content_type}"{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="use-credentials"></video>
+<main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="{playback_engine}" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
+<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="use-credentials"></video>
 <div class="rend-fast__message" role="status" aria-live="polite">Ready</div>
 </main>
 <script>
-(()=>{{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const mark=(name)=>{{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))}};const dims=()=>{{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))}};video.addEventListener("loadedmetadata",()=>{{dims();mark("data-rend-metadata-ms")}},{{once:true}});video.addEventListener("canplay",()=>{{dims();mark("data-rend-canplay-ms")}},{{once:true}});video.addEventListener("playing",()=>{{root.setAttribute("data-rend-player-state","playing");dims()}});if("requestVideoFrameCallback"in video){{video.requestVideoFrameCallback(()=>{{dims();mark("data-rend-first-frame-ms")}})}}else{{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{{once:true}})}}if({auto_play_js})video.play().catch(()=>{{}})}})();
+(()=>{{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const inlineStartup={inline_startup_json};const fallback={fallback_json};const autoPlay={auto_play_js};const mark=(name)=>{{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))}};const dims=()=>{{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))}};const play=()=>{{if(autoPlay)video.play().catch(()=>{{}})}};const selection=(label,artifactPath,engine)=>{{root.setAttribute("data-rend-player-selected",label);root.setAttribute("data-rend-player-artifact",artifactPath);root.setAttribute("data-rend-playback-engine",engine);root.setAttribute("data-rend-player-state","ready")}};const bytes=(value)=>{{const binary=atob(value);const output=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)output[i]=binary.charCodeAt(i);return output}};const append=(buffer,data)=>new Promise((resolve,reject)=>{{const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("append failed"))}};const cleanup=()=>{{buffer.removeEventListener("updateend",done);buffer.removeEventListener("error",fail)}};buffer.addEventListener("updateend",done);buffer.addEventListener("error",fail);buffer.appendBuffer(data)}});const sourceOpen=(mediaSource)=>new Promise((resolve,reject)=>{{if(mediaSource.readyState==="open"){{resolve();return}}const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("source open failed"))}};const cleanup=()=>{{mediaSource.removeEventListener("sourceopen",done);mediaSource.removeEventListener("sourceclose",fail);mediaSource.removeEventListener("sourceended",fail)}};mediaSource.addEventListener("sourceopen",done,{{once:true}});mediaSource.addEventListener("sourceclose",fail,{{once:true}});mediaSource.addEventListener("sourceended",fail,{{once:true}})}});const startNative=()=>{{selection(fallback.label,fallback.artifactPath,"native");if(fallback.url&&video.getAttribute("src")!==fallback.url){{video.src=fallback.url;video.load()}}play()}};const startInline=async()=>{{if(!inlineStartup||!("MediaSource"in window)||!MediaSource.isTypeSupported(inlineStartup.mimeType))return false;selection("mse_inline",inlineStartup.artifactPath,"mse-inline");const mediaSource=new MediaSource();const objectUrl=URL.createObjectURL(mediaSource);video.removeAttribute("src");video.src=objectUrl;video.load();await sourceOpen(mediaSource);const sourceBuffer=mediaSource.addSourceBuffer(inlineStartup.mimeType);await append(sourceBuffer,bytes(inlineStartup.startup));play();(async()=>{{for(const url of inlineStartup.segmentUrls){{const response=await fetch(url,{{credentials:"include"}});if(!response.ok)throw new Error("segment fetch failed");await append(sourceBuffer,new Uint8Array(await response.arrayBuffer()))}}if(mediaSource.readyState==="open")mediaSource.endOfStream()}})().catch(()=>{{}});return true}};video.addEventListener("loadedmetadata",()=>{{dims();mark("data-rend-metadata-ms")}},{{once:true}});video.addEventListener("canplay",()=>{{dims();mark("data-rend-canplay-ms")}},{{once:true}});video.addEventListener("playing",()=>{{root.setAttribute("data-rend-player-state","playing");dims()}});if("requestVideoFrameCallback"in video){{video.requestVideoFrameCallback(()=>{{dims();mark("data-rend-first-frame-ms")}})}}else{{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{{once:true}})}}startInline().then((started)=>{{if(!started)startNative()}}).catch(()=>startNative())}})();
 </script>
 </body>
 </html>"#,
         asset_id = html_escape(&response.asset_id),
-        artifact_path = html_escape(&selection.artifact_path),
+        artifact_path = html_escape(selected_artifact),
         auto_play_js = if auto_play { "true" } else { "false" },
-        content_type = html_escape(&selection.content_type),
-        label = html_escape(selection.label),
+        fallback_json = fallback_json,
+        inline_startup_json = inline_startup_json,
+        label = html_escape(selected_label),
         playable_state = html_escape(&response.playable_state),
+        playback_engine = html_escape(playback_engine),
+        source_attrs = source_attrs,
         source_state = html_escape(&response.source_state),
-        url = html_escape(&selection.url),
     )
 }
 
