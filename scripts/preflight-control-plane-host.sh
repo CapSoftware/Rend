@@ -255,7 +255,7 @@ probe_clickhouse() {
   local password="$4"
   local exists
   url="${url%/}"
-  if curl -fsS --max-time 10 -u "$user:$password" \
+  if curl -fsS --max-time 10 --retry 3 --retry-delay 2 --retry-all-errors -u "$user:$password" \
     "$url/?database=$database&query=SELECT%201" >/dev/null; then
     operator_ok "ClickHouse connectivity probe passed"
   else
@@ -264,6 +264,7 @@ probe_clickhouse() {
   fi
   exists="$(
     curl -fsS --max-time 10 -u "$user:$password" \
+      --retry 3 --retry-delay 2 --retry-all-errors \
       "$url/?database=$database&query=EXISTS%20TABLE%20playback_events" || true
   )"
   if [[ "$exists" == "1" ]]; then
