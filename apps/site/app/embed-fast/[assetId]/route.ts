@@ -107,6 +107,10 @@ function html(value: unknown) {
     .replaceAll('"', "&quot;");
 }
 
+function linkHeaderValue(value: string) {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
 function jsString(value: string) {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
@@ -223,6 +227,34 @@ function playbackOrigin(bootstrap: WatchPlaybackBootstrapReady | null) {
   }
 }
 
+function preloadablePlaybackSelection(
+  selection: ReturnType<typeof playbackSelection>,
+) {
+  if (!selection?.url || selection.contentType !== "video/mp4") return null;
+  return selection;
+}
+
+function appendStartupLinkHeaders(
+  headers: Headers,
+  edge: ReturnType<typeof playbackOrigin>,
+  selection: ReturnType<typeof playbackSelection>,
+) {
+  if (edge) {
+    headers.append(
+      "link",
+      `<${linkHeaderValue(edge.origin)}>; rel=preconnect; crossorigin`,
+    );
+  }
+
+  const preload = preloadablePlaybackSelection(selection);
+  if (!preload) return;
+  const preloadContentType = preload.contentType ?? "video/mp4";
+  headers.append(
+    "link",
+    `<${linkHeaderValue(preload.url)}>; rel=preload; as=video; type="${linkHeaderValue(preloadContentType)}"; crossorigin="use-credentials"; fetchpriority=high`,
+  );
+}
+
 function playerMessage(
   bootstrap: WatchPlaybackBootstrapResponse | null,
   selection: ReturnType<typeof playbackSelection>,
@@ -246,6 +278,8 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const contentType = selection?.contentType
     ? ` type="${html(selection.contentType)}"`
     : "";
+  const preload = preloadablePlaybackSelection(selection);
+  const preloadContentType = preload?.contentType ?? "video/mp4";
   const bootstrapMs =
     typeof options.bootstrapMs === "number"
       ? ` data-rend-bootstrap-ms="${Math.max(0, Math.round(options.bootstrapMs))}"`
@@ -261,6 +295,7 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
 <title>Rend player</title>
 ${edge ? `<link rel="dns-prefetch" href="${html(edge.dnsPrefetch)}">` : ""}
 ${edge ? `<link rel="preconnect" href="${html(edge.origin)}" crossorigin>` : ""}
+${preload ? `<link rel="preload" as="video" href="${html(preload.url)}" type="${html(preloadContentType)}" crossorigin="use-credentials" fetchpriority="high">` : ""}
 <style>
 html,body{margin:0;width:100%;height:100%;background:#050505;color:#f7f7f7}
 body{overflow:hidden}
@@ -328,6 +363,9 @@ export async function GET(
     request,
     normalizedAssetId,
   );
+  const ready = bootstrap?.status === "ready" ? bootstrap : null;
+  const selection = playbackSelection(bootstrap, startup);
+  const edge = playbackOrigin(ready);
   const headers = new Headers({
     "cache-control": "no-store",
     "content-type": "text/html; charset=utf-8",
@@ -340,6 +378,7 @@ export async function GET(
       headers.append("set-cookie", setCookie);
     }
   }
+  appendStartupLinkHeaders(headers, edge, selection);
 
   return new Response(
     renderFastEmbedHtml({

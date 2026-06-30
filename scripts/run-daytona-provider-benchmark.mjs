@@ -303,7 +303,9 @@ function daytonaApiKeyForTarget(env, target) {
 function rendAssetIdFromUrl(rawUrl) {
   try {
     const pathParts = new URL(rawUrl).pathname.split("/").filter(Boolean);
-    if (pathParts[0] !== "embed" || !pathParts[1]) return "";
+    if (!["embed", "embed-fast"].includes(pathParts[0]) || !pathParts[1]) {
+      return "";
+    }
     return decodeURIComponent(pathParts[1]);
   } catch {
     return "";

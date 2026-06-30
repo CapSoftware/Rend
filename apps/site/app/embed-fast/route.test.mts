@@ -72,6 +72,7 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
   });
 
   assert.match(html, /src="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4"/);
+  assert.match(html, /rel="preload" as="video" href="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4" type="video\/mp4" crossorigin="use-credentials" fetchpriority="high"/);
   assert.match(html, /data-rend-player-selected="progressive_mp4"/);
   assert.match(html, /data-rend-player-artifact="hls\/360p\/progressive\.mp4"/);
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
@@ -113,6 +114,9 @@ test("fast embed route forwards bootstrap cookies to the document response", asy
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.equal(response.headers.get("x-rend-fast-embed"), "1");
+    assert.match(response.headers.get("link") ?? "", /rel=preconnect/);
+    assert.match(response.headers.get("link") ?? "", /hls\/360p\/progressive\.mp4/);
+    assert.match(response.headers.get("link") ?? "", /rel=preload; as=video/);
     assert.match(response.headers.get("set-cookie") ?? "", /__rend_playback=/);
     assert.equal(
       fetches[0]?.url,
