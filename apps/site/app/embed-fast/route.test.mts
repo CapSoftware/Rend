@@ -45,9 +45,11 @@ test("fast embed renders a direct native HLS video without exposing playback sec
     assetId: ASSET_ID,
     autoPlay: true,
     bootstrap: readyBootstrap(),
+    bootstrapUrl: `/api/player/${ASSET_ID}`,
     bootstrapMs: 42,
     controls: false,
     muted: true,
+    playbackOriginHint: null,
     startupMode: "hls",
   });
 
@@ -65,9 +67,11 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
     assetId: ASSET_ID,
     autoPlay: true,
     bootstrap: readyBootstrap(),
+    bootstrapUrl: `/api/player/${ASSET_ID}`,
     bootstrapMs: 42,
     controls: false,
     muted: true,
+    playbackOriginHint: null,
     startupMode: "progressive",
   });
 
@@ -78,7 +82,39 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
-test("fast embed route forwards bootstrap cookies to the document response", async () => {
+test("fast embed route defaults to client bootstrap for immediate document response", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetches: string[] = [];
+
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    fetches.push(String(url));
+    return Response.json(readyBootstrap());
+  }) as typeof fetch;
+
+  try {
+    const response = await getFastEmbed(
+      new Request(
+        `https://www.rend.so/embed-fast/${ASSET_ID}?autoplay=1&controls=0`,
+      ),
+      { params: Promise.resolve({ assetId: ASSET_ID }) },
+    );
+    const body = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.equal(fetches.length, 0);
+    assert.equal(response.headers.get("x-rend-fast-embed"), "1");
+    assert.match(response.headers.get("link") ?? "", /rel=preconnect/);
+    assert.doesNotMatch(response.headers.get("link") ?? "", /rel=preload; as=video/);
+    assert.doesNotMatch(response.headers.get("set-cookie") ?? "", /__rend_playback=/);
+    assert.match(body, /data-rend-player-state="loading"/);
+    assert.doesNotMatch(body, /<video[^>]+src=/);
+    assert.match(body, /progressive_mp4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fast embed route can forward bootstrap cookies to the document response", async () => {
   const originalFetch = globalThis.fetch;
   const fetches: Array<{ url: string; headers: Headers }> = [];
 
@@ -100,7 +136,7 @@ test("fast embed route forwards bootstrap cookies to the document response", asy
   try {
     const response = await getFastEmbed(
       new Request(
-        `https://www.rend.so/embed-fast/${ASSET_ID}?autoplay=1&controls=0`,
+        `https://www.rend.so/embed-fast/${ASSET_ID}?autoplay=1&controls=0&bootstrap=server`,
         {
           headers: {
             "x-vercel-ip-country": "GB",

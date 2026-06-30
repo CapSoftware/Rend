@@ -11,9 +11,11 @@ type FastEmbedRenderOptions = {
   assetId: string;
   autoPlay: boolean;
   bootstrap: WatchPlaybackBootstrapResponse | null;
+  bootstrapUrl: string;
   bootstrapMs?: number;
   controls: boolean;
   muted: boolean;
+  playbackOriginHint?: { dnsPrefetch: string; origin: string } | null;
   startupMode: "hls" | "opener" | "progressive";
 };
 
@@ -56,6 +58,10 @@ function startupMode(value: string | null) {
   return "progressive";
 }
 
+function bootstrapMode(value: string | null) {
+  return value === "server" ? "server" : "client";
+}
+
 function bootstrapUrlForRequest(request: Request, assetId: string) {
   const requestUrl = new URL(request.url);
   const bootstrapUrl = new URL(
@@ -69,6 +75,11 @@ function bootstrapUrlForRequest(request: Request, assetId: string) {
     bootstrapUrl.searchParams.set("playbackBaseUrl", playbackBaseUrl);
   }
   return bootstrapUrl;
+}
+
+function clientBootstrapUrlForRequest(request: Request, assetId: string) {
+  const bootstrapUrl = bootstrapUrlForRequest(request, assetId);
+  return `${bootstrapUrl.pathname}${bootstrapUrl.search}`;
 }
 
 function forwardedBootstrapHeaders(request: Request) {
@@ -227,6 +238,10 @@ function playbackOrigin(bootstrap: WatchPlaybackBootstrapReady | null) {
   }
 }
 
+function defaultPlaybackOriginHint() {
+  return { dnsPrefetch: "//api.rend.so", origin: "https://api.rend.so" };
+}
+
 function preloadablePlaybackSelection(
   selection: ReturnType<typeof playbackSelection>,
 ) {
@@ -267,7 +282,7 @@ function playerMessage(
 export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const ready = options.bootstrap?.status === "ready" ? options.bootstrap : null;
   const selection = playbackSelection(options.bootstrap, options.startupMode);
-  const edge = playbackOrigin(ready);
+  const edge = playbackOrigin(ready) ?? options.playbackOriginHint ?? null;
   const state = selection ? "ready" : options.bootstrap ? options.bootstrap.status : "loading";
   const message = playerMessage(options.bootstrap, selection);
   const autoPlay = options.autoPlay ? " autoplay" : "";
@@ -284,7 +299,7 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
     typeof options.bootstrapMs === "number"
       ? ` data-rend-bootstrap-ms="${Math.max(0, Math.round(options.bootstrapMs))}"`
       : "";
-  const fallbackBootstrapUrl = `/api/player/${encodeURIComponent(options.assetId)}`;
+  const preferredStartup = options.startupMode;
 
   return `<!doctype html>
 <html lang="en">
@@ -311,7 +326,7 @@ body{overflow:hidden}
 <div class="rend-fast__message" role="status" aria-live="polite">${html(message)}</div>
 </main>
 <script>
-(()=>{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const mark=(name)=>{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))};const dims=()=>{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))};video.addEventListener("loadedmetadata",()=>{dims();mark("data-rend-metadata-ms")},{once:true});video.addEventListener("canplay",()=>{dims();mark("data-rend-canplay-ms")},{once:true});video.addEventListener("playing",()=>{root.setAttribute("data-rend-player-state","playing");dims()});if("requestVideoFrameCallback"in video){video.requestVideoFrameCallback(()=>{dims();mark("data-rend-first-frame-ms")})}else{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{once:true})}if(!video.currentSrc&&!video.getAttribute("src")){fetch(${jsString(fallbackBootstrapUrl)},{credentials:"same-origin",headers:{accept:"application/json"}}).then(r=>r.ok?r.json():null).then(data=>{if(!data||data.status!=="ready")return;const src=data.manifest_url||data.playback_url||data.opener_url;if(!src)return;root.setAttribute("data-rend-player-state","ready");root.setAttribute("data-rend-player-selected",data.manifest_url?"native_hls":"opener");root.setAttribute("data-rend-player-artifact",data.manifest_url?"hls/master.m3u8":"opener.mp4");video.src=src;video.load()}).catch(()=>{})}})();
+(()=>{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const assetId=${jsString(options.assetId)};const preferredStartup=${jsString(preferredStartup)};const bootstrapUrl=${jsString(options.bootstrapUrl)};const autoPlay=${options.autoPlay ? "true" : "false"};const bootstrapStarted=performance.now();const mark=(name)=>{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))};const dims=()=>{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))};const play=()=>{if(autoPlay)video.play().catch(()=>{})};const progressive=(data)=>{if(data.playable_state!=="hls_ready"||!data.manifest_url)return null;const byRendition=new Map();for(const hint of Array.isArray(data.prefetch_hints)?data.prefetch_hints:[]){const match=/^hls\\/([^/]+)\\/([^/]+)$/.exec(String(hint.artifact_path||""));if(!match)continue;const state=byRendition.get(match[1])||{init:false,segment:false};state.init=state.init||match[2]===\`init_\${match[1]}.mp4\`;state.segment=state.segment||match[2]==="segment_00000.m4s";byRendition.set(match[1],state)}let rendition="";for(const candidate of ["360p","480p","720p","1080p","2k","4k"]){const state=byRendition.get(candidate);if(state&&state.init&&state.segment){rendition=candidate;break}}if(!rendition)return null;try{const parsed=new URL(data.manifest_url);const prefix="/v/"+assetId+"/";if(!parsed.pathname.startsWith(prefix))return null;const artifactPath="hls/"+rendition+"/progressive.mp4";parsed.pathname=prefix+artifactPath;parsed.search="";parsed.hash="";return{artifactPath,contentType:"video/mp4",label:"progressive_mp4",url:parsed.toString()}}catch{return null}};const select=(data)=>{if(!data||data.status!=="ready")return null;if(preferredStartup==="opener"&&data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(preferredStartup==="progressive"){const selected=progressive(data);if(selected)return selected}if(data.playable_state==="hls_ready"&&data.manifest_url)return{artifactPath:"hls/master.m3u8",contentType:data.manifest_content_type||"application/vnd.apple.mpegurl",label:"native_hls",url:data.manifest_url};if(data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(data.playback_url)return{artifactPath:data.playable_state==="hls_ready"?"hls/master.m3u8":"opener.mp4",contentType:data.playback_content_type||"",label:"primary",url:data.playback_url};return null};video.addEventListener("loadedmetadata",()=>{dims();mark("data-rend-metadata-ms")},{once:true});video.addEventListener("canplay",()=>{dims();mark("data-rend-canplay-ms")},{once:true});video.addEventListener("playing",()=>{root.setAttribute("data-rend-player-state","playing");dims()});if("requestVideoFrameCallback"in video){video.requestVideoFrameCallback(()=>{dims();mark("data-rend-first-frame-ms")})}else{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{once:true})}if(!video.currentSrc&&!video.getAttribute("src")){fetch(bootstrapUrl,{credentials:"same-origin",headers:{accept:"application/json"}}).then(r=>r.ok?r.json():null).then(data=>{root.setAttribute("data-rend-bootstrap-ms",String(Math.round(performance.now()-bootstrapStarted)));const selected=select(data);if(!selected)return;root.setAttribute("data-rend-player-state","ready");root.setAttribute("data-rend-player-selected",selected.label);root.setAttribute("data-rend-player-artifact",selected.artifactPath);if(data.poster_url){root.setAttribute("data-rend-poster",data.poster_url);video.poster=data.poster_url}root.setAttribute("data-rend-ready-status",data.status||"ready");root.setAttribute("data-rend-source-state",data.source_state||"");root.setAttribute("data-rend-playable-state",data.playable_state||"");video.src=selected.url;video.load();play()}).catch(()=>{root.setAttribute("data-rend-player-state","playback_failure")})}else{play()}})();
 </script>
 </body>
 </html>`;
@@ -359,13 +374,15 @@ export async function GET(
     requestUrl.searchParams.get("startupMode") ??
       requestUrl.searchParams.get("startup"),
   );
-  const { bootstrap, elapsedMs, response } = await fetchBootstrap(
-    request,
-    normalizedAssetId,
-  );
+  const bootstrapStrategy = bootstrapMode(requestUrl.searchParams.get("bootstrap"));
+  const shouldServerBootstrap = bootstrapStrategy === "server";
+  const bootstrapResult = shouldServerBootstrap
+    ? await fetchBootstrap(request, normalizedAssetId)
+    : { bootstrap: null, elapsedMs: 0, response: null };
+  const { bootstrap, elapsedMs, response } = bootstrapResult;
   const ready = bootstrap?.status === "ready" ? bootstrap : null;
   const selection = playbackSelection(bootstrap, startup);
-  const edge = playbackOrigin(ready);
+  const edge = playbackOrigin(ready) ?? defaultPlaybackOriginHint();
   const headers = new Headers({
     "cache-control": "no-store",
     "content-type": "text/html; charset=utf-8",
@@ -385,9 +402,11 @@ export async function GET(
       assetId: normalizedAssetId,
       autoPlay,
       bootstrap,
+      bootstrapUrl: clientBootstrapUrlForRequest(request, normalizedAssetId),
       bootstrapMs: elapsedMs,
       controls,
       muted,
+      playbackOriginHint: edge,
       startupMode: startup,
     }),
     { headers },
