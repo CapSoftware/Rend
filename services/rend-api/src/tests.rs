@@ -1623,6 +1623,28 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
     );
 }
 
+#[test]
+fn api_fast_embed_inline_segment_urls_use_selected_playback_base() {
+    let urls = fast_embed_inline_segment_urls(
+        "https://ams-1.play.rend.so",
+        "asset-123",
+        "360p",
+        &["segment_00001.m4s", "segment_00002.m4s"],
+    );
+
+    assert_eq!(
+        urls,
+        vec![
+            "https://ams-1.play.rend.so/v/asset-123/hls/360p/segment_00001.m4s",
+            "https://ams-1.play.rend.so/v/asset-123/hls/360p/segment_00002.m4s",
+        ]
+    );
+    assert!(
+        urls.iter()
+            .all(|url| !url.starts_with("https://api.rend.so"))
+    );
+}
+
 #[tokio::test]
 async fn api_fast_embed_playback_base_override_is_allowlisted() {
     let mut config = test_config();

@@ -2413,7 +2413,7 @@ async fn api_fast_embed_inner(
         .map(|value| query_flag(Some(value), true))
         .unwrap_or(auto_play);
     let inline_startup = if startup == "mse" {
-        fast_embed_inline_startup(state.as_ref(), &response, &selection)
+        fast_embed_inline_startup(state.as_ref(), &response, &selection, &playback_base_url)
             .await
             .unwrap_or(None)
     } else {
@@ -2434,7 +2434,7 @@ async fn api_fast_embed_inner(
     if let Ok(cookie) = playback_cookie_header(
         &response.playback_token,
         response.ttl_seconds,
-        &state.config.playback_base_url,
+        &playback_base_url,
         state.config.playback_cookie_domain.as_deref(),
     )
     .parse()
@@ -3832,6 +3832,7 @@ async fn fast_embed_inline_startup(
     state: &AppState,
     response: &PlaybackBootstrapResponse,
     selection: &FastEmbedPlaybackSelection,
+    playback_base_url: &str,
 ) -> Result<Option<FastEmbedInlineStartup>, AppError> {
     let Some(rendition) = hls_progressive_rendition(&selection.artifact_path) else {
         return Ok(None);
@@ -3880,14 +3881,14 @@ async fn fast_embed_inline_startup(
     let segment_urls = segment_names
         .iter()
         .skip(1)
-        .map(|segment| {
-            artifact_url(
-                &state.config.playback_base_url,
-                &response.asset_id,
-                &format!("hls/{rendition}/{segment}"),
-            )
-        })
+        .map(String::as_str)
         .collect::<Vec<_>>();
+    let segment_urls = fast_embed_inline_segment_urls(
+        playback_base_url,
+        &response.asset_id,
+        rendition,
+        &segment_urls,
+    );
 
     Ok(Some(FastEmbedInlineStartup {
         artifact_path: format!(
@@ -3897,6 +3898,24 @@ async fn fast_embed_inline_startup(
         startup_b64: BASE64_STANDARD.encode(startup),
         segment_urls,
     }))
+}
+
+fn fast_embed_inline_segment_urls(
+    playback_base_url: &str,
+    asset_id: &str,
+    rendition: &str,
+    segment_names: &[&str],
+) -> Vec<String> {
+    segment_names
+        .iter()
+        .map(|segment| {
+            artifact_url(
+                playback_base_url,
+                asset_id,
+                &format!("hls/{rendition}/{segment}"),
+            )
+        })
+        .collect()
 }
 
 fn hls_master_codecs_for_rendition(master: &str, rendition: &str) -> Option<String> {
