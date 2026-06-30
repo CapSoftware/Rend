@@ -66,6 +66,7 @@ export function WatchInstantPlayer({
         data-rend-opener-content-type={ready?.opener_content_type}
         data-rend-poster={poster ?? ""}
         data-rend-prefetch-hint-count={ready?.prefetch_hints.length ?? 0}
+        data-rend-playback-engine={playbackEngine}
         data-rend-document-start-ms="0"
         data-rend-bootstrap-ms={initialBootstrapMs}
         data-rend-asset-id={assetId}

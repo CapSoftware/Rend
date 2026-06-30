@@ -13,6 +13,7 @@ import {
   initialSourceSelection,
   instantPlaybackScript,
   playbackStateMessage,
+  playbackEngineForUserAgent,
   readyBootstrap,
   startupPreloadHints,
   type PlaybackEngine,
@@ -82,9 +83,9 @@ function playerStartupMode(query: Query): StartupMode {
   return requested === "opener" ? "opener" : "hls";
 }
 
-function playerPlaybackEngine(query: Query): PlaybackEngine {
+function requestedPlaybackEngine(query: Query): PlaybackEngine | null {
   const requested = firstValue(query.playbackEngine) ?? firstValue(query.engine);
-  return requested === "mse" || requested === "native" ? requested : "auto";
+  return requested === "mse" || requested === "native" ? requested : null;
 }
 
 function accentColor(value: string | string[] | undefined) {
@@ -129,7 +130,8 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
   const accent = accentColor(query.accent ?? query.color);
   const startTime = startTimeSeconds(query.t ?? query.start);
   const startupMode = playerStartupMode(query);
-  const playbackEngine = playerPlaybackEngine(query);
+  const playbackEngine =
+    requestedPlaybackEngine(query) ?? playbackEngineForUserAgent(headerStore.get("user-agent"));
 
   const ready = readyBootstrap(initialBootstrap);
   const selection = initialSourceSelection(initialBootstrap, startupMode, playbackEngine);
@@ -186,6 +188,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
         data-rend-opener-content-type={ready?.opener_content_type}
         data-rend-poster={poster ?? ""}
         data-rend-prefetch-hint-count={ready?.prefetch_hints.length ?? 0}
+        data-rend-playback-engine={playbackEngine}
         data-rend-document-start-ms="0"
         data-rend-bootstrap-ms={initialBootstrapMs}
         data-rend-asset-id={assetId}

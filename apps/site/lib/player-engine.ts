@@ -113,6 +113,32 @@ export function readyBootstrap(data: WatchPlaybackBootstrapResponse | null | und
   return data?.status === "ready" ? data : null;
 }
 
+export function playbackEngineForUserAgent(
+  userAgent: string | null | undefined
+): PlaybackEngine {
+  const ua = userAgent ?? "";
+  if (!ua) return "auto";
+
+  const isIos = /\b(iPhone|iPad|iPod)\b/i.test(ua);
+  const isIpadDesktopMode = /\bMacintosh\b/i.test(ua) && /\bMobile\//i.test(ua);
+  if (isIos || isIpadDesktopMode) return "auto";
+
+  const isSafari =
+    /\bSafari\//i.test(ua) &&
+    !/\b(Chrome|Chromium|CriOS|FxiOS|Edg|OPR|SamsungBrowser)\//i.test(ua) &&
+    !/\bAndroid\b/i.test(ua);
+  if (isSafari) return "auto";
+
+  if (
+    /\b(Chrome|Chromium|Edg|Firefox|OPR|SamsungBrowser)\//i.test(ua) ||
+    /\bAndroid\b/i.test(ua)
+  ) {
+    return "mse";
+  }
+
+  return "auto";
+}
+
 export function isNativeHlsSupported(video: HTMLVideoElement) {
   return Boolean(
     video.canPlayType("application/vnd.apple.mpegurl") ||
