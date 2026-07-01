@@ -37,6 +37,8 @@ Environment:
                         Browser playback base URL for Tigris mode.
   REND_PUBLIC_PLAYBACK_ENABLED
                         Use anonymous public playback aliases. Defaults false.
+  REND_PUBLIC_PLAYBACK_ALIAS_BUCKET
+                        Optional bucket for public playback aliases.
   REND_PUBLIC_PLAYBACK_ALIAS_PREFIX
                         Public playback object prefix. Defaults v.
   REND_PUBLIC_PLAYBACK_ALIAS_ACL
@@ -144,6 +146,7 @@ defaults = {
     "REND_PLAYBACK_MODE": "tigris",
     "REND_TIGRIS_PLAYBACK_BASE_URL": "https://api.rend.so",
     "REND_PUBLIC_PLAYBACK_ENABLED": "false",
+    "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET": "",
     "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX": "v",
     "REND_PUBLIC_PLAYBACK_ALIAS_ACL": "public-read",
     "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS": "8",
@@ -174,6 +177,7 @@ keys = [
     "REND_PLAYBACK_MODE",
     "REND_TIGRIS_PLAYBACK_BASE_URL",
     "REND_PUBLIC_PLAYBACK_ENABLED",
+    "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET",
     "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX",
     "REND_PUBLIC_PLAYBACK_ALIAS_ACL",
     "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS",
@@ -195,11 +199,12 @@ keys = [
     "REND_BILLING_STORAGE_SYNC_LAG_SECS",
     "REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS",
 ]
+optional_keys = {"REND_PUBLIC_PLAYBACK_ALIAS_BUCKET"}
 
 with open(target, "w", encoding="utf-8") as file:
     for key in keys:
         value = os.environ.get(key, defaults.get(key, ""))
-        if not value:
+        if not value and key not in optional_keys:
             raise SystemExit(f"{key} is required")
         if "\n" in value or "\r" in value:
             raise SystemExit(f"{key} must be a single-line value")

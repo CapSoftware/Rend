@@ -64,7 +64,10 @@ playback aliases under `v/{assetId}/...` while leaving canonical source objects
 private under `videos/{assetId}/...`. Use
 `REND_PUBLIC_PLAYBACK_ALIAS_ACL=public-read` for a private bucket with Tigris
 object ACLs enabled, or `inherit` only when the playback bucket/default is
-already public-read.
+already public-read. Prefer `REND_PUBLIC_PLAYBACK_ALIAS_BUCKET` for production:
+set it to a dedicated public playback bucket so source uploads and canonical
+`videos/{assetId}/...` objects remain in the private bucket while only generated
+playback aliases are public.
 
 Existing assets created before public aliases were enabled need a one-time
 backfill before they can use the public media host:
@@ -195,6 +198,7 @@ API:
 - `REND_PLAYBACK_MODE=tigris`
 - `REND_TIGRIS_PLAYBACK_BASE_URL`
 - `REND_PUBLIC_PLAYBACK_ENABLED`
+- `REND_PUBLIC_PLAYBACK_ALIAS_BUCKET`
 - `REND_PUBLIC_PLAYBACK_ALIAS_PREFIX`
 - `REND_PUBLIC_PLAYBACK_ALIAS_ACL`
 - `REND_PLAYBACK_COOKIE_DOMAIN`

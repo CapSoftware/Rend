@@ -449,6 +449,10 @@ fn public_playback_alias_config_from_env(
         return Ok(None);
     }
     Ok(Some(media::PublicPlaybackAliasConfig {
+        bucket: public_playback_alias_bucket_from_env(&env_string(
+            "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET",
+            "",
+        ))?,
         prefix: media::normalize_public_playback_alias_prefix(&env_string(
             "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX",
             "v",
@@ -458,6 +462,30 @@ fn public_playback_alias_config_from_env(
             "public-read",
         ))?,
     }))
+}
+
+fn public_playback_alias_bucket_from_env(value: &str) -> Result<Option<String>> {
+    let bucket = value.trim();
+    if bucket.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        bucket.len() >= 3
+            && bucket.len() <= 63
+            && bucket
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && bucket
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && bucket
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
+        "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET must be a safe Tigris bucket name"
+    );
+    Ok(Some(bucket.to_owned()))
 }
 
 fn public_playback_alias_acl_from_env(value: &str) -> Result<media::PublicPlaybackAliasAcl> {

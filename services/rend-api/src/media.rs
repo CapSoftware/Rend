@@ -116,6 +116,7 @@ pub enum PublicPlaybackAliasAcl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicPlaybackAliasConfig {
+    pub bucket: Option<String>,
     pub prefix: String,
     pub acl: PublicPlaybackAliasAcl,
 }
@@ -683,7 +684,7 @@ async fn upload_public_playback_alias(
     let mut put = request
         .s3
         .put_object()
-        .bucket(&request.s3_bucket)
+        .bucket(config.bucket.as_deref().unwrap_or(&request.s3_bucket))
         .key(&alias_key)
         .content_type(content_type)
         .content_length(byte_size)

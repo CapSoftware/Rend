@@ -26,6 +26,8 @@ Usage:
 
 Options:
   --asset-id ID              Asset id to backfill. Can be passed more than once.
+  --target-bucket BUCKET     Optional public alias bucket. Defaults to REND_PUBLIC_PLAYBACK_ALIAS_BUCKET or S3_BUCKET.
+  --create-target-bucket     Create the target bucket as public-read before copying.
   --prefix PREFIX            Public alias prefix. Defaults to REND_PUBLIC_PLAYBACK_ALIAS_PREFIX or v.
   --acl public-read|inherit  Alias object ACL. Defaults to REND_PUBLIC_PLAYBACK_ALIAS_ACL or public-read.
   --public-base-url URL      Optional unauthenticated GET verification base URL.
@@ -37,6 +39,8 @@ Options:
 function parseArgs(argv) {
   const options = {
     assetIds: [],
+    targetBucket: "",
+    createTargetBucket: false,
     prefix: process.env.REND_PUBLIC_PLAYBACK_ALIAS_PREFIX || "v",
     acl: process.env.REND_PUBLIC_PLAYBACK_ALIAS_ACL || "public-read",
     publicBaseUrl: "",
@@ -59,6 +63,15 @@ function parseArgs(argv) {
     if (arg === "--prefix") {
       options.prefix = String(next || "");
       index += 1;
+      continue;
+    }
+    if (arg === "--target-bucket") {
+      options.targetBucket = String(next || "");
+      index += 1;
+      continue;
+    }
+    if (arg === "--create-target-bucket") {
+      options.createTargetBucket = true;
       continue;
     }
     if (arg === "--acl") {
@@ -132,6 +145,18 @@ function normalizeAliasPrefix(value) {
     }
   }
   return prefix;
+}
+
+function normalizeBucketName(value) {
+  const bucket = String(value || "").trim();
+  if (
+    bucket.length < 3 ||
+    bucket.length > 63 ||
+    !/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(bucket)
+  ) {
+    throw new Error("target bucket must be a safe Tigris bucket name");
+  }
+  return bucket;
 }
 
 function normalizeBaseUrl(value) {
@@ -227,11 +252,11 @@ function awsEncode(value) {
   );
 }
 
-function objectUrl(env, key = "") {
+function objectUrl(env, key = "", bucketName = env.S3_BUCKET) {
   const endpoint = normalizeBaseUrl(env.S3_ENDPOINT);
   const url = new URL(endpoint);
   const basePath = url.pathname.replace(/\/+$/, "");
-  const bucket = awsEncode(env.S3_BUCKET);
+  const bucket = awsEncode(bucketName);
   const encodedKey = key
     ? key
         .split("/")
@@ -298,9 +323,9 @@ function credentialScope(dateStamp, region) {
 
 async function s3Fetch(
   env,
-  { method, key = "", query = {}, headers = {}, body },
+  { method, key = "", query = {}, headers = {}, body, bucket = env.S3_BUCKET },
 ) {
-  const url = objectUrl(env, key);
+  const url = objectUrl(env, key, bucket);
   for (const [name, value] of Object.entries(query)) {
     if (value !== undefined && value !== null) {
       url.searchParams.set(name, String(value));
@@ -348,9 +373,11 @@ async function s3Fetch(
   const response = await fetch(url, { method, headers: fetchHeaders, body });
   if (!response.ok) {
     const text = redactText((await response.text()).slice(0, 1000));
-    throw new Error(
+    const error = new Error(
       `S3 ${method} failed with HTTP ${response.status}: ${text}`,
     );
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
@@ -375,12 +402,13 @@ function parseListObjectKeys(text) {
   );
 }
 
-async function listObjectKeys(env, prefix) {
+async function listObjectKeys(env, prefix, bucket = env.S3_BUCKET) {
   const keys = [];
   let continuationToken = "";
   do {
     const response = await s3Fetch(env, {
       method: "GET",
+      bucket,
       query: {
         "list-type": "2",
         prefix,
@@ -455,7 +483,11 @@ async function mapLimit(items, limit, mapper) {
 }
 
 async function putAlias(env, options, objectKey, aliasKey) {
-  const sourceResponse = await s3Fetch(env, { method: "GET", key: objectKey });
+  const sourceResponse = await s3Fetch(env, {
+    method: "GET",
+    key: objectKey,
+    bucket: env.S3_BUCKET,
+  });
   const body = new Uint8Array(await sourceResponse.arrayBuffer());
   const contentType = contentTypeForKey(
     objectKey,
@@ -471,6 +503,7 @@ async function putAlias(env, options, objectKey, aliasKey) {
   await s3Fetch(env, {
     method: "PUT",
     key: aliasKey,
+    bucket: options.targetBucket,
     headers,
     body,
   });
@@ -507,7 +540,7 @@ async function verifyPublicGet(options, assetId) {
 
 async function backfillAsset(env, options, assetId) {
   const sourcePrefix = `videos/${assetId}/`;
-  const allKeys = await listObjectKeys(env, sourcePrefix);
+  const allKeys = await listObjectKeys(env, sourcePrefix, env.S3_BUCKET);
   const artifactKeys = playbackArtifactKeysForAsset(allKeys, assetId);
   if (!artifactKeys.some((key) => key.endsWith("/hls/master.m3u8"))) {
     throw new Error(`asset=${assetId} has no hls/master.m3u8 object`);
@@ -522,7 +555,7 @@ async function backfillAsset(env, options, assetId) {
   }
 
   log(
-    `asset=${assetId} playback_artifacts=${planned.length} prefix=${options.prefix} acl=${options.acl} dry_run=${options.dryRun}`,
+    `asset=${assetId} playback_artifacts=${planned.length} target_bucket=${options.targetBucket === env.S3_BUCKET ? "source" : "separate"} prefix=${options.prefix} acl=${options.acl} dry_run=${options.dryRun}`,
   );
   if (options.dryRun) return;
 
@@ -536,6 +569,31 @@ async function backfillAsset(env, options, assetId) {
   await verifyPublicGet(options, assetId);
 }
 
+async function createTargetBucket(env, options) {
+  if (!options.createTargetBucket) return;
+  if (options.dryRun) {
+    log("target bucket creation skipped for dry-run");
+    return;
+  }
+  if (options.targetBucket === env.S3_BUCKET) {
+    throw new Error("--create-target-bucket requires a separate target bucket");
+  }
+  try {
+    await s3Fetch(env, {
+      method: "PUT",
+      bucket: options.targetBucket,
+      headers: { "x-amz-acl": "public-read" },
+    });
+    log("target bucket created as public-read");
+  } catch (error) {
+    if (error.status === 409) {
+      log("target bucket already exists; continuing");
+      return;
+    }
+    throw error;
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const env = await loadEnv(options);
@@ -546,6 +604,12 @@ async function main() {
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
   ]);
+  options.targetBucket = normalizeBucketName(
+    options.targetBucket || env.REND_PUBLIC_PLAYBACK_ALIAS_BUCKET || env.S3_BUCKET,
+  );
+  redactionValues.push(env.S3_BUCKET, options.targetBucket);
+
+  await createTargetBucket(env, options);
 
   for (const assetId of options.assetIds) {
     await backfillAsset(env, options, assetId);

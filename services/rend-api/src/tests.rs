@@ -1973,6 +1973,20 @@ fn tigris_playback_base_prefers_explicit_external_value() {
 }
 
 #[test]
+fn public_playback_alias_bucket_validation_accepts_safe_bucket_names_only() {
+    assert_eq!(
+        public_playback_alias_bucket_from_env("rend-public-playback")
+            .unwrap()
+            .as_deref(),
+        Some("rend-public-playback")
+    );
+    assert_eq!(public_playback_alias_bucket_from_env("").unwrap(), None);
+    assert!(public_playback_alias_bucket_from_env("Rend-Public").is_err());
+    assert!(public_playback_alias_bucket_from_env("rend.public").is_err());
+    assert!(public_playback_alias_bucket_from_env("https://bucket").is_err());
+}
+
+#[test]
 fn edge_registry_validation_normalizes_safe_values() {
     assert_eq!(
         normalize_edge_name("edge_id", " rend-edge.us-east-1 ").unwrap(),
