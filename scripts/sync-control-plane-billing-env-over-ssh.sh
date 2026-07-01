@@ -32,6 +32,15 @@ Environment:
   CLICKHOUSE_PASSWORD   Required ClickHouse password.
   REND_API_CORS_ALLOWED_ORIGINS
                         API CORS allowlist. Defaults to production Rend origins.
+  REND_PLAYBACK_MODE    Playback mode. Defaults to tigris.
+  REND_TIGRIS_PLAYBACK_BASE_URL
+                        Browser playback base URL for Tigris mode.
+  REND_PUBLIC_PLAYBACK_ENABLED
+                        Use anonymous public playback aliases. Defaults false.
+  REND_PUBLIC_PLAYBACK_ALIAS_PREFIX
+                        Public playback object prefix. Defaults v.
+  REND_PUBLIC_PLAYBACK_ALIAS_ACL
+                        Public playback object ACL. Defaults public-read.
   REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS
                         Playback bootstrap prefetch hint budget. Defaults to 8.
   AUTUMN_SECRET_KEY     Required live Autumn secret key.
@@ -132,6 +141,11 @@ defaults = {
     "REND_API_AUTO_MIGRATE": "false",
     "CLICKHOUSE_DATABASE": "rend",
     "REND_API_CORS_ALLOWED_ORIGINS": "https://rend.so,https://www.rend.so",
+    "REND_PLAYBACK_MODE": "tigris",
+    "REND_TIGRIS_PLAYBACK_BASE_URL": "https://api.rend.so",
+    "REND_PUBLIC_PLAYBACK_ENABLED": "false",
+    "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX": "v",
+    "REND_PUBLIC_PLAYBACK_ALIAS_ACL": "public-read",
     "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS": "8",
     "REND_BILLING_MODE": "autumn",
     "AUTUMN_API_URL": "https://api.useautumn.com/v1",
@@ -157,6 +171,11 @@ keys = [
     "CLICKHOUSE_USER",
     "CLICKHOUSE_PASSWORD",
     "REND_API_CORS_ALLOWED_ORIGINS",
+    "REND_PLAYBACK_MODE",
+    "REND_TIGRIS_PLAYBACK_BASE_URL",
+    "REND_PUBLIC_PLAYBACK_ENABLED",
+    "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX",
+    "REND_PUBLIC_PLAYBACK_ALIAS_ACL",
     "REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS",
     "REND_BILLING_MODE",
     "AUTUMN_SECRET_KEY",
@@ -185,6 +204,12 @@ with open(target, "w", encoding="utf-8") as file:
         if "\n" in value or "\r" in value:
             raise SystemExit(f"{key} must be a single-line value")
         file.write(f"{key}={value}\n")
+
+public_playback = os.environ.get("REND_PUBLIC_PLAYBACK_ENABLED", defaults["REND_PUBLIC_PLAYBACK_ENABLED"]).lower()
+if public_playback in {"1", "true", "yes", "on"}:
+    playback_base = os.environ.get("REND_TIGRIS_PLAYBACK_BASE_URL", "").strip()
+    if not playback_base:
+        raise SystemExit("REND_TIGRIS_PLAYBACK_BASE_URL is required when REND_PUBLIC_PLAYBACK_ENABLED=true")
 PY
 
 cat >"$merge_script" <<'PY'
@@ -258,4 +283,4 @@ scp "${scp_args[@]}" "$merge_script" "$target:$remote_merge"
 remote_command="python3 $(shell_quote "$remote_merge") $(shell_quote "$remote_fragment") $(shell_quote "$api_env") $(shell_quote "$worker_env")"
 ssh "${ssh_args[@]}" "$target" "sudo -n bash -lc $(shell_quote "$remote_command")"
 ssh "${ssh_args[@]}" "$target" "rm -rf $remote_dir_q"
-echo "Control-plane env sync completed for keys: REND_API_AUTO_MIGRATE CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
+echo "Control-plane env sync completed for keys: REND_API_AUTO_MIGRATE CLICKHOUSE_* REND_API_CORS_ALLOWED_ORIGINS REND_PLAYBACK_MODE REND_TIGRIS_PLAYBACK_BASE_URL REND_PUBLIC_PLAYBACK_* REND_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS REND_BILLING_MODE AUTUMN_SECRET_KEY AUTUMN_API_URL AUTUMN_API_VERSION REND_BILLING_FEATURE_* REND_BILLING_*_SYNC_*"
