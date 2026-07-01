@@ -92,6 +92,8 @@ fn test_config() -> ApiConfig {
         playback_mode: PlaybackMode::Tigris,
         playback_base_url: "http://127.0.0.1:4000".to_owned(),
         fast_embed_playback_base_urls: Vec::new(),
+        public_playback_enabled: false,
+        public_playback_alias: None,
         playback_cookie_domain: None,
         playback_token_issuer: test_issuer(),
         playback_keyring: SingleKeyring::from_key(test_signing_key()),
@@ -1568,7 +1570,8 @@ fn api_fast_embed_prefers_progressive_startup_without_token_material() {
     )
     .unwrap();
     let selection = fast_embed_playback_selection(&response, "progressive").unwrap();
-    let html = render_api_fast_embed_html(&response, &selection, None, true, false, true);
+    let html =
+        render_api_fast_embed_html(&response, &selection, None, true, false, true, "include");
 
     assert_eq!(selection.label, "progressive_mp4");
     assert_eq!(selection.artifact_path, "hls/360p/progressive.mp4");
@@ -1605,7 +1608,15 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
         startup_b64: BASE64_STANDARD.encode([0, 1, 2, 3]),
         segment_urls: vec!["https://api.rend.so/v/asset-123/hls/360p/segment_00001.m4s".to_owned()],
     };
-    let html = render_api_fast_embed_html(&response, &selection, Some(&inline), true, false, true);
+    let html = render_api_fast_embed_html(
+        &response,
+        &selection,
+        Some(&inline),
+        true,
+        false,
+        true,
+        "include",
+    );
 
     assert_eq!(fast_embed_startup_mode(None), "mse");
     assert_eq!(selection.label, "progressive_mp4");
@@ -1621,6 +1632,43 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
         !html.to_ascii_lowercase().contains("authorization"),
         "{html}"
     );
+}
+
+#[test]
+fn api_fast_embed_can_render_public_playback_without_credentials() {
+    let response = playback_bootstrap_response(
+        Some(asset_record("hls_ready")),
+        &hls_artifact_records(),
+        "https://media.rend.so",
+        &test_issuer(),
+        8,
+        NOW,
+    )
+    .unwrap();
+    let selection = fast_embed_playback_selection(&response, "progressive").unwrap();
+    let inline = FastEmbedInlineStartup {
+        artifact_path: "hls/360p/init_360p.mp4+hls/360p/segment_00000.m4s".to_owned(),
+        mime_type: "video/mp4; codecs=\"avc1.64001f,mp4a.40.2\"".to_owned(),
+        startup_b64: BASE64_STANDARD.encode([0, 1, 2, 3]),
+        segment_urls: vec![
+            "https://media.rend.so/v/asset-123/hls/360p/segment_00001.m4s".to_owned(),
+        ],
+    };
+    let html = render_api_fast_embed_html(
+        &response,
+        &selection,
+        Some(&inline),
+        true,
+        false,
+        true,
+        "omit",
+    );
+
+    assert!(html.contains(r#"crossorigin="anonymous""#));
+    assert!(html.contains(r#"fetchCredentials="omit""#));
+    assert!(!html.contains(r#"crossorigin="use-credentials""#));
+    assert!(!html.contains(r#"credentials:"include""#));
+    assert!(!html.contains(&response.playback_token), "{html}");
 }
 
 #[test]

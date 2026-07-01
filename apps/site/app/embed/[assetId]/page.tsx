@@ -12,6 +12,7 @@ import {
   initialPlaybackState,
   initialSourceSelection,
   instantPlaybackScript,
+  playbackCrossOrigin,
   playbackStateMessage,
   readyBootstrap,
   startupPreloadHints,
@@ -142,6 +143,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
   const message = playbackStateMessage(initialBootstrap, state);
   const edgeHint = playbackEdgeHint(initialBootstrap);
   const preloadHints = startupPreloadHints(initialBootstrap, startupMode);
+  const crossOrigin = playbackCrossOrigin(initialBootstrap);
 
   const playerId = `rend-embed-${assetId}`;
   const sectionStyle = accent ? ({ "--rend-accent": accent } as CSSProperties) : undefined;
@@ -166,7 +168,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
           as={hint.as}
           href={hint.url}
           type={hint.contentType}
-          crossOrigin="use-credentials"
+          crossOrigin={hint.crossOrigin}
           data-rend-startup-preload={hint.artifactPath}
         />
       ))}
@@ -202,7 +204,7 @@ export default async function EmbedPage({ params, searchParams }: EmbedPageProps
             playsInline
             preload={autoPlay ? "auto" : "metadata"}
             src={selection?.url}
-            crossOrigin="use-credentials"
+            crossOrigin={crossOrigin}
             suppressHydrationWarning
           />
           {controls && <PlayerControls />}

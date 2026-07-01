@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
+use aws_sdk_s3::{Client as S3Client, primitives::ByteStream, types::ObjectCannedAcl};
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::{fs, io, process::Command, time};
@@ -100,11 +100,24 @@ pub struct ProcessMediaRequest {
     pub s3: S3Client,
     pub db: PgPool,
     pub config: MediaProcessingConfig,
+    pub public_playback_alias: Option<PublicPlaybackAliasConfig>,
 }
 
 pub struct ProcessMediaOutcome {
     pub playable_state: String,
     pub playback_artifact_paths: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicPlaybackAliasAcl {
+    Inherit,
+    PublicRead,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicPlaybackAliasConfig {
+    pub prefix: String,
+    pub acl: PublicPlaybackAliasAcl,
 }
 
 #[derive(Clone)]
@@ -634,10 +647,12 @@ async fn upload_generated_file(
         .key(&object_key)
         .content_type(content_type)
         .content_length(byte_size)
-        .body(ByteStream::from(bytes))
+        .body(ByteStream::from(bytes.clone()))
         .send()
         .await
         .with_context(|| format!("failed to upload generated artifact {object_key}"))?;
+
+    upload_public_playback_alias(request, &object_key, content_type, byte_size, bytes).await?;
 
     Ok(UploadedArtifact {
         kind,
@@ -647,6 +662,40 @@ async fn upload_generated_file(
         duration_ms,
         resolution_tier: resolution_tier.map(str::to_owned),
     })
+}
+
+async fn upload_public_playback_alias(
+    request: &ProcessMediaRequest,
+    object_key: &str,
+    content_type: &'static str,
+    byte_size: i64,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let Some(config) = request.public_playback_alias.as_ref() else {
+        return Ok(());
+    };
+    let Some(alias_key) =
+        public_playback_alias_object_key(&request.asset_id, object_key, &config.prefix)
+    else {
+        return Ok(());
+    };
+
+    let mut put = request
+        .s3
+        .put_object()
+        .bucket(&request.s3_bucket)
+        .key(&alias_key)
+        .content_type(content_type)
+        .content_length(byte_size)
+        .body(ByteStream::from(bytes));
+    if config.acl == PublicPlaybackAliasAcl::PublicRead {
+        put = put.acl(ObjectCannedAcl::PublicRead);
+    }
+
+    put.send()
+        .await
+        .with_context(|| format!("failed to upload public playback alias {alias_key}"))?;
+    Ok(())
 }
 
 async fn persist_artifacts_and_state(
@@ -1193,6 +1242,41 @@ pub fn hls_segment_object_key(asset_id: &str, rendition_name: &str, segment_name
     format!("videos/{asset_id}/hls/{rendition_name}/{segment_name}")
 }
 
+pub fn normalize_public_playback_alias_prefix(value: &str) -> Result<String> {
+    let prefix = value.trim().trim_matches('/');
+    anyhow::ensure!(
+        !prefix.is_empty(),
+        "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX must not be empty"
+    );
+    anyhow::ensure!(
+        prefix.split('/').all(|part| !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))),
+        "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX must contain only safe path components"
+    );
+    Ok(prefix.to_owned())
+}
+
+fn public_playback_alias_object_key(
+    asset_id: &str,
+    object_key: &str,
+    alias_prefix: &str,
+) -> Option<String> {
+    let object_prefix = format!("videos/{asset_id}/");
+    let artifact_path = object_key.strip_prefix(&object_prefix)?;
+    if artifact_path == "source" || artifact_path.contains("/../") || artifact_path.contains("/./")
+    {
+        return None;
+    }
+    Some(format!(
+        "{}/{asset_id}/{artifact_path}",
+        alias_prefix.trim_matches('/')
+    ))
+}
+
 fn playback_artifact_paths(
     asset_id: &str,
     artifacts: &[UploadedArtifact],
@@ -1275,6 +1359,41 @@ mod tests {
             hls_segment_object_key("asset-123", "720p", "segment_00000.m4s"),
             "videos/asset-123/hls/720p/segment_00000.m4s"
         );
+    }
+
+    #[test]
+    fn public_playback_alias_object_keys_match_player_url_shape() {
+        assert_eq!(normalize_public_playback_alias_prefix("/v/").unwrap(), "v");
+        assert_eq!(
+            public_playback_alias_object_key(
+                "asset-123",
+                "videos/asset-123/hls/360p/segment_00000.m4s",
+                "v",
+            )
+            .as_deref(),
+            Some("v/asset-123/hls/360p/segment_00000.m4s")
+        );
+        assert_eq!(
+            public_playback_alias_object_key("asset-123", "videos/asset-123/hls/master.m3u8", "v",)
+                .as_deref(),
+            Some("v/asset-123/hls/master.m3u8")
+        );
+        assert_eq!(
+            public_playback_alias_object_key("asset-123", "videos/other/hls/master.m3u8", "v"),
+            None
+        );
+        assert_eq!(
+            public_playback_alias_object_key("asset-123", "videos/asset-123/source", "v"),
+            None
+        );
+    }
+
+    #[test]
+    fn public_playback_alias_prefix_rejects_unsafe_paths() {
+        assert!(normalize_public_playback_alias_prefix("").is_err());
+        assert!(normalize_public_playback_alias_prefix("../v").is_err());
+        assert!(normalize_public_playback_alias_prefix("v//public").is_err());
+        assert!(normalize_public_playback_alias_prefix("v/public").is_ok());
     }
 
     #[test]

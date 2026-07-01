@@ -218,7 +218,9 @@ function setPlaybackCookieHeader(
   playbackBaseUrl: string | null,
   directPlaybackEnabled: boolean,
   directCookieDomain: string | undefined,
+  playbackCredentialMode: "include" | "omit",
 ) {
+  if (playbackCredentialMode === "omit") return;
   const playbackCookie =
     directPlaybackEnabled && playbackBaseUrl
       ? playbackDirectCookieHeader(
@@ -360,15 +362,18 @@ export async function GET(
   }
   const playbackBaseUrl = playbackDecision.playbackBaseUrl;
   logPlaybackEdgeDecision(request, playbackDecision);
+  const publicPlaybackEnabled = playbackDecision.credentialMode === "omit";
   const directCookieDomain = directPlaybackCookieDomain(
     request,
     playbackBaseUrl,
   );
-  const directPlaybackEnabled = canUseDirectPlaybackCookie(
+  const directCookieEnabled = canUseDirectPlaybackCookie(
     request,
     playbackBaseUrl,
     directCookieDomain,
   );
+  const directPlaybackEnabled =
+    Boolean(playbackBaseUrl) && (publicPlaybackEnabled || directCookieEnabled);
   const cacheKey = cacheKeyForPlaybackBootstrap(
     normalizedAssetId,
     playbackBaseUrl,
@@ -388,6 +393,7 @@ export async function GET(
       cached.playbackBaseUrl,
       cached.directPlaybackEnabled,
       cached.directCookieDomain,
+      cached.safeResponse.playback_credential_mode ?? "include",
     );
     return jsonResponse(cached.safeResponse, { headers });
   }
@@ -454,6 +460,7 @@ export async function GET(
         data,
         responsePlaybackBaseUrl,
         organizationId,
+        publicPlaybackEnabled ? "omit" : "include",
       )
     : null;
 
@@ -482,6 +489,7 @@ export async function GET(
     playbackBaseUrl,
     directPlaybackEnabled,
     directCookieDomain,
+    safeResponse.playback_credential_mode ?? "include",
   );
   if (typeof playbackToken === "string") {
     rememberBootstrapResponse(cacheKey, {

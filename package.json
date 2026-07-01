@@ -64,6 +64,7 @@
     "backend:smoke:edge-warming": "scripts/smoke-edge-warming.sh",
     "backend:smoke:delete-purge": "scripts/smoke-delete-purge.sh",
     "backend:smoke:signed-playback": "scripts/smoke-edge-cache.sh",
+    "playback:backfill-public-aliases": "node scripts/backfill-public-playback-aliases.mjs",
     "openapi:lint": "node scripts/lint-openapi.mjs",
     "openapi:generate": "node scripts/generate-openapi-client.mjs",
     "openapi:check": "bun run openapi:lint && node scripts/generate-openapi-client.mjs --check",

@@ -17,6 +17,7 @@ test("watch bootstrap header round-trips safe playback metadata", () => {
     playable_state: "hls_ready",
     playback_url: `https://ash-1.play.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
     playback_content_type: "application/vnd.apple.mpegurl",
+    playback_credential_mode: "omit",
     playback_token_expires_at: 1_800_000_000,
     ttl_seconds: 900,
     opener_url: `https://ash-1.play.rend.so/v/${ASSET_ID}/opener.mp4`,
@@ -38,6 +39,7 @@ test("watch bootstrap header round-trips safe playback metadata", () => {
   const decoded = decodeWatchBootstrapHeader(encoded);
   assert.equal(decoded?.status, "ready");
   assert.equal(decoded?.asset_id, ASSET_ID);
+  assert.equal(decoded?.status === "ready" ? decoded.playback_credential_mode : "", "omit");
   assert.equal(decoded?.status === "ready" ? decoded.manifest_url : "", `https://ash-1.play.rend.so/v/${ASSET_ID}/hls/master.m3u8`);
   assert.equal(decoded?.status === "ready" ? decoded.poster_url : "", `https://ash-1.play.rend.so/v/${ASSET_ID}/thumbnail.jpg`);
 });

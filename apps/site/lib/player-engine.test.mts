@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   initialPlaybackState,
   initialSourceSelection,
+  playbackCrossOrigin,
   startupPreloadHints,
   watchHeartbeatDelta,
 } from "./player-engine.ts";
@@ -83,10 +84,25 @@ test("startup preload hints avoid duplicating native HLS startup requests", () =
     startupPreloadHints(READY_BOOTSTRAP, "hls").map((hint) => [
       hint.artifactPath,
       hint.as,
+      hint.crossOrigin,
       hint.url,
     ]),
-    [["thumbnail.jpg", "image", "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"]]
+    [["thumbnail.jpg", "image", "use-credentials", "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"]]
   );
+});
+
+test("public playback uses anonymous cross-origin media requests", () => {
+  const publicBootstrap = {
+    ...READY_BOOTSTRAP,
+    playback_credential_mode: "omit" as const,
+    playback_url: "https://media.rend.so/v/asset/hls/master.m3u8",
+    opener_url: "https://media.rend.so/v/asset/opener.mp4",
+    manifest_url: "https://media.rend.so/v/asset/hls/master.m3u8",
+    poster_url: "https://media.rend.so/v/asset/thumbnail.jpg",
+  };
+
+  assert.equal(playbackCrossOrigin(publicBootstrap), "anonymous");
+  assert.equal(startupPreloadHints(publicBootstrap, "hls")[0]?.crossOrigin, "anonymous");
 });
 
 test("startup preload hints include opener first only when requested", () => {

@@ -114,6 +114,8 @@ struct ApiConfig {
     playback_mode: PlaybackMode,
     playback_base_url: String,
     fast_embed_playback_base_urls: Vec<String>,
+    public_playback_enabled: bool,
+    public_playback_alias: Option<media::PublicPlaybackAliasConfig>,
     playback_cookie_domain: Option<String>,
     playback_token_issuer: PlaybackTokenIssuer,
     playback_keyring: SingleKeyring,
@@ -220,6 +222,8 @@ impl ApiConfig {
         let playback_base_url = playback_base_url_for_mode(playback_mode, rend_env);
         let fast_embed_playback_base_urls =
             fast_embed_playback_base_urls_from_env(rend_env, allow_insecure_edge_urls)?;
+        let public_playback_enabled = env_bool("REND_PUBLIC_PLAYBACK_ENABLED", false)?;
+        let public_playback_alias = public_playback_alias_config_from_env(public_playback_enabled)?;
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
@@ -367,6 +371,8 @@ impl ApiConfig {
             playback_mode,
             playback_base_url,
             fast_embed_playback_base_urls,
+            public_playback_enabled,
+            public_playback_alias,
             playback_cookie_domain,
             playback_token_issuer,
             playback_keyring,
@@ -434,6 +440,32 @@ fn cors_allowed_origins_from_env(rend_env: RendEnv) -> Result<Vec<HeaderValue>> 
             })
         })
         .collect()
+}
+
+fn public_playback_alias_config_from_env(
+    enabled: bool,
+) -> Result<Option<media::PublicPlaybackAliasConfig>> {
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(Some(media::PublicPlaybackAliasConfig {
+        prefix: media::normalize_public_playback_alias_prefix(&env_string(
+            "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX",
+            "v",
+        ))?,
+        acl: public_playback_alias_acl_from_env(&env_string(
+            "REND_PUBLIC_PLAYBACK_ALIAS_ACL",
+            "public-read",
+        ))?,
+    }))
+}
+
+fn public_playback_alias_acl_from_env(value: &str) -> Result<media::PublicPlaybackAliasAcl> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "inherit" | "none" => Ok(media::PublicPlaybackAliasAcl::Inherit),
+        "public-read" => Ok(media::PublicPlaybackAliasAcl::PublicRead),
+        _ => anyhow::bail!("REND_PUBLIC_PLAYBACK_ALIAS_ACL must be public-read, inherit, or empty"),
+    }
 }
 
 fn playback_base_url_for_mode(mode: PlaybackMode, rend_env: RendEnv) -> String {
@@ -2399,6 +2431,8 @@ async fn api_fast_embed_inner(
 ) -> Result<Response, AppError> {
     let playback_base_url =
         fast_embed_playback_base_url(state.as_ref(), query.playback_base_url.as_deref())?;
+    let playback_credential_mode =
+        fast_embed_playback_credential_mode(state.as_ref(), &playback_base_url);
     let response =
         get_public_asset_playback_inner(state.clone(), asset_id, &playback_base_url).await?;
     let startup =
@@ -2426,6 +2460,7 @@ async fn api_fast_embed_inner(
         auto_play,
         controls,
         muted,
+        playback_credential_mode,
     );
     let mut rendered = Html(html).into_response();
     let headers = rendered.headers_mut();
@@ -3716,6 +3751,14 @@ fn fast_embed_playback_base_url(state: &AppState, value: Option<&str>) -> Result
     Ok(requested)
 }
 
+fn fast_embed_playback_credential_mode(state: &AppState, playback_base_url: &str) -> &'static str {
+    if state.config.public_playback_enabled && playback_base_url == state.config.playback_base_url {
+        "omit"
+    } else {
+        "include"
+    }
+}
+
 fn fast_embed_playback_selection(
     response: &PlaybackBootstrapResponse,
     startup: &str,
@@ -3982,6 +4025,7 @@ fn render_api_fast_embed_html(
     auto_play: bool,
     controls: bool,
     muted: bool,
+    playback_credential_mode: &str,
 ) -> String {
     let auto_play_attr = if auto_play { " autoplay" } else { "" };
     let controls_attr = if controls { " controls" } else { "" };
@@ -4009,22 +4053,34 @@ fn render_api_fast_embed_html(
             html_escape(&selection.content_type)
         )
     };
+    let cross_origin = if playback_credential_mode == "omit" {
+        "anonymous"
+    } else {
+        "use-credentials"
+    };
+    let fetch_credentials = if playback_credential_mode == "omit" {
+        "omit"
+    } else {
+        "include"
+    };
     let preload_link = if let Some(inline) = inline_startup {
         inline
             .segment_urls
             .first()
             .map(|url| {
                 format!(
-                    r#"<link rel="preload" as="fetch" href="{}" type="video/mp4" crossorigin="use-credentials" fetchpriority="high">"#,
-                    html_escape(url)
+                    r#"<link rel="preload" as="fetch" href="{}" type="video/mp4" crossorigin="{}" fetchpriority="high">"#,
+                    html_escape(url),
+                    cross_origin
                 )
             })
             .unwrap_or_default()
     } else if selection.content_type == "video/mp4" {
         format!(
-            r#"<link rel="preload" as="video" href="{}" type="{}" crossorigin="use-credentials" fetchpriority="high">"#,
+            r#"<link rel="preload" as="video" href="{}" type="{}" crossorigin="{}" fetchpriority="high">"#,
             html_escape(&selection.url),
-            html_escape(&selection.content_type)
+            html_escape(&selection.content_type),
+            cross_origin
         )
     } else {
         String::new()
@@ -4057,18 +4113,20 @@ body{{overflow:hidden}}
 </head>
 <body>
 <main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="{playback_engine}" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
-<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="use-credentials"></video>
+<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="{cross_origin}"></video>
 <div class="rend-fast__message" role="status" aria-live="polite">Ready</div>
 </main>
 <script>
-(()=>{{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const inlineStartup={inline_startup_json};const fallback={fallback_json};const autoPlay={auto_play_js};const mark=(name)=>{{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))}};const dims=()=>{{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))}};const play=()=>{{if(autoPlay)video.play().catch(()=>{{}})}};const selection=(label,artifactPath,engine)=>{{root.setAttribute("data-rend-player-selected",label);root.setAttribute("data-rend-player-artifact",artifactPath);root.setAttribute("data-rend-playback-engine",engine);root.setAttribute("data-rend-player-state","ready")}};const bytes=(value)=>{{const binary=atob(value);const output=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)output[i]=binary.charCodeAt(i);return output}};const append=(buffer,data)=>new Promise((resolve,reject)=>{{const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("append failed"))}};const cleanup=()=>{{buffer.removeEventListener("updateend",done);buffer.removeEventListener("error",fail)}};buffer.addEventListener("updateend",done);buffer.addEventListener("error",fail);buffer.appendBuffer(data)}});const sourceOpen=(mediaSource)=>new Promise((resolve,reject)=>{{if(mediaSource.readyState==="open"){{resolve();return}}const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("source open failed"))}};const cleanup=()=>{{mediaSource.removeEventListener("sourceopen",done);mediaSource.removeEventListener("sourceclose",fail);mediaSource.removeEventListener("sourceended",fail)}};mediaSource.addEventListener("sourceopen",done,{{once:true}});mediaSource.addEventListener("sourceclose",fail,{{once:true}});mediaSource.addEventListener("sourceended",fail,{{once:true}})}});const fetchSegment=(url)=>fetch(url,{{credentials:"include"}}).then(response=>{{if(!response.ok)throw new Error("segment fetch failed");return response.arrayBuffer()}}).then(buffer=>new Uint8Array(buffer));const startNative=()=>{{selection(fallback.label,fallback.artifactPath,"native");if(fallback.url&&video.getAttribute("src")!==fallback.url){{video.src=fallback.url;video.load()}}play()}};const startInline=async()=>{{if(!inlineStartup||!("MediaSource"in window)||!MediaSource.isTypeSupported(inlineStartup.mimeType))return false;const pending=[];let nextSegment=0;const pump=()=>{{while(pending.length<4&&nextSegment<inlineStartup.segmentUrls.length)pending.push(fetchSegment(inlineStartup.segmentUrls[nextSegment++]))}};pump();selection("mse_inline",inlineStartup.artifactPath,"mse-inline");const mediaSource=new MediaSource();const objectUrl=URL.createObjectURL(mediaSource);video.removeAttribute("src");video.src=objectUrl;video.load();await sourceOpen(mediaSource);const sourceBuffer=mediaSource.addSourceBuffer(inlineStartup.mimeType);await append(sourceBuffer,bytes(inlineStartup.startup));play();(async()=>{{while(pending.length){{const data=await pending.shift();pump();await append(sourceBuffer,data)}}if(mediaSource.readyState==="open")mediaSource.endOfStream()}})().catch(()=>{{}});return true}};video.addEventListener("loadedmetadata",()=>{{dims();mark("data-rend-metadata-ms")}},{{once:true}});video.addEventListener("canplay",()=>{{dims();mark("data-rend-canplay-ms")}},{{once:true}});video.addEventListener("playing",()=>{{root.setAttribute("data-rend-player-state","playing");dims()}});if("requestVideoFrameCallback"in video){{video.requestVideoFrameCallback(()=>{{dims();mark("data-rend-first-frame-ms")}})}}else{{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{{once:true}})}}startInline().then((started)=>{{if(!started)startNative()}}).catch(()=>startNative())}})();
+(()=>{{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const inlineStartup={inline_startup_json};const fallback={fallback_json};const autoPlay={auto_play_js};const fetchCredentials="{fetch_credentials}";const mark=(name)=>{{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))}};const dims=()=>{{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))}};const play=()=>{{if(autoPlay)video.play().catch(()=>{{}})}};const selection=(label,artifactPath,engine)=>{{root.setAttribute("data-rend-player-selected",label);root.setAttribute("data-rend-player-artifact",artifactPath);root.setAttribute("data-rend-playback-engine",engine);root.setAttribute("data-rend-player-state","ready")}};const bytes=(value)=>{{const binary=atob(value);const output=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)output[i]=binary.charCodeAt(i);return output}};const append=(buffer,data)=>new Promise((resolve,reject)=>{{const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("append failed"))}};const cleanup=()=>{{buffer.removeEventListener("updateend",done);buffer.removeEventListener("error",fail)}};buffer.addEventListener("updateend",done);buffer.addEventListener("error",fail);buffer.appendBuffer(data)}});const sourceOpen=(mediaSource)=>new Promise((resolve,reject)=>{{if(mediaSource.readyState==="open"){{resolve();return}}const done=()=>{{cleanup();resolve()}};const fail=()=>{{cleanup();reject(new Error("source open failed"))}};const cleanup=()=>{{mediaSource.removeEventListener("sourceopen",done);mediaSource.removeEventListener("sourceclose",fail);mediaSource.removeEventListener("sourceended",fail)}};mediaSource.addEventListener("sourceopen",done,{{once:true}});mediaSource.addEventListener("sourceclose",fail,{{once:true}});mediaSource.addEventListener("sourceended",fail,{{once:true}})}});const fetchSegment=(url)=>fetch(url,{{credentials:fetchCredentials}}).then(response=>{{if(!response.ok)throw new Error("segment fetch failed");return response.arrayBuffer()}}).then(buffer=>new Uint8Array(buffer));const startNative=()=>{{selection(fallback.label,fallback.artifactPath,"native");if(fallback.url&&video.getAttribute("src")!==fallback.url){{video.src=fallback.url;video.load()}}play()}};const startInline=async()=>{{if(!inlineStartup||!("MediaSource"in window)||!MediaSource.isTypeSupported(inlineStartup.mimeType))return false;const pending=[];let nextSegment=0;const pump=()=>{{while(pending.length<4&&nextSegment<inlineStartup.segmentUrls.length)pending.push(fetchSegment(inlineStartup.segmentUrls[nextSegment++]))}};pump();selection("mse_inline",inlineStartup.artifactPath,"mse-inline");const mediaSource=new MediaSource();const objectUrl=URL.createObjectURL(mediaSource);video.removeAttribute("src");video.src=objectUrl;video.load();await sourceOpen(mediaSource);const sourceBuffer=mediaSource.addSourceBuffer(inlineStartup.mimeType);await append(sourceBuffer,bytes(inlineStartup.startup));play();(async()=>{{while(pending.length){{const data=await pending.shift();pump();await append(sourceBuffer,data)}}if(mediaSource.readyState==="open")mediaSource.endOfStream()}})().catch(()=>{{}});return true}};video.addEventListener("loadedmetadata",()=>{{dims();mark("data-rend-metadata-ms")}},{{once:true}});video.addEventListener("canplay",()=>{{dims();mark("data-rend-canplay-ms")}},{{once:true}});video.addEventListener("playing",()=>{{root.setAttribute("data-rend-player-state","playing");dims()}});if("requestVideoFrameCallback"in video){{video.requestVideoFrameCallback(()=>{{dims();mark("data-rend-first-frame-ms")}})}}else{{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{{once:true}})}}startInline().then((started)=>{{if(!started)startNative()}}).catch(()=>startNative())}})();
 </script>
 </body>
 </html>"#,
         asset_id = html_escape(&response.asset_id),
         artifact_path = html_escape(selected_artifact),
         auto_play_js = if auto_play { "true" } else { "false" },
+        cross_origin = cross_origin,
         fallback_json = fallback_json,
+        fetch_credentials = fetch_credentials,
         inline_startup_json = inline_startup_json,
         label = html_escape(selected_label),
         playable_state = html_escape(&response.playable_state),
@@ -4650,6 +4708,7 @@ async fn create_video_inner(
         s3: state.s3.clone(),
         db: state.db.clone(),
         config: state.config.media_processing.clone(),
+        public_playback_alias: state.config.public_playback_alias.clone(),
     })
     .await
     .map_err(AppError::internal)?;
@@ -4803,6 +4862,7 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
         s3: state.s3.clone(),
         db: state.db.clone(),
         config: state.config.media_processing.clone(),
+        public_playback_alias: state.config.public_playback_alias.clone(),
     })
     .await?;
 

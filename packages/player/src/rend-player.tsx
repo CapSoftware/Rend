@@ -37,6 +37,7 @@ export type PlaybackBootstrapReady = {
   playable_state: "opener_ready" | "hls_ready" | string;
   playback_url?: string;
   playback_content_type?: string;
+  playback_credential_mode?: "include" | "omit";
   playback_token_expires_at: number;
   ttl_seconds: number;
   opener_url?: string;
@@ -233,7 +234,7 @@ const WATCH_HEARTBEAT_MIN_FORCED_DELTA_MS = 1_000;
 const HLS_HANDOFF_MIN_PLAYED_SECONDS = 0.75;
 const HLS_HANDOFF_NEAR_OPENER_END_SECONDS = 1.25;
 
-const HLS_STARTUP_CONFIG = {
+const HLS_STARTUP_CONFIG_BASE = {
   abrEwmaDefaultEstimate: 1_200_000,
   capLevelOnFPSDrop: true,
   capLevelToPlayerSize: true,
@@ -242,10 +243,25 @@ const HLS_STARTUP_CONFIG = {
   startFragPrefetch: true,
   startLevel: -1,
   testBandwidth: true,
-  xhrSetup: (xhr: XMLHttpRequest) => {
-    xhr.withCredentials = true;
-  },
 };
+
+function playbackCredentialMode(data: PlaybackBootstrapReady | null | undefined) {
+  return data?.playback_credential_mode === "omit" ? "omit" : "include";
+}
+
+function playbackCrossOrigin(data: PlaybackBootstrapReady | null | undefined) {
+  return playbackCredentialMode(data) === "omit" ? "anonymous" : "use-credentials";
+}
+
+function hlsStartupConfig(data: PlaybackBootstrapReady) {
+  const includeCredentials = playbackCredentialMode(data) === "include";
+  return {
+    ...HLS_STARTUP_CONFIG_BASE,
+    xhrSetup: (xhr: XMLHttpRequest) => {
+      xhr.withCredentials = includeCredentials;
+    },
+  };
+}
 
 function isNativeHlsSupported(video: HTMLVideoElement) {
   return Boolean(
@@ -270,10 +286,14 @@ function signedHlsLine(line: string, baseUrl: URL, token: string | null) {
   return segmentUrl.toString();
 }
 
-async function signedHlsManifestObjectUrl(manifestUrl: string, signal?: AbortSignal) {
+async function signedHlsManifestObjectUrl(
+  manifestUrl: string,
+  credentialMode: "include" | "omit",
+  signal?: AbortSignal
+) {
   const parsedManifestUrl = new URL(manifestUrl, window.location.href);
   const token = parsedManifestUrl.searchParams.get("token");
-  const response = await fetch(parsedManifestUrl.toString(), { credentials: "include", signal });
+  const response = await fetch(parsedManifestUrl.toString(), { credentials: credentialMode, signal });
   const cacheHeaders = readableTelemetryHeaders(response.headers);
   const labels = telemetryLabelsFromHeaders(response.headers);
 
@@ -1029,7 +1049,7 @@ export function RendPlayer({
   const loadProgressiveSource = useCallback(
     (
       nextSelection: SourceSelection,
-      options: { destroyExistingHls?: boolean } = {}
+      options: { destroyExistingHls?: boolean; bootstrap?: PlaybackBootstrapReady | null } = {}
     ) => {
       const video = videoRef.current;
       if (!video) return;
@@ -1054,6 +1074,7 @@ export function RendPlayer({
         ...selectionTelemetryFields(nextSelection),
       });
 
+      video.crossOrigin = playbackCrossOrigin(options.bootstrap ?? null);
       video.src = nextSelection.url;
       emitSrcAssigned(nextSelection);
       video.load();
@@ -1093,7 +1114,11 @@ export function RendPlayer({
         };
       }
 
-      const manifest = await signedHlsManifestObjectUrl(nextSelection.url, signal);
+      const manifest = await signedHlsManifestObjectUrl(
+        nextSelection.url,
+        playbackCredentialMode(data),
+        signal
+      );
       if (signal.aborted) return null;
 
       const prepared: PreparedHlsSource = {
@@ -1102,7 +1127,7 @@ export function RendPlayer({
         selection: nextSelection,
       };
 
-      const hls = new Hls(HLS_STARTUP_CONFIG);
+      const hls = new Hls(hlsStartupConfig(data));
       prepared.hls = hls;
       hlsRef.current = hls;
 
@@ -1175,7 +1200,7 @@ export function RendPlayer({
           const opener = openerSource(data);
           if (opener && !triedOpenerFallbackRef.current) {
             triedOpenerFallbackRef.current = true;
-            loadProgressiveSource(opener);
+            loadProgressiveSource(opener, { bootstrap: data });
             return;
           }
           setPlayerState(isTokenExpired(data) ? "token_expired" : "playback_failure");
@@ -1227,6 +1252,7 @@ export function RendPlayer({
 
       setActiveSelection(prepared.selection);
       setPlayerState("ready");
+      video.crossOrigin = playbackCrossOrigin(data);
 
       emitTelemetry({
         phase: previousSelection ? "source_handoff" : "source_selected",
@@ -1465,7 +1491,7 @@ export function RendPlayer({
       hlsPreparationRef.current = preparedHls;
 
       if (nextSelection.label === "opener") {
-        loadProgressiveSource(nextSelection, { destroyExistingHls: false });
+        loadProgressiveSource(nextSelection, { destroyExistingHls: false, bootstrap: data });
         if (preparedHls) {
           void handoffFromOpenerWhenReady(data, preparedHls, loadGeneration);
         }
@@ -1480,7 +1506,7 @@ export function RendPlayer({
         }
       }
 
-      loadProgressiveSource(nextSelection);
+      loadProgressiveSource(nextSelection, { bootstrap: data });
     } catch (error) {
       if ((error as Error).name === "AbortError") return;
       setBootstrap({
@@ -1684,7 +1710,7 @@ export function RendPlayer({
 
     if (nextSelection.label === "opener") {
       hlsUpgradePendingRef.current = false;
-      loadProgressiveSource(nextSelection, { destroyExistingHls: false });
+      loadProgressiveSource(nextSelection, { destroyExistingHls: false, bootstrap: data });
       if (preparedHls) {
         void handoffFromOpenerWhenReady(data, preparedHls, loadGeneration);
       }
@@ -1699,7 +1725,7 @@ export function RendPlayer({
       }
     }
 
-    loadProgressiveSource(nextSelection);
+    loadProgressiveSource(nextSelection, { bootstrap: data });
     hlsUpgradePendingRef.current = false;
     return true;
   }, [
@@ -1873,7 +1899,7 @@ export function RendPlayer({
       link.rel = index === 0 && hint.artifact_path === "opener.mp4" ? "preload" : "prefetch";
       link.as = hint.artifact_path === "opener.mp4" ? "video" : "fetch";
       link.href = hint.url;
-      link.crossOrigin = "use-credentials";
+      link.crossOrigin = playbackCrossOrigin(bootstrap);
       link.dataset.rendPrefetch = hint.artifact_path;
       document.head.appendChild(link);
       return link;
@@ -1887,6 +1913,7 @@ export function RendPlayer({
   const readyBootstrap = bootstrap?.status === "ready" ? bootstrap : null;
   const unavailable = isUnavailableState(state);
   const resolvedPoster = poster ?? readyBootstrap?.poster_url;
+  const mediaCrossOrigin = playbackCrossOrigin(readyBootstrap);
 
   return (
     <section
@@ -1928,7 +1955,7 @@ export function RendPlayer({
           playsInline
           preload={preload}
           src={videoSrcAttr}
-          crossOrigin="use-credentials"
+          crossOrigin={mediaCrossOrigin}
           onLoadedMetadata={() => {
             updateObservedVideoStats();
             const metadataMs = recordTiming("metadataMs");
@@ -2047,7 +2074,7 @@ export function RendPlayer({
               !triedOpenerFallbackRef.current
             ) {
               triedOpenerFallbackRef.current = true;
-              loadProgressiveSource(opener);
+              loadProgressiveSource(opener, { bootstrap: data });
               return;
             }
 

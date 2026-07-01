@@ -56,6 +56,24 @@ mode `REND_TIGRIS_PLAYBACK_BASE_URL` should point at the public API origin, for
 example `https://api.rend.so`, and warm/purge fanout is skipped even if edge
 registry rows or legacy edge URLs are configured.
 
+For browser-direct public Tigris playback, point
+`REND_TIGRIS_PLAYBACK_BASE_URL` at a public-read media host, keep the player URL
+shape under `/v/{assetId}/...`, and set `REND_PUBLIC_PLAYBACK_ENABLED=true` on
+the API, media worker, and site. The media processor then uploads generated
+playback aliases under `v/{assetId}/...` while leaving canonical source objects
+private under `videos/{assetId}/...`. Use
+`REND_PUBLIC_PLAYBACK_ALIAS_ACL=public-read` for a private bucket with Tigris
+object ACLs enabled, or `inherit` only when the playback bucket/default is
+already public-read.
+
+Existing assets created before public aliases were enabled need a one-time
+backfill before they can use the public media host:
+
+```sh
+bun run playback:backfill-public-aliases -- --asset-id <asset-id> --dry-run
+bun run playback:backfill-public-aliases -- --asset-id <asset-id> --public-base-url https://media.rend.so
+```
+
 The checked-in `@rend/playback-routing` route table remains available for the
 future edge mode. Set `REND_PLAYBACK_MODE=edge` to re-enable metal selection,
 direct `/v/{assetId}/...` edge URLs, and warm/purge fanout. Current public metal
@@ -68,10 +86,12 @@ ams-1  amsterdam  https://ams-1.play.rend.so
 
 `REND_PLAYER_EDGE_BASE_URLS` and `REND_PLAYER_PLAYBACK_BASE_URL` are ignored by
 the site player unless `REND_PLAYBACK_MODE=edge` is set or a request uses an
-allowlisted explicit `playbackBaseUrl` override. In Tigris mode, `x-rend-origin:
-tigris` on API-origin artifact responses is the expected proof signal; edge
-headers such as `x-rend-cache`, `x-rend-edge-id`, and `x-rend-region` are not on
-the active path.
+allowlisted explicit `playbackBaseUrl` override. In API-origin Tigris proxy
+mode, `x-rend-origin: tigris` on API-origin artifact responses is the expected
+proof signal. In browser-direct public Tigris mode, startup media requests
+should hit the configured media host directly and should not hit
+`/api/player/{assetId}/artifact/...`. Edge headers such as `x-rend-cache`,
+`x-rend-edge-id`, and `x-rend-region` are not on the active Tigris path.
 
 The current path keeps playback tokens out of JavaScript-visible URLs, preserves
 the HttpOnly playback credential boundary, avoids exposing `/internal/*`, and
@@ -174,6 +194,9 @@ API:
 - `REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS`
 - `REND_PLAYBACK_MODE=tigris`
 - `REND_TIGRIS_PLAYBACK_BASE_URL`
+- `REND_PUBLIC_PLAYBACK_ENABLED`
+- `REND_PUBLIC_PLAYBACK_ALIAS_PREFIX`
+- `REND_PUBLIC_PLAYBACK_ALIAS_ACL`
 - `REND_PLAYBACK_COOKIE_DOMAIN`
 - `REND_MAX_UPLOAD_BYTES`
 - `REND_INTERNAL_TELEMETRY_TOKEN`
@@ -183,7 +206,9 @@ API:
 
 `REND_PLAYBACK_MODE=tigris` is the production default. Set
 `REND_TIGRIS_PLAYBACK_BASE_URL` to the public API origin, for example
-`https://api.rend.so`. `REND_PLAYBACK_BASE_URL`,
+`https://api.rend.so`, unless `REND_PUBLIC_PLAYBACK_ENABLED=true` and the value
+is a browser-safe public media host with generated `/v/{assetId}/...` aliases.
+`REND_PLAYBACK_BASE_URL`,
 `REND_EDGE_WARM_URL`, and `REND_EDGE_PURGE_URL` are edge-mode settings; leave
 them unset in normal production unless `REND_PLAYBACK_MODE=edge` is explicitly
 enabled.

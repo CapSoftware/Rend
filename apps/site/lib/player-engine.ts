@@ -17,6 +17,7 @@ export type StartupPreloadHint = {
   artifactPath: string;
   as: "fetch" | "image" | "video";
   contentType?: string;
+  crossOrigin: "anonymous" | "use-credentials";
   url: string;
 };
 
@@ -68,7 +69,7 @@ type HlsLevel = {
   width?: number;
 };
 
-const HLS_STARTUP_CONFIG = {
+const HLS_STARTUP_CONFIG_BASE = {
   abrEwmaDefaultEstimate: 1_200_000,
   capLevelOnFPSDrop: true,
   capLevelToPlayerSize: true,
@@ -77,9 +78,6 @@ const HLS_STARTUP_CONFIG = {
   startFragPrefetch: true,
   startLevel: -1,
   testBandwidth: true,
-  xhrSetup: (xhr: XMLHttpRequest) => {
-    xhr.withCredentials = true;
-  },
 };
 
 const WATCH_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -118,6 +116,24 @@ export function isNativeHlsSupported(video: HTMLVideoElement) {
     video.canPlayType("application/vnd.apple.mpegurl") ||
       video.canPlayType("application/x-mpegURL")
   );
+}
+
+export function playbackCredentialMode(data: WatchPlaybackBootstrapResponse | null | undefined) {
+  return readyBootstrap(data)?.playback_credential_mode === "omit" ? "omit" : "include";
+}
+
+export function playbackCrossOrigin(data: WatchPlaybackBootstrapResponse | null | undefined) {
+  return playbackCredentialMode(data) === "omit" ? "anonymous" : "use-credentials";
+}
+
+function hlsStartupConfig(data: WatchPlaybackBootstrapReady) {
+  const includeCredentials = data.playback_credential_mode !== "omit";
+  return {
+    ...HLS_STARTUP_CONFIG_BASE,
+    xhrSetup: (xhr: XMLHttpRequest) => {
+      xhr.withCredentials = includeCredentials;
+    },
+  };
 }
 
 export function initialSourceSelection(
@@ -204,6 +220,7 @@ export function startupPreloadHints(
       artifactPath: "opener.mp4",
       as: "video",
       contentType: ready.opener_content_type ?? "video/mp4",
+      crossOrigin: playbackCrossOrigin(data),
       url: ready.opener_url,
     });
   }
@@ -213,6 +230,7 @@ export function startupPreloadHints(
       artifactPath: "thumbnail.jpg",
       as: "image",
       contentType: ready.poster_content_type,
+      crossOrigin: playbackCrossOrigin(data),
       url: ready.poster_url,
     });
   }
@@ -720,11 +738,15 @@ export function attachPlayback(
   const ready = readyBootstrap(options.initialBootstrap);
   telemetry?.playerLoad();
 
-  const applyProgressiveSource = (selection: SourceSelection) => {
+  const applyProgressiveSource = (
+    selection: SourceSelection,
+    data: WatchPlaybackBootstrapReady | null = ready,
+  ) => {
     currentSelection = selection;
     setSelection(player, selection);
     setState(player, "ready");
     telemetry?.sourceSelected(selection);
+    video.crossOrigin = playbackCrossOrigin(data);
     if (video.currentSrc !== selection.url && video.getAttribute("src") !== selection.url) {
       video.src = selection.url;
       setAttribute(player, "data-rend-src-assigned-ms", Math.max(0, Math.round(performance.now())));
@@ -746,6 +768,7 @@ export function attachPlayback(
       setSelection(player, selection);
       setState(player, "ready");
       telemetry?.sourceSelected(selection);
+      video.crossOrigin = playbackCrossOrigin(data);
       if (!video.currentSrc && !video.getAttribute("src")) {
         video.src = selection.url;
         setAttribute(player, "data-rend-src-assigned-ms", Math.max(0, Math.round(performance.now())));
@@ -774,7 +797,7 @@ export function attachPlayback(
     }
 
     if (selection.label !== "hls_js" || !Hls) {
-      applyProgressiveSource(selection);
+      applyProgressiveSource(selection, data);
       return;
     }
 
@@ -782,9 +805,10 @@ export function attachPlayback(
     setSelection(player, selection);
     setState(player, "ready");
     telemetry?.sourceSelected(selection);
+    video.crossOrigin = playbackCrossOrigin(data);
     video.removeAttribute("src");
     video.load();
-    hls = new Hls(HLS_STARTUP_CONFIG);
+    hls = new Hls(hlsStartupConfig(data));
     hls.on(Hls.Events.MANIFEST_PARSED, (_event, eventData) => {
       const level = eventData.levels?.[0] ?? hls?.levels?.[0];
       setVideoStats(player, video, level, hls?.currentLevel);
@@ -803,7 +827,7 @@ export function attachPlayback(
           label: "opener",
           artifactPath: "opener.mp4",
           url: data.opener_url,
-        });
+        }, data);
         return;
       }
       setState(player, "playback_failure");

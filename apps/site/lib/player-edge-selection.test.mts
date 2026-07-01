@@ -100,6 +100,30 @@ test("playback base URL defaults to direct Tigris origin in production", () => {
     }).source,
     "tigris_direct",
   );
+  assert.equal(
+    playbackBaseUrlDecisionForRequest(request, {
+      REND_ENV_PROFILE: "production",
+      REND_API_BASE_URL: "https://api.rend.so",
+    }).credentialMode,
+    "include",
+  );
+});
+
+test("playback base URL uses anonymous credentials for public Tigris playback", () => {
+  const request = new Request("https://www.rend.so/api/player/asset");
+
+  assert.deepEqual(
+    playbackBaseUrlDecisionForRequest(request, {
+      REND_ENV_PROFILE: "production",
+      REND_PUBLIC_PLAYBACK_ENABLED: "1",
+      REND_TIGRIS_PLAYBACK_BASE_URL: "https://media.rend.so",
+    }),
+    {
+      credentialMode: "omit",
+      playbackBaseUrl: "https://media.rend.so",
+      source: "tigris_direct",
+    },
+  );
 });
 
 test("playback base URL can temporarily fall back to the Tigris origin proxy", () => {

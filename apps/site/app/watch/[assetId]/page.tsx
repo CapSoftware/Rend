@@ -126,7 +126,7 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
           as={hint.as}
           href={hint.url}
           type={hint.contentType}
-          crossOrigin="use-credentials"
+          crossOrigin={hint.crossOrigin}
           data-rend-startup-preload={hint.artifactPath}
         />
       ))}

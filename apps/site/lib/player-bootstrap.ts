@@ -20,6 +20,7 @@ export type UpstreamPlaybackResponse = {
 
 const MAX_PREFETCH_HINTS = 8;
 const HLS_RENDITION_NAMES = new Set(["360p", "480p", "720p", "1080p", "2k", "4k"]);
+export type PlaybackCredentialMode = "include" | "omit";
 
 function safeString(value: unknown) {
   return typeof value === "string" ? value : undefined;
@@ -95,7 +96,8 @@ export function safePlaybackBootstrapResponse(
   assetId: string,
   data: UpstreamPlaybackResponse,
   playbackBaseUrl: string | null,
-  organizationId?: string | null
+  organizationId?: string | null,
+  playbackCredentialMode: PlaybackCredentialMode = "include"
 ) {
   const playbackPath = artifactPathFromPlaybackUrl(data.playback_url, assetId);
   const openerPath = artifactPathFromPlaybackUrl(data.opener_url, assetId);
@@ -137,6 +139,7 @@ export function safePlaybackBootstrapResponse(
     playable_state: safeString(data.playable_state) ?? "unknown",
     playback_url: playbackUrl,
     playback_content_type: safeString(data.playback_content_type),
+    playback_credential_mode: playbackCredentialMode,
     playback_token_expires_at: expiresAt,
     ttl_seconds: ttlSeconds,
     opener_url: openerUrl,

@@ -3,6 +3,7 @@ import {
   initialPlaybackState,
   initialSourceSelection,
   instantPlaybackScript,
+  playbackCrossOrigin,
   playbackStateMessage,
   readyBootstrap,
   type PlaybackEngine,
@@ -49,6 +50,7 @@ export function WatchInstantPlayer({
   );
   const poster = ready?.poster_url;
   const message = playbackStateMessage(initialBootstrap, state);
+  const crossOrigin = playbackCrossOrigin(initialBootstrap);
 
   return (
     <>
@@ -81,7 +83,7 @@ export function WatchInstantPlayer({
             playsInline
             preload={autoPlay ? "auto" : "metadata"}
             src={selection?.url}
-            crossOrigin="use-credentials"
+            crossOrigin={crossOrigin}
             suppressHydrationWarning
           />
           {selection?.url && (

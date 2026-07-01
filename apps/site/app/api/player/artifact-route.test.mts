@@ -23,6 +23,7 @@ function cachedSafeResponse(
     playback_url:
       "/api/player/00000000-0000-0000-0000-000000000001/artifact/opener.mp4",
     playback_content_type: "video/mp4",
+    playback_credential_mode: "include",
     playback_token_expires_at: expiresAt,
     ttl_seconds: ttlSeconds,
     opener_url:

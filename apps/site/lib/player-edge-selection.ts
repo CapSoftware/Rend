@@ -177,6 +177,7 @@ function tigrisPlaybackBaseUrlForRequest(request: Request, env: EnvLike) {
 }
 
 export type PlaybackBaseUrlDecision = {
+  credentialMode: "include" | "omit";
   playbackBaseUrl: string | null;
   source:
     | "manual_override"
@@ -194,6 +195,10 @@ export type PlaybackBaseUrlDecision = {
   distanceKm?: number;
 };
 
+function publicPlaybackEnabled(env: EnvLike) {
+  return envEnabled(env, "REND_PUBLIC_PLAYBACK_ENABLED", false);
+}
+
 export function playbackBaseUrlDecisionForRequest(
   request: Request,
   env: EnvLike = process.env,
@@ -205,7 +210,11 @@ export function playbackBaseUrlDecisionForRequest(
     if (!allowedPlaybackBaseUrls(env).includes(normalized)) {
       throw new Error("playbackBaseUrl is not allowed");
     }
-    return { playbackBaseUrl: normalized, source: "manual_override" };
+    return {
+      credentialMode: "include",
+      playbackBaseUrl: normalized,
+      source: "manual_override",
+    };
   }
 
   const configuredEdge = selectedConfiguredEdgePlaybackBaseUrl(
@@ -214,16 +223,25 @@ export function playbackBaseUrlDecisionForRequest(
   );
   if (playbackMode(env) !== "edge") {
     if (!envEnabled(env, "REND_PLAYER_TIGRIS_DIRECT", true)) {
-      return { playbackBaseUrl: null, source: "tigris_origin_proxy" };
+      return {
+        credentialMode: "include",
+        playbackBaseUrl: null,
+        source: "tigris_origin_proxy",
+      };
     }
     return {
+      credentialMode: publicPlaybackEnabled(env) ? "omit" : "include",
       playbackBaseUrl: tigrisPlaybackBaseUrlForRequest(request, env),
       source: "tigris_direct",
     };
   }
 
   if (configuredEdge && envUsesConfiguredEdgeOverride(env)) {
-    return { playbackBaseUrl: configuredEdge, source: "configured_edge" };
+    return {
+      credentialMode: "include",
+      playbackBaseUrl: configuredEdge,
+      source: "configured_edge",
+    };
   }
 
   const selectedEdge = selectedMetalPlaybackRouteDecisionFromLocation(
@@ -231,6 +249,7 @@ export function playbackBaseUrlDecisionForRequest(
   );
   if (selectedEdge) {
     return {
+      credentialMode: "include",
       playbackBaseUrl: normalizePlaybackBaseUrl(selectedEdge.playbackBaseUrl),
       source: "shared_metal",
       routeId: selectedEdge.routeId,
@@ -243,6 +262,7 @@ export function playbackBaseUrlDecisionForRequest(
 
   if (configuredEdge)
     return {
+      credentialMode: "include",
       playbackBaseUrl: configuredEdge,
       source: "configured_edge_fallback",
     };
@@ -250,10 +270,11 @@ export function playbackBaseUrlDecisionForRequest(
   const configured = envString(env, "REND_PLAYER_PLAYBACK_BASE_URL");
   return configured
     ? {
+        credentialMode: "include",
         playbackBaseUrl: normalizePlaybackBaseUrl(configured),
         source: "configured_fallback",
       }
-    : { playbackBaseUrl: null, source: "none" };
+    : { credentialMode: "include", playbackBaseUrl: null, source: "none" };
 }
 
 export function playbackBaseUrlForRequest(

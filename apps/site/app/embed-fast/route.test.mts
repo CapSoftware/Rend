@@ -82,6 +82,48 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
+test("fast embed uses anonymous HLS for public playback", () => {
+  const base = readyBootstrap();
+  if (base.status !== "ready") throw new Error("expected ready bootstrap");
+  const bootstrap = {
+    ...base,
+    playback_credential_mode: "omit" as const,
+    playback_url: `https://media.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
+    opener_url: `https://media.rend.so/v/${ASSET_ID}/opener.mp4`,
+    manifest_url: `https://media.rend.so/v/${ASSET_ID}/hls/master.m3u8`,
+    poster_url: `https://media.rend.so/v/${ASSET_ID}/thumbnail.jpg`,
+    prefetch_hints: [
+      {
+        artifact_path: "hls/360p/init_360p.mp4",
+        content_type: "video/mp4",
+        url: `https://media.rend.so/v/${ASSET_ID}/hls/360p/init_360p.mp4`,
+      },
+      {
+        artifact_path: "hls/360p/segment_00000.m4s",
+        content_type: "video/mp4",
+        url: `https://media.rend.so/v/${ASSET_ID}/hls/360p/segment_00000.m4s`,
+      },
+    ],
+  } satisfies Extract<WatchPlaybackBootstrapResponse, { status: "ready" }>;
+  const html = renderFastEmbedHtml({
+    assetId: ASSET_ID,
+    autoPlay: true,
+    bootstrap,
+    bootstrapUrl: `/api/player/${ASSET_ID}`,
+    bootstrapMs: 42,
+    controls: false,
+    muted: true,
+    playbackOriginHint: null,
+    startupMode: "progressive",
+  });
+
+  assert.match(html, /src="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/master\.m3u8"/);
+  assert.match(html, /crossorigin="anonymous"/);
+  assert.match(html, /data-rend-player-selected="native_hls"/);
+  assert.doesNotMatch(html, /src="https:\/\/media\.rend\.so[^"]+progressive\.mp4"/);
+  assert.doesNotMatch(html, /crossorigin="use-credentials"/);
+});
+
 test("fast embed route supports client bootstrap for immediate document response", async () => {
   const originalFetch = globalThis.fetch;
   const fetches: string[] = [];

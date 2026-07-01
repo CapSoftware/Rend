@@ -18,6 +18,7 @@ function safeResponse(expiresAt: number, ttlSeconds: number): SafePlaybackBootst
     playable_state: "hls_ready",
     playback_url: "https://ams-1.play.rend.so/v/00000000-0000-0000-0000-000000000001/hls/master.m3u8",
     playback_content_type: "application/vnd.apple.mpegurl",
+    playback_credential_mode: "include",
     playback_token_expires_at: expiresAt,
     ttl_seconds: ttlSeconds,
     opener_url: undefined,

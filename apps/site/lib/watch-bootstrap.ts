@@ -15,6 +15,7 @@ export type WatchPlaybackBootstrapReady = {
   playable_state: "opener_ready" | "hls_ready" | string;
   playback_url?: string;
   playback_content_type?: string;
+  playback_credential_mode?: "include" | "omit";
   playback_token_expires_at: number;
   ttl_seconds: number;
   opener_url?: string;
@@ -152,6 +153,7 @@ export function safeWatchBootstrap(value: unknown): WatchPlaybackBootstrapRespon
       playable_state: safeState(value.playable_state) ?? "unknown",
       playback_url: playbackUrl,
       playback_content_type: safeString(value.playback_content_type, 128),
+      playback_credential_mode: value.playback_credential_mode === "omit" ? "omit" : "include",
       playback_token_expires_at: playbackTokenExpiresAt,
       ttl_seconds: ttlSeconds,
       opener_url: openerUrl,

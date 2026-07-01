@@ -214,12 +214,13 @@ test("site playback bootstrap can emit direct Tigris URLs without token leakage"
   } as Parameters<typeof safePlaybackBootstrapResponse>[1] & { playback_token: string };
 
   const response = jsonRoundTrip(
-    safePlaybackBootstrapResponse(ASSET_ID, upstreamPlayback, "https://api.rend.so")
+    safePlaybackBootstrapResponse(ASSET_ID, upstreamPlayback, "https://api.rend.so", null, "omit")
   );
 
   assertMatchesResponseSchema(spec, "/api/player/{assetId}", "get", 200, response);
   const serialized = JSON.stringify(response);
   assert.equal(response?.playback_url, `https://api.rend.so/v/${ASSET_ID}/hls/master.m3u8`);
+  assert.equal(response?.playback_credential_mode, "omit");
   assert.equal(response?.prefetch_hints[0]?.url, `https://api.rend.so/v/${ASSET_ID}/hls/480p/index.m3u8`);
   assert.equal(serialized.includes("/api/player/"), false);
   assert.equal(serialized.includes("must-not-appear"), false);
