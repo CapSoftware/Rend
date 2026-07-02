@@ -164,10 +164,31 @@ test("fast embed route forwards bootstrap cookies to the document response by de
     url: string | URL | Request,
     init?: RequestInit,
   ) => {
+    const stringUrl = String(url);
     fetches.push({
-      url: String(url),
+      url: stringUrl,
       headers: new Headers(init?.headers),
     });
+    if (stringUrl.endsWith("/hls/master.m3u8")) {
+      return new Response(
+        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.4d401f,mp4a.40.2"\n360p/index.m3u8\n',
+        { headers: { "content-type": "application/vnd.apple.mpegurl" } },
+      );
+    }
+    if (stringUrl.endsWith("/hls/360p/index.m3u8")) {
+      return new Response(
+        "#EXTM3U\n#EXTINF:1.0,\nsegment_00000.m4s\n#EXTINF:1.0,\nsegment_00001.m4s\n",
+        { headers: { "content-type": "application/vnd.apple.mpegurl" } },
+      );
+    }
+    if (
+      stringUrl.endsWith("/hls/360p/init_360p.mp4") ||
+      stringUrl.endsWith("/hls/360p/segment_00000.m4s")
+    ) {
+      return new Response(new Uint8Array([0, 1, 2, 3]), {
+        headers: { "content-type": "video/mp4" },
+      });
+    }
     return Response.json(readyBootstrap(), {
       headers: {
         "set-cookie": "__rend_playback=v1.claims.signature; Path=/; HttpOnly; Secure; SameSite=None",
@@ -193,16 +214,19 @@ test("fast embed route forwards bootstrap cookies to the document response by de
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.equal(response.headers.get("x-rend-fast-embed"), "1");
     assert.match(response.headers.get("link") ?? "", /rel=preconnect/);
-    assert.match(response.headers.get("link") ?? "", /hls\/360p\/progressive\.mp4/);
-    assert.match(response.headers.get("link") ?? "", /rel=preload; as=video/);
+    assert.match(response.headers.get("link") ?? "", /hls\/360p\/segment_00001\.m4s/);
+    assert.match(response.headers.get("link") ?? "", /rel=preload; as=fetch/);
     assert.match(response.headers.get("set-cookie") ?? "", /__rend_playback=/);
     assert.equal(
       fetches[0]?.url,
       `https://www.rend.so/api/player/${ASSET_ID}`,
     );
     assert.equal(fetches[0]?.headers.get("x-vercel-ip-country"), "GB");
+    assert.match(fetches[1]?.headers.get("cookie") ?? "", /__rend_playback=/);
     assert.match(body, /autoplay/);
     assert.doesNotMatch(body, /controls/);
+    assert.match(body, /mse_inline/);
+    assert.doesNotMatch(body, /playback_token|authorization/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
