@@ -1,35 +1,35 @@
 {
   "schemaVersion": "rend.provider-benchmark.v1",
-  "generatedAt": "2026-06-30T17:43:10.043Z",
+  "generatedAt": "2026-07-02T23:10:23.237Z",
   "run": {
-    "id": "20260630T173725Z",
+    "id": "20260702T230444Z",
     "status": "completed",
-    "startedAt": "2026-06-30T17:37:25.283Z",
-    "finishedAt": "2026-06-30T17:43:10.043Z",
+    "startedAt": "2026-07-02T23:04:44.701Z",
+    "finishedAt": "2026-07-02T23:10:23.237Z",
     "region": "daytona-eu",
     "regionLabel": "Daytona eu (eu requested)",
     "runnerKind": "daytona",
-    "runnerLabel": "17cf4721-db39-43dd-957f-99ca13566243",
+    "runnerLabel": "4ef5abd3-855b-436d-8084-fbf8686ec7c9",
     "sampleCountTarget": 5,
     "watchWindowMs": 30000,
     "delayMs": 3000,
     "providerOrderRandomized": true,
     "providerOrderByRound": [
       [
-        "mux",
-        "rend"
-      ],
-      [
-        "rend",
-        "mux"
-      ],
-      [
         "rend",
         "mux"
       ],
       [
         "mux",
         "rend"
+      ],
+      [
+        "mux",
+        "rend"
+      ],
+      [
+        "rend",
+        "mux"
       ],
       [
         "rend",
@@ -48,9 +48,9 @@
       "statement": "The harness can observe public player metadata such as duration and resolution, but neither public player exposes an original source checksum or object identity. Source-file identity was not independently verified.",
       "observed": {
         "rend": {
-          "durationMedianSeconds": 75.2,
-          "naturalResolution": "1920x1080",
-          "playbackMode": "hls"
+          "durationMedianSeconds": 0,
+          "naturalResolution": "640x360",
+          "playbackMode": "dash-or-cmaf-via-mse"
         },
         "mux": {
           "durationMedianSeconds": 75.2,
@@ -154,51 +154,51 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 1506.4,
-            "median": 1621.3,
-            "p75": 1647.3,
-            "p95": 3051.1,
-            "max": 3402.1
+            "min": 616.2,
+            "median": 633.2,
+            "p75": 706.1,
+            "p95": 768.6,
+            "max": 784.2
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 1168.2,
-            "median": 1269.7,
-            "p75": 1320.4,
-            "p95": 2745.8,
-            "max": 3102.1
+            "min": 598.3,
+            "median": 626.1,
+            "p75": 672.8,
+            "p95": 749.1,
+            "max": 768.2
           },
           "timeToLoadedDataMs": {
             "count": 5,
-            "min": 1168.8,
-            "median": 1270.4,
-            "p75": 1320.9,
-            "p95": 2746.3,
-            "max": 3102.7
+            "min": 602.6,
+            "median": 629.9,
+            "p75": 707.1,
+            "p95": 759.5,
+            "max": 772.6
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 1169.2,
-            "median": 1270.7,
-            "p75": 1321.4,
-            "p95": 2746.8,
-            "max": 3103.1
+            "min": 604,
+            "median": 631.4,
+            "p75": 707.5,
+            "p95": 760.9,
+            "max": 774.3
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 1506.4,
-            "median": 1621.3,
-            "p75": 1647.3,
-            "p95": 3051.1,
-            "max": 3402.1
+            "min": 616.2,
+            "median": 633.2,
+            "p75": 706.1,
+            "p95": 768.6,
+            "max": 784.2
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 31179.4,
-            "median": 31282.2,
-            "p75": 31329.7,
-            "p95": 32755.3,
-            "max": 33111.7
+            "min": 30612.4,
+            "median": 30638.1,
+            "p75": 30717.9,
+            "p95": 30768.9,
+            "max": 30781.7
           },
           "stallCount": {
             "count": 5,
@@ -220,16 +220,16 @@
         "observed": {
           "durationSeconds": {
             "count": 5,
-            "min": 75.2,
-            "median": 75.2,
-            "p75": 75.2,
-            "p95": 75.2,
-            "max": 75.2
+            "min": 0,
+            "median": 0,
+            "p75": 0,
+            "p95": 0,
+            "max": 0
           },
-          "naturalResolution": "1920x1080",
+          "naturalResolution": "640x360",
           "renderedResolution": "1280x720",
-          "playbackMode": "hls",
-          "selectedRendition": "1920x1080"
+          "playbackMode": "dash-or-cmaf-via-mse",
+          "selectedRendition": "640x360"
         },
         "browserNetworkErrors": 0
       },
@@ -241,51 +241,51 @@
         "metrics": {
           "timeToPlayerReadyMs": {
             "count": 5,
-            "min": 709.4,
-            "median": 928,
-            "p75": 1365.5,
-            "p95": 1842.5,
-            "max": 1961.8
+            "min": 454.3,
+            "median": 913,
+            "p75": 936.1,
+            "p95": 1109.6,
+            "max": 1153
           },
           "timeToMetadataMs": {
             "count": 5,
-            "min": 622.2,
-            "median": 909.2,
-            "p75": 1360,
-            "p95": 1825.2,
-            "max": 1941.5
+            "min": 430.2,
+            "median": 886.7,
+            "p75": 909.3,
+            "p95": 1089.4,
+            "max": 1134.4
           },
           "timeToLoadedDataMs": {
             "count": 5,
-            "min": 710.2,
-            "median": 917.9,
-            "p75": 1370.8,
-            "p95": 1836,
-            "max": 1952.3
+            "min": 440.5,
+            "median": 898.5,
+            "p75": 920.7,
+            "p95": 1099.8,
+            "max": 1144.6
           },
           "timeToCanplayMs": {
             "count": 5,
-            "min": 710.2,
-            "median": 918.1,
-            "p75": 1370.8,
-            "p95": 1836.1,
-            "max": 1952.4
+            "min": 440.5,
+            "median": 898.7,
+            "p75": 921.2,
+            "p95": 1099.9,
+            "max": 1144.6
           },
           "timeToFirstFrameMs": {
             "count": 5,
-            "min": 709.4,
-            "median": 928,
-            "p75": 1365.5,
-            "p95": 1842.5,
-            "max": 1961.8
+            "min": 454.3,
+            "median": 913,
+            "p75": 936.1,
+            "p95": 1109.6,
+            "max": 1153
           },
           "totalDurationMs": {
             "count": 5,
-            "min": 30731.5,
-            "median": 30942,
-            "p75": 31390.4,
-            "p95": 31858.5,
-            "max": 31975.5
+            "min": 30467.2,
+            "median": 30924.9,
+            "p75": 30947.2,
+            "p95": 31120.2,
+            "max": 31163.4
           },
           "stallCount": {
             "count": 5,
@@ -328,7 +328,7 @@
   },
   "redaction": {
     "status": "passed",
-    "checkedAt": "2026-06-30T17:43:10.044Z",
+    "checkedAt": "2026-07-02T23:10:23.238Z",
     "patternsVersion": 1,
     "findings": []
   }
