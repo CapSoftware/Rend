@@ -1537,6 +1537,12 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
         "https://edge.local",
         Some("rend.so"),
     );
+    let local_cookie = playback_cookie_header(
+        &response.playback_token,
+        response.ttl_seconds,
+        "http://edge.local",
+        None,
+    );
 
     assert_eq!(
         playback_url,
@@ -1550,7 +1556,10 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
     assert!(cookie.starts_with("__rend_playback="));
     assert!(cookie.contains("; Domain=rend.so"));
     assert!(cookie.contains("; HttpOnly"));
+    assert!(cookie.contains("; SameSite=None"));
     assert!(cookie.contains("; Secure"));
+    assert!(local_cookie.contains("; SameSite=Lax"));
+    assert!(!local_cookie.contains("; Secure"));
     assert_eq!(claims.asset_id, "asset-123");
     assert_eq!(claims.organization_id.as_deref(), Some(LOCAL_ORG_ID));
     assert_eq!(claims.exp, NOW + 600);
@@ -1624,6 +1633,8 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
     assert!(html.contains("data-rend-playback-engine=\"mse-inline\""));
     assert!(html.contains("\"mimeType\":\"video/mp4; codecs=\\\"avc1.64001f,mp4a.40.2\\\"\""));
     assert!(html.contains("segment_00001.m4s"));
+    assert!(html.contains("waitForBufferRoom"));
+    assert!(!html.contains("pending.length<4"));
     assert!(html.contains("rel=\"preload\" as=\"fetch\""));
     assert!(!html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(!html.contains(&response.playback_token), "{html}");
