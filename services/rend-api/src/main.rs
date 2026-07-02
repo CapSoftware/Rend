@@ -2562,10 +2562,6 @@ async fn playback_origin_artifact_inner(
     )
     .map_err(|_| AppError::unauthorized("unauthorized playback token"))?;
 
-    if hls_progressive_rendition(&artifact.artifact_path).is_some() {
-        return origin_playback_progressive_fmp4_response(state, artifact).await;
-    }
-
     let range_header = if is_hls_manifest_artifact_path(&artifact.artifact_path) {
         None
     } else {
@@ -2574,6 +2570,24 @@ async fn playback_origin_artifact_inner(
             .and_then(|value| value.to_str().ok())
             .and_then(normalize_single_byte_range_header)
     };
+
+    if hls_progressive_rendition(&artifact.artifact_path).is_some() {
+        match origin_playback_artifact_full_bytes(state.as_ref(), &artifact).await {
+            Ok((bytes, content_type, cache_status)) => {
+                return Ok(origin_playback_artifact_bytes_response(
+                    artifact,
+                    bytes,
+                    content_type,
+                    cache_status,
+                    range_header.as_deref(),
+                ));
+            }
+            Err(error) if error.status == StatusCode::NOT_FOUND => {
+                return origin_playback_progressive_fmp4_response(state, artifact).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 
     let cache_ttl = origin_playback_cache_ttl(&artifact);
     if cache_ttl.is_some() {

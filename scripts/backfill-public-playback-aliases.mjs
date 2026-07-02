@@ -31,6 +31,7 @@ Options:
   --prefix PREFIX            Public alias prefix. Defaults to REND_PUBLIC_PLAYBACK_ALIAS_PREFIX or v.
   --acl public-read|inherit  Alias object ACL. Defaults to REND_PUBLIC_PLAYBACK_ALIAS_ACL or public-read.
   --public-base-url URL      Optional unauthenticated GET verification base URL.
+  --backfill-progressive     Create hls/<rendition>/progressive.mp4 source objects before alias copy.
   --env-file PATH            Load storage credentials from a specific env file.
   --dry-run                  List counts without writing aliases.
 `);
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     prefix: process.env.REND_PUBLIC_PLAYBACK_ALIAS_PREFIX || "v",
     acl: process.env.REND_PUBLIC_PLAYBACK_ALIAS_ACL || "public-read",
     publicBaseUrl: "",
+    backfillProgressive: false,
     envFile: "",
     dryRun: false,
   };
@@ -82,6 +84,10 @@ function parseArgs(argv) {
     if (arg === "--public-base-url") {
       options.publicBaseUrl = String(next || "");
       index += 1;
+      continue;
+    }
+    if (arg === "--backfill-progressive") {
+      options.backfillProgressive = true;
       continue;
     }
     if (arg === "--env-file") {
@@ -438,6 +444,7 @@ function playbackArtifactKeysForAsset(allKeys, assetId) {
         relative.endsWith(".m3u8") ||
         relative.endsWith(".m4s") ||
         relative.endsWith(".ts") ||
+        relative.endsWith("/progressive.mp4") ||
         /\/init_[A-Za-z0-9_-]+\.mp4$/.test(relative)
       );
     })
@@ -464,6 +471,97 @@ function cacheControlForKey(key) {
     return "public, max-age=300, stale-while-revalidate=86400";
   }
   return "public, max-age=31536000, immutable";
+}
+
+const startupRenditions = ["360p", "480p", "720p", "1080p", "2k", "4k"];
+
+function mediaSegmentNamesFromPlaylist(playlistText) {
+  return playlistText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line || line.startsWith("#")) return false;
+      if (line.includes("/") || line.includes("\\") || line.includes("..")) {
+        return false;
+      }
+      return /^segment_[0-9]+\.m4s$/.test(line);
+    });
+}
+
+async function getObjectBuffer(env, key, bucket = env.S3_BUCKET) {
+  const response = await s3Fetch(env, {
+    method: "GET",
+    key,
+    bucket,
+  });
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function putObjectBuffer(
+  env,
+  key,
+  body,
+  contentType,
+  bucket = env.S3_BUCKET,
+) {
+  await s3Fetch(env, {
+    method: "PUT",
+    key,
+    bucket,
+    headers: {
+      "content-type": contentType,
+    },
+    body,
+  });
+}
+
+async function backfillProgressiveObjects(env, options, assetId, allKeys) {
+  if (!options.backfillProgressive) return allKeys;
+  const knownKeys = new Set(allKeys);
+  const writtenKeys = [];
+
+  for (const rendition of startupRenditions) {
+    const prefix = `videos/${assetId}/hls/${rendition}`;
+    const targetKey = `${prefix}/progressive.mp4`;
+    if (knownKeys.has(targetKey)) continue;
+
+    const playlistKey = `${prefix}/index.m3u8`;
+    const initKey = `${prefix}/init_${rendition}.mp4`;
+    if (!knownKeys.has(playlistKey) || !knownKeys.has(initKey)) continue;
+
+    const playlist = String(await getObjectBuffer(env, playlistKey));
+    const segmentNames = mediaSegmentNamesFromPlaylist(playlist);
+    const segmentKeys = segmentNames.map((name) => `${prefix}/${name}`);
+    if (!segmentKeys.length || segmentKeys.some((key) => !knownKeys.has(key))) {
+      continue;
+    }
+
+    log(
+      `asset=${assetId} progressive_plan rendition=${rendition} segments=${segmentKeys.length} dry_run=${options.dryRun}`,
+    );
+    if (options.dryRun) {
+      knownKeys.add(targetKey);
+      writtenKeys.push(targetKey);
+      continue;
+    }
+
+    const parts = [await getObjectBuffer(env, initKey)];
+    for (const segmentKey of segmentKeys) {
+      parts.push(await getObjectBuffer(env, segmentKey));
+    }
+    const body = Buffer.concat(parts);
+    await putObjectBuffer(env, targetKey, body, "video/mp4");
+    knownKeys.add(targetKey);
+    writtenKeys.push(targetKey);
+    log(
+      `asset=${assetId} progressive_written rendition=${rendition} bytes=${body.byteLength}`,
+    );
+  }
+
+  if (writtenKeys.length) {
+    return [...knownKeys].sort();
+  }
+  return allKeys;
 }
 
 async function mapLimit(items, limit, mapper) {
@@ -540,7 +638,12 @@ async function verifyPublicGet(options, assetId) {
 
 async function backfillAsset(env, options, assetId) {
   const sourcePrefix = `videos/${assetId}/`;
-  const allKeys = await listObjectKeys(env, sourcePrefix, env.S3_BUCKET);
+  const allKeys = await backfillProgressiveObjects(
+    env,
+    options,
+    assetId,
+    await listObjectKeys(env, sourcePrefix, env.S3_BUCKET),
+  );
   const artifactKeys = playbackArtifactKeysForAsset(allKeys, assetId);
   if (!artifactKeys.some((key) => key.endsWith("/hls/master.m3u8"))) {
     throw new Error(`asset=${assetId} has no hls/master.m3u8 object`);
@@ -559,10 +662,13 @@ async function backfillAsset(env, options, assetId) {
   );
   if (options.dryRun) return;
 
-  let copiedBytes = 0;
-  await mapLimit(planned, 6, async ({ objectKey, aliasKey }) => {
-    copiedBytes += await putAlias(env, options, objectKey, aliasKey);
-  });
+  const copiedSizes = await mapLimit(
+    planned,
+    6,
+    async ({ objectKey, aliasKey }) =>
+      putAlias(env, options, objectKey, aliasKey),
+  );
+  const copiedBytes = copiedSizes.reduce((total, size) => total + size, 0);
   log(
     `asset=${assetId} aliases_written=${planned.length} bytes=${copiedBytes}`,
   );

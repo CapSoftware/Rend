@@ -10,7 +10,12 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::{Client as S3Client, primitives::ByteStream, types::ObjectCannedAcl};
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
-use tokio::{fs, io, process::Command, time};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+    process::Command,
+    time,
+};
 
 use crate::{
     billing,
@@ -588,6 +593,56 @@ async fn generate_and_upload_hls(
             rendition.name
         );
 
+        let init_segment_path = segment_paths
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_hls_init_segment_name)
+            })
+            .cloned();
+        let media_segment_paths = segment_paths
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_hls_media_segment_name)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(init_segment_path) = init_segment_path.as_ref()
+            && !media_segment_paths.is_empty()
+        {
+            let progressive_path = variant_dir.join("progressive.mp4");
+            write_progressive_fmp4(&progressive_path, init_segment_path, &media_segment_paths)
+                .await
+                .with_context(|| format!("failed to create {} progressive fMP4", rendition.name))?;
+            let progressive_duration_ms = media_segment_paths
+                .iter()
+                .map(|segment_path| {
+                    let file_name = segment_path.file_name()?.to_string_lossy();
+                    let duration_key = format!("{}/{}", rendition.name, file_name);
+                    segment_durations
+                        .get(&duration_key)
+                        .copied()
+                        .or(Some(i64::from(HLS_TARGET_SEGMENT_SECONDS) * 1_000))
+                })
+                .flatten()
+                .sum::<i64>();
+            let artifact = upload_generated_file(
+                request,
+                &progressive_path,
+                hls_progressive_object_key(&request.asset_id, rendition.name),
+                "video/mp4",
+                "segment",
+                Some(progressive_duration_ms),
+                Some(rendition.resolution_tier),
+            )
+            .await?;
+            artifacts.push(artifact);
+        }
+
         for segment_path in segment_paths {
             let file_name = segment_path
                 .file_name()
@@ -619,6 +674,40 @@ async fn generate_and_upload_hls(
     }
 
     Ok(artifacts)
+}
+
+async fn write_progressive_fmp4(
+    output_path: &Path,
+    init_segment_path: &Path,
+    media_segment_paths: &[PathBuf],
+) -> Result<()> {
+    let mut output = fs::File::create(output_path)
+        .await
+        .with_context(|| format!("failed to create {}", output_path.display()))?;
+    append_file(&mut output, init_segment_path).await?;
+    for segment_path in media_segment_paths {
+        append_file(&mut output, segment_path).await?;
+    }
+    output
+        .flush()
+        .await
+        .with_context(|| format!("failed to flush {}", output_path.display()))?;
+    Ok(())
+}
+
+async fn append_file(output: &mut fs::File, input_path: &Path) -> Result<()> {
+    let mut input = fs::File::open(input_path)
+        .await
+        .with_context(|| format!("failed to open {}", input_path.display()))?;
+    let copied = io::copy(&mut input, output)
+        .await
+        .with_context(|| format!("failed to append {}", input_path.display()))?;
+    anyhow::ensure!(
+        copied > 0,
+        "media fragment {} is empty",
+        input_path.display()
+    );
+    Ok(())
 }
 
 async fn upload_generated_file(
@@ -1243,6 +1332,10 @@ pub fn hls_segment_object_key(asset_id: &str, rendition_name: &str, segment_name
     format!("videos/{asset_id}/hls/{rendition_name}/{segment_name}")
 }
 
+pub fn hls_progressive_object_key(asset_id: &str, rendition_name: &str) -> String {
+    format!("videos/{asset_id}/hls/{rendition_name}/progressive.mp4")
+}
+
 pub fn normalize_public_playback_alias_prefix(value: &str) -> Result<String> {
     let prefix = value.trim().trim_matches('/');
     anyhow::ensure!(
@@ -1359,6 +1452,10 @@ mod tests {
         assert_eq!(
             hls_segment_object_key("asset-123", "720p", "segment_00000.m4s"),
             "videos/asset-123/hls/720p/segment_00000.m4s"
+        );
+        assert_eq!(
+            hls_progressive_object_key("asset-123", "720p"),
+            "videos/asset-123/hls/720p/progressive.mp4"
         );
     }
 
