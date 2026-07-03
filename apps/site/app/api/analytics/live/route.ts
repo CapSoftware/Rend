@@ -1,7 +1,9 @@
 import {
   assetApiErrorResponse,
   assetJsonResponse,
+  emptyAnalyticsLive,
   fetchAnalyticsLive,
+  isAnalyticsTemporarilyUnavailable,
 } from "../../../../lib/asset-api.ts";
 import {
   dashboardAccessErrorResponse,
@@ -22,12 +24,19 @@ export async function GET(request: Request) {
   if (!access.ok) return dashboardAccessErrorResponse(access);
 
   const url = new URL(request.url);
+  const windowSeconds = numericWindow(url.searchParams.get("windowSeconds"));
   try {
     return assetJsonResponse({
       status: "ok",
-      live: await fetchAnalyticsLive(access.context, numericWindow(url.searchParams.get("windowSeconds"))),
+      live: await fetchAnalyticsLive(access.context, windowSeconds),
     });
   } catch (error) {
+    if (isAnalyticsTemporarilyUnavailable(error)) {
+      return assetJsonResponse({
+        status: "ok",
+        live: emptyAnalyticsLive(windowSeconds),
+      });
+    }
     return assetApiErrorResponse(error);
   }
 }

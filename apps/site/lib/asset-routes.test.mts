@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AssetApiError,
+  emptyAnalyticsLive,
+  emptyAnalyticsOverview,
   fetchAnalyticsOverview,
   fetchAssetDetail,
   fetchAssetThumbnail,
+  isAnalyticsTemporarilyUnavailable,
   listAssets,
   uploadAsset,
 } from "./asset-api.ts";
@@ -310,6 +313,49 @@ test("analytics overview 404 does not use asset not-found copy", async () => {
       );
     });
   });
+});
+
+test("analytics empty fallbacks preserve bounded zero-state shapes", () => {
+  const now = new Date("2026-07-03T00:00:00.000Z");
+  const overview = emptyAnalyticsOverview(60 * 60, now);
+  assert.equal(overview.window_started_at, "2026-07-02T23:00:00.000Z");
+  assert.equal(overview.window_ended_at, "2026-07-03T00:00:00.000Z");
+  assert.equal(overview.views, 0);
+  assert.equal(overview.unique_viewers, 0);
+  assert.equal(overview.sessions, 0);
+  assert.equal(overview.watch_time_ms, 0);
+  assert.equal(overview.request_count, 0);
+  assert.equal(overview.bytes_served, 0);
+  assert.deepEqual(overview.timeseries, []);
+  assert.deepEqual(overview.top_assets, []);
+  assert.deepEqual(overview.breakdowns, []);
+
+  const live = emptyAnalyticsLive(24 * 60 * 60, now);
+  assert.equal(live.window_started_at, "2026-07-02T23:00:00.000Z");
+  assert.equal(live.window_ended_at, "2026-07-03T00:00:00.000Z");
+  assert.equal(live.fetched_at, "2026-07-03T00:00:00.000Z");
+  assert.equal(live.views, 0);
+  assert.equal(live.watch_time_ms, 0);
+  assert.equal(live.unique_viewers, 0);
+  assert.equal(live.active_sessions, 0);
+  assert.equal(live.views_last_minute, 0);
+  assert.deepEqual(live.timeseries, []);
+  assert.deepEqual(live.recent_assets, []);
+  assert.equal(live.resolution, "hourly");
+});
+
+test("analytics temporary outage classifier only matches upstream 502 and 503", () => {
+  const body = {
+    status: "error" as const,
+    error: "rend_api_unavailable" as const,
+    message: "Rend API request failed",
+  };
+
+  assert.equal(isAnalyticsTemporarilyUnavailable(new AssetApiError(502, body)), true);
+  assert.equal(isAnalyticsTemporarilyUnavailable(new AssetApiError(503, body)), true);
+  assert.equal(isAnalyticsTemporarilyUnavailable(new AssetApiError(404, body)), false);
+  assert.equal(isAnalyticsTemporarilyUnavailable(new AssetApiError(403, body)), false);
+  assert.equal(isAnalyticsTemporarilyUnavailable(new Error("network")), false);
 });
 
 test("asset client preserves documented billing limit errors", async () => {

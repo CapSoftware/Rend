@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import AnalyticsClient from "../../../components/AnalyticsClient";
-import { AssetApiError, fetchAnalyticsOverview } from "../../../lib/asset-api.ts";
+import {
+  AssetApiError,
+  emptyAnalyticsOverview,
+  fetchAnalyticsOverview,
+  isAnalyticsTemporarilyUnavailable,
+} from "../../../lib/asset-api.ts";
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +24,9 @@ export default async function AnalyticsPage() {
   try {
     return <AnalyticsClient initialAnalytics={await fetchAnalyticsOverview(access)} />;
   } catch (error) {
+    if (isAnalyticsTemporarilyUnavailable(error)) {
+      return <AnalyticsClient initialAnalytics={emptyAnalyticsOverview()} />;
+    }
     const message =
       error instanceof AssetApiError ? error.body.message : "Rend API request failed";
     return <AnalyticsClient initialAnalytics={null} initialError={message} />;

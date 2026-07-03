@@ -840,8 +840,67 @@ export function buildLiveFromOverview(overview: AnalyticsOverview, windowSeconds
   };
 }
 
+function boundedAnalyticsWindow(windowSeconds: number | undefined, fallback: number, max: number) {
+  return Math.min(Math.max(Math.trunc(windowSeconds ?? fallback) || fallback, 60), max);
+}
+
+export function emptyAnalyticsOverview(
+  windowSeconds = 24 * 60 * 60,
+  now = new Date()
+): AnalyticsOverview {
+  const boundedWindow = boundedAnalyticsWindow(windowSeconds, 24 * 60 * 60, 90 * 24 * 60 * 60);
+  const endedAt = now.toISOString();
+  const startedAt = new Date(now.getTime() - boundedWindow * 1000).toISOString();
+  return {
+    window_started_at: startedAt,
+    window_ended_at: endedAt,
+    views: 0,
+    unique_viewers: 0,
+    sessions: 0,
+    watch_time_ms: 0,
+    startup_success_rate: 0,
+    rebuffer_ratio: 0,
+    stalled_sessions: 0,
+    stall_count: 0,
+    stall_duration_ms: 0,
+    playback_failures: 0,
+    exits_before_start: 0,
+    completions: 0,
+    request_count: 0,
+    bytes_served: 0,
+    cache_hit_rate: 0,
+    error_rate: 0,
+    timeseries: [],
+    top_assets: [],
+    breakdowns: [],
+  };
+}
+
+export function emptyAnalyticsLive(windowSeconds = 60 * 60, now = new Date()): AnalyticsLive {
+  const boundedWindow = boundedAnalyticsWindow(windowSeconds, 60 * 60, 60 * 60);
+  const endedAt = now.toISOString();
+  const startedAt = new Date(now.getTime() - boundedWindow * 1000).toISOString();
+  return {
+    window_started_at: startedAt,
+    window_ended_at: endedAt,
+    fetched_at: endedAt,
+    views: 0,
+    watch_time_ms: 0,
+    unique_viewers: 0,
+    active_sessions: 0,
+    views_last_minute: 0,
+    timeseries: [],
+    recent_assets: [],
+    resolution: "hourly",
+  };
+}
+
 function isLiveEndpointUnavailable(error: unknown) {
   return error instanceof AssetApiError && [404, 502, 503].includes(error.status);
+}
+
+export function isAnalyticsTemporarilyUnavailable(error: unknown) {
+  return error instanceof AssetApiError && [502, 503].includes(error.status);
 }
 
 export async function listAssets(
@@ -1001,7 +1060,7 @@ export async function fetchAnalyticsOverview(
   auth: AssetApiAuthContext,
   windowSeconds = 24 * 60 * 60
 ): Promise<AnalyticsOverview> {
-  const boundedWindow = Math.min(Math.max(Math.trunc(windowSeconds) || 24 * 60 * 60, 60), 90 * 24 * 60 * 60);
+  const boundedWindow = boundedAnalyticsWindow(windowSeconds, 24 * 60 * 60, 90 * 24 * 60 * 60);
   const upstream = await controlPlaneFetch(
     auth,
     `/v1/analytics/overview?window_seconds=${boundedWindow}`
