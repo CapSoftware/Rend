@@ -82,7 +82,7 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
-test("fast embed uses anonymous HLS for public playback", () => {
+test("fast embed uses anonymous progressive MP4 for public playback", () => {
   const base = readyBootstrap();
   if (base.status !== "ready") throw new Error("expected ready bootstrap");
   const bootstrap = {
@@ -117,10 +117,10 @@ test("fast embed uses anonymous HLS for public playback", () => {
     startupMode: "progressive",
   });
 
-  assert.match(html, /src="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/master\.m3u8"/);
+  assert.match(html, /src="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4"/);
   assert.match(html, /crossorigin="anonymous"/);
-  assert.match(html, /data-rend-player-selected="native_hls"/);
-  assert.doesNotMatch(html, /src="https:\/\/media\.rend\.so[^"]+progressive\.mp4"/);
+  assert.match(html, /data-rend-player-selected="progressive_mp4"/);
+  assert.match(html, /rel="preload" as="video" href="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4" type="video\/mp4" crossorigin="anonymous" fetchpriority="high"/);
   assert.doesNotMatch(html, /crossorigin="use-credentials"/);
 });
 

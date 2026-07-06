@@ -881,6 +881,14 @@ fn maps_hls_ladder_playlist_and_segment_to_goal_three_object_and_cache_key() {
             content_type: "video/mp4",
         }
     );
+    assert_eq!(
+        map_playback_artifact("asset-123", "hls/360p/progressive.mp4").unwrap(),
+        PlaybackArtifact {
+            object_key: "videos/asset-123/hls/360p/progressive.mp4".to_owned(),
+            cache_key: "videos/asset-123/hls/360p/progressive.mp4".to_owned(),
+            content_type: "video/mp4",
+        }
+    );
 }
 
 #[test]
@@ -1778,6 +1786,59 @@ async fn playback_miss_fetches_origin_writes_cache_then_hits() {
     assert_eq!(
         requests.lock().unwrap().as_slice(),
         ["rend-local/videos/asset-123/hls/master.m3u8"]
+    );
+}
+
+#[tokio::test]
+async fn playback_synthesizes_progressive_fmp4_from_hls_parts_then_caches() {
+    let mut objects = HashMap::new();
+    objects.insert(
+        "videos/asset-123/hls/360p/index.m3u8".to_owned(),
+        FakeOriginObject::Body(
+            b"#EXTM3U\n#EXT-X-MAP:URI=\"init_360p.mp4\"\n#EXTINF:1.0,\nsegment_00000.m4s\n#EXTINF:1.0,\nsegment_00001.m4s\n"
+                .to_vec(),
+        ),
+    );
+    objects.insert(
+        "videos/asset-123/hls/360p/init_360p.mp4".to_owned(),
+        FakeOriginObject::Body(b"init".to_vec()),
+    );
+    objects.insert(
+        "videos/asset-123/hls/360p/segment_00000.m4s".to_owned(),
+        FakeOriginObject::Body(b"seg0".to_vec()),
+    );
+    objects.insert(
+        "videos/asset-123/hls/360p/segment_00001.m4s".to_owned(),
+        FakeOriginObject::Body(b"seg1".to_vec()),
+    );
+    let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("playback-progressive");
+    let cache_path = cache_dir.join("videos/asset-123/hls/360p/progressive.mp4");
+    let state = test_state(cache_dir, origin_endpoint);
+    let app = build_app(state, Duration::from_secs(10));
+    let uri = signed_playback_uri("asset-123", "hls/360p/progressive.mp4");
+
+    let first = get_playback_with_range(app.clone(), uri.clone(), "bytes=0-7").await;
+    let second = get_playback_with_range(app, uri, "bytes=4-11").await;
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.cache_status.as_deref(), Some("MISS"));
+    assert_eq!(first.content_type.as_deref(), Some("video/mp4"));
+    assert_eq!(first.accept_ranges.as_deref(), Some("bytes"));
+    assert_eq!(first.body, b"initseg0seg1");
+    assert_eq!(fs::read(cache_path).await.unwrap(), b"initseg0seg1");
+    assert_eq!(second.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(second.cache_status.as_deref(), Some("HIT"));
+    assert_eq!(second.content_range.as_deref(), Some("bytes 4-11/12"));
+    assert_eq!(second.body, b"seg0seg1");
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        [
+            "rend-local/videos/asset-123/hls/360p/index.m3u8",
+            "rend-local/videos/asset-123/hls/360p/init_360p.mp4",
+            "rend-local/videos/asset-123/hls/360p/segment_00000.m4s",
+            "rend-local/videos/asset-123/hls/360p/segment_00001.m4s",
+        ]
     );
 }
 

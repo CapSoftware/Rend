@@ -1528,6 +1528,8 @@ async fn playback_inner(
     )?;
     let organization_id = claims.organization_id;
 
+    let requested_artifact_path = path.artifact_path.clone();
+    let is_progressive_fmp4 = hls_progressive_rendition(&requested_artifact_path).is_some();
     let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
@@ -1547,7 +1549,9 @@ async fn playback_inner(
         });
     }
 
-    if let Some(range_header) = range_header.filter(|_| is_range_media_content_type(&artifact)) {
+    if let Some(range_header) =
+        range_header.filter(|_| is_range_media_content_type(&artifact) && !is_progressive_fmp4)
+    {
         let response =
             stream_origin_range_response(state, artifact, range_header, cors_origin).await?;
         return Ok(PlaybackOutcome {
@@ -1561,14 +1565,27 @@ async fn playback_inner(
         .acquire(&artifact.cache_key, state.config.max_in_flight_fills)?
     {
         FillSlot::Leader(leader) => {
-            stream_origin_artifact_response(
-                state.clone(),
-                artifact,
-                cache_path,
-                leader,
-                cors_origin,
-            )
-            .await
+            if is_progressive_fmp4 {
+                stream_progressive_artifact_response(
+                    state.clone(),
+                    path.asset_id,
+                    requested_artifact_path,
+                    artifact,
+                    cache_path,
+                    leader,
+                    cors_origin,
+                )
+                .await
+            } else {
+                stream_origin_artifact_response(
+                    state.clone(),
+                    artifact,
+                    cache_path,
+                    leader,
+                    cors_origin,
+                )
+                .await
+            }
         }
         FillSlot::Waiter(fill) => {
             wait_for_coalesced_fill(fill).await?;
@@ -1963,6 +1980,164 @@ async fn stream_origin_artifact_response(
         content_length,
         cors_origin,
     ))
+}
+
+async fn stream_progressive_artifact_response(
+    state: Arc<AppState>,
+    asset_id: String,
+    artifact_path: String,
+    artifact: PlaybackArtifact,
+    cache_path: PathBuf,
+    leader: FillLeaderGuard,
+    cors_origin: Option<&str>,
+) -> std::result::Result<Response, PlaybackError> {
+    let parts = match progressive_artifact_parts(&state, &asset_id, &artifact_path).await {
+        Ok(parts) => parts,
+        Err(error) => {
+            leader.complete(FillOutcome::Failed(error.clone()));
+            return Err(error);
+        }
+    };
+
+    let active_guard = state.active_streams.begin(&artifact.cache_key, 0);
+    let _maintenance = state.cache_maintenance.lock().await;
+    let cache_write = match prepare_cache_write(
+        &state,
+        &artifact.cache_key,
+        cache_path,
+        0,
+        0,
+        Some(active_guard),
+    )
+    .await
+    {
+        Ok(cache_write) => cache_write,
+        Err(error) => {
+            leader.complete(FillOutcome::Failed(error.clone()));
+            return Err(error);
+        }
+    };
+
+    let (sender, receiver) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(run_progressive_cache_fill(
+        state.clone(),
+        artifact.clone(),
+        parts,
+        cache_write,
+        sender,
+        leader,
+    ));
+    let body_stream = stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|item| (item, receiver))
+    });
+
+    Ok(artifact_response(
+        &state.config,
+        &artifact,
+        "MISS",
+        Body::from_stream(body_stream),
+        None,
+        cors_origin,
+    ))
+}
+
+async fn progressive_artifact_parts(
+    state: &AppState,
+    asset_id: &str,
+    artifact_path: &str,
+) -> std::result::Result<Vec<PlaybackArtifact>, PlaybackError> {
+    let rendition = hls_progressive_rendition(artifact_path)
+        .ok_or_else(|| PlaybackError::NotFound("unsupported playback path".to_owned()))?;
+    let playlist_artifact = hls_progressive_playlist_artifact(asset_id, rendition)?;
+    let playlist_bytes = fetch_origin_artifact(state, &playlist_artifact).await?;
+    let playlist = std::str::from_utf8(&playlist_bytes)
+        .map_err(|_| PlaybackError::Origin("invalid progressive media playlist".to_owned()))?;
+    let segment_names = hls_progressive_segment_names(playlist);
+    if segment_names.is_empty() {
+        return Err(PlaybackError::OriginNotFound(format!(
+            "progressive artifact videos/{asset_id}/{artifact_path} has no media segments"
+        )));
+    }
+
+    let mut parts = Vec::with_capacity(segment_names.len() + 1);
+    parts.push(hls_progressive_init_artifact(asset_id, rendition)?);
+    for segment_name in segment_names {
+        parts.push(hls_progressive_segment_artifact(
+            asset_id,
+            rendition,
+            &segment_name,
+        )?);
+    }
+    Ok(parts)
+}
+
+async fn run_progressive_cache_fill(
+    state: Arc<AppState>,
+    artifact: PlaybackArtifact,
+    parts: Vec<PlaybackArtifact>,
+    cache_write: PreparedCacheWrite,
+    sender: mpsc::Sender<std::result::Result<Bytes, std::io::Error>>,
+    leader: FillLeaderGuard,
+) {
+    let result =
+        write_progressive_parts_to_cache(&state, &artifact, parts, cache_write, &sender).await;
+    if let Err(error) = &result {
+        let _ = sender
+            .send(Err(std::io::Error::other(error.log_message())))
+            .await;
+    }
+
+    let outcome = match result {
+        Ok(()) => FillOutcome::Succeeded,
+        Err(error) => FillOutcome::Failed(error),
+    };
+    leader.complete(outcome);
+}
+
+async fn write_progressive_parts_to_cache(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    parts: Vec<PlaybackArtifact>,
+    mut cache_write: PreparedCacheWrite,
+    sender: &mpsc::Sender<std::result::Result<Bytes, std::io::Error>>,
+) -> std::result::Result<(), PlaybackError> {
+    let mut bytes_written = 0u64;
+    for part in parts {
+        let bytes = match fetch_origin_artifact(state, &part).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                cleanup_prepared_cache_write(cache_write).await;
+                return Err(error);
+            }
+        };
+        let chunk = Bytes::from(bytes);
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let next_size = bytes_written.saturating_add(chunk_len);
+        if let Err(error) =
+            ensure_origin_artifact_size_allowed(state, &artifact.object_key, next_size)
+        {
+            cleanup_prepared_cache_write(cache_write).await;
+            return Err(error);
+        }
+        if let Err(error) = ensure_streamed_cache_size_allowed(state, &cache_write, next_size).await
+        {
+            cleanup_prepared_cache_write(cache_write).await;
+            return Err(error);
+        }
+
+        let _ = sender.send(Ok(chunk.clone())).await;
+        if let Err(error) = cache_write.file.write_all(chunk.as_ref()).await {
+            let playback_error = PlaybackError::Io(format!(
+                "failed to write cache file {}: {error}",
+                cache_write.cache_path.display()
+            ));
+            cleanup_prepared_cache_write(cache_write).await;
+            return Err(playback_error);
+        }
+        bytes_written = next_size;
+    }
+
+    commit_prepared_cache_write(state, &artifact.cache_key, cache_write, bytes_written).await
 }
 
 async fn prepare_streamed_origin_fill(
@@ -3564,6 +3739,11 @@ fn cache_artifact_type(cache_key: &str) -> (CacheArtifactType, Option<u32>) {
         {
             (CacheArtifactType::Manifest, None)
         }
+        ["videos", asset_id, "hls", rendition_name, "progressive.mp4"]
+            if is_safe_asset_id(asset_id) && is_valid_hls_rendition_name(rendition_name) =>
+        {
+            (CacheArtifactType::Segment, None)
+        }
         ["videos", asset_id, "hls", rendition_name, segment_name]
             if is_safe_asset_id(asset_id)
                 && is_valid_hls_rendition_name(rendition_name)
@@ -3653,6 +3833,15 @@ fn map_playback_artifact(
                 "application/vnd.apple.mpegurl",
             ))
         }
+        ["hls", rendition_name, "progressive.mp4"]
+            if is_valid_hls_rendition_name(rendition_name) =>
+        {
+            Ok(playback_artifact(
+                asset_id,
+                &format!("hls/{rendition_name}/progressive.mp4"),
+                "video/mp4",
+            ))
+        }
         ["hls", rendition_name, segment_name]
             if is_valid_hls_rendition_name(rendition_name)
                 && is_valid_hls_segment_name(segment_name) =>
@@ -3685,6 +3874,59 @@ fn hls_segment_content_type(segment_name: &str) -> &'static str {
     } else {
         "video/mp2t"
     }
+}
+
+fn hls_progressive_rendition(path: &str) -> Option<&str> {
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["hls", rendition_name, "progressive.mp4"]
+            if is_valid_hls_rendition_name(rendition_name) =>
+        {
+            Some(rendition_name)
+        }
+        _ => None,
+    }
+}
+
+fn hls_progressive_init_artifact(
+    asset_id: &str,
+    rendition: &str,
+) -> std::result::Result<PlaybackArtifact, PlaybackError> {
+    map_playback_artifact(asset_id, &format!("hls/{rendition}/init_{rendition}.mp4"))
+}
+
+fn hls_progressive_playlist_artifact(
+    asset_id: &str,
+    rendition: &str,
+) -> std::result::Result<PlaybackArtifact, PlaybackError> {
+    map_playback_artifact(asset_id, &format!("hls/{rendition}/index.m3u8"))
+}
+
+fn hls_progressive_segment_artifact(
+    asset_id: &str,
+    rendition: &str,
+    segment_name: &str,
+) -> std::result::Result<PlaybackArtifact, PlaybackError> {
+    map_playback_artifact(asset_id, &format!("hls/{rendition}/{segment_name}"))
+}
+
+fn hls_progressive_segment_names(playlist: &str) -> Vec<String> {
+    playlist
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.contains('/')
+                || line.contains('\\')
+                || line.contains("..")
+                || !line.ends_with(".m4s")
+                || !is_valid_hls_segment_name(line)
+            {
+                return None;
+            }
+            Some(line.to_owned())
+        })
+        .collect()
 }
 
 fn playback_artifact(
