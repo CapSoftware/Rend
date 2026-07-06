@@ -883,7 +883,10 @@ async fn get_analytics_live_inner(
     {
         Ok(rows) => Ok(analytics_live_response(window, fetched_at, rows)),
         Err(error) => {
-            tracing::warn!(?error, "player_events live query failed; falling back to rollups");
+            tracing::warn!(
+                ?error,
+                "player_events live query failed; falling back to rollups"
+            );
             analytics_live_from_rollups(state, &organization_id, window, fetched_at).await
         }
     }
@@ -2011,7 +2014,7 @@ fn clickhouse_live_analytics_query(
         "\
         SELECT \
           'bucket' AS row_kind, \
-          toUnixTimestamp64Milli(toStartOfMinute(observed_at)) AS bucket_start_ms, \
+          toInt64(toUnixTimestamp(toStartOfMinute(observed_at))) * 1000 AS bucket_start_ms, \
           countIf(phase = 'first_frame') AS views, \
           sumIf(watch_delta_ms, phase = 'watch_heartbeat') AS watch_time_ms, \
           toUInt64(0) AS unique_viewers, \
@@ -2847,6 +2850,22 @@ mod tests {
     }
 
     #[test]
+    fn live_analytics_bucket_query_keeps_clickhouse_datetime64_compatible() {
+        let window = NormalizedPlaybackAnalyticsWindow {
+            started_at: DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ended_at: DateTime::parse_from_rfc3339("2026-06-13T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let query = clickhouse_live_analytics_query("00000000-0000-0000-0000-000000000001", window);
+
+        assert!(query.contains("toInt64(toUnixTimestamp(toStartOfMinute(observed_at))) * 1000"));
+        assert!(!query.contains("toUnixTimestamp64Milli(toStartOfMinute(observed_at))"));
+    }
+
+    #[test]
     fn analytics_breakdowns_query_covers_acquisition_dimensions() {
         let window = NormalizedPlaybackAnalyticsWindow {
             started_at: DateTime::parse_from_rfc3339("2026-06-13T11:00:00.000Z")
@@ -2860,8 +2879,18 @@ mod tests {
             clickhouse_analytics_breakdowns_query("00000000-0000-0000-0000-000000000001", window);
 
         for dimension in [
-            "channel", "referrer", "campaign", "keyword", "hostname", "country", "region", "city",
-            "browser", "os", "device", "page_type",
+            "channel",
+            "referrer",
+            "campaign",
+            "keyword",
+            "hostname",
+            "country",
+            "region",
+            "city",
+            "browser",
+            "os",
+            "device",
+            "page_type",
         ] {
             assert!(
                 query.contains(&format!("'{dimension}' AS dimension")),
