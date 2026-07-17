@@ -1,21 +1,6 @@
-name: Release and Deploy Backend
+name: Legacy host deploy (manual rollback only)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/release-deploy.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "Dockerfile"
-      - "clickhouse/**"
-      - "crates/**"
-      - "docs/env/**"
-      - "docs/templates/**"
-      - "migrations/**"
-      - "scripts/**"
-      - "services/**"
   workflow_dispatch:
     inputs:
       release_tag:

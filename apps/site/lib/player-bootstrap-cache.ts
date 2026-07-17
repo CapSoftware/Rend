@@ -1,4 +1,5 @@
 import type { safePlaybackBootstrapResponse, UpstreamPlaybackResponse } from "./player-bootstrap.ts";
+import type { CloudFrontAuthorizationCookies } from "./player-artifact-proxy.ts";
 
 export const PLAYBACK_BOOTSTRAP_CACHE_TTL_MS = 15_000;
 export const PLAYBACK_ARTIFACT_CONTEXT_TTL_MS = 15 * 60_000;
@@ -9,6 +10,7 @@ export type SafePlaybackBootstrapResponse = NonNullable<ReturnType<typeof safePl
 export type CachedPlaybackBootstrap = {
   assetId?: string;
   cachedAtMs: number;
+  cloudFrontAuthorizationCookies?: CloudFrontAuthorizationCookies;
   directCookieDomain?: string;
   directPlaybackEnabled: boolean;
   organizationId?: string;

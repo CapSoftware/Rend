@@ -6,6 +6,69 @@ export type AssetId = string;
 
 export type BinaryUploadBody = string;
 
+export type UploadId = string;
+
+export type MultipartUploadStatus = "uploading" | "completing" | "completed" | "aborted" | "expired" | "failed";
+
+export type CreateMultipartUploadRequest = {
+  content_type: string;
+  content_length: number;
+  filename?: string;
+};
+
+export type MultipartUploadChecksum = string;
+
+export type MultipartUploadPartNumber = number;
+
+export type MultipartUploadCompletedPart = {
+  part_number: MultipartUploadPartNumber;
+  etag: string;
+  checksum_sha256: MultipartUploadChecksum;
+};
+
+export type MultipartUploadStoredPart = {
+  part_number: MultipartUploadPartNumber;
+  etag: string;
+  checksum_sha256?: MultipartUploadChecksum | null;
+  size: number;
+};
+
+export type MultipartUploadSession = {
+  asset_id: AssetId;
+  upload_id: UploadId;
+  part_size: number;
+  part_count: number;
+  max_parallel_parts: 6;
+  expires_at: IsoTimestamp;
+  status: MultipartUploadStatus;
+  uploaded_parts: Array<MultipartUploadStoredPart>;
+};
+
+export type SignMultipartUploadPartRequest = {
+  part_number: MultipartUploadPartNumber;
+  checksum_sha256: MultipartUploadChecksum;
+};
+
+export type SignMultipartUploadPartsRequest = {
+  parts: Array<SignMultipartUploadPartRequest>;
+};
+
+export type PresignedMultipartUploadPart = {
+  part_number: MultipartUploadPartNumber;
+  url: string;
+  method: "PUT";
+  headers: Record<string, string>;
+};
+
+export type SignMultipartUploadPartsResponse = {
+  upload_id: UploadId;
+  parts: Array<PresignedMultipartUploadPart>;
+};
+
+export type CompleteMultipartUploadRequest = {
+  parts: Array<MultipartUploadCompletedPart>;
+};
+
 export type AssetState = string;
 
 export type IsoTimestamp = string;
@@ -96,6 +159,7 @@ export type PlaybackBootstrapResponse = {
   playable_state: AssetState;
   playback_url?: string;
   playback_content_type?: string;
+  playback_credential_mode?: "include" | "omit";
   playback_token_expires_at: number;
   ttl_seconds: number;
   opener_url?: string;
@@ -212,6 +276,10 @@ export type UploadAssetOptions = RendRequestOptions & {
   contentLength?: number;
 };
 
+export type CreateMultipartUploadOptions = RendRequestOptions & {
+  idempotencyKey: string;
+};
+
 export type ListAssetsOptions = RendRequestOptions & {
   limit?: number;
 };
@@ -246,6 +314,11 @@ const DEFAULT_API_BASE_URL = "https://api.rend.so";
 const DEFAULT_SITE_BASE_URL = "https://rend.so";
 const OPERATION_PATHS = {
   "uploadAsset": "/v1/videos",
+  "createMultipartUpload": "/v1/uploads",
+  "getMultipartUpload": "/v1/uploads/{uploadId}",
+  "abortMultipartUpload": "/v1/uploads/{uploadId}",
+  "signMultipartUploadParts": "/v1/uploads/{uploadId}/parts",
+  "completeMultipartUpload": "/v1/uploads/{uploadId}/complete",
   "listAssets": "/v1/assets",
   "getAsset": "/v1/assets/{assetId}",
   "deleteAsset": "/v1/assets/{assetId}",
@@ -301,6 +374,79 @@ export class RendClient {
       headers,
       signal: options.signal
     });
+  }
+
+  createMultipartUpload(
+    payload: CreateMultipartUploadRequest,
+    options: CreateMultipartUploadOptions
+  ) {
+    const headers = new Headers(options.headers);
+    headers.set("content-type", "application/json");
+    headers.set("idempotency-key", options.idempotencyKey);
+    return this.requestJson<MultipartUploadSession>(
+      "api",
+      OPERATION_PATHS.createMultipartUpload,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers,
+        signal: options.signal
+      }
+    );
+  }
+
+  getMultipartUpload(uploadId: string, options: RendRequestOptions = {}) {
+    return this.requestJson<MultipartUploadSession>(
+      "api",
+      pathParameter(OPERATION_PATHS.getMultipartUpload, "uploadId", uploadId),
+      { method: "GET", headers: options.headers, signal: options.signal }
+    );
+  }
+
+  signMultipartUploadParts(
+    uploadId: string,
+    payload: SignMultipartUploadPartsRequest,
+    options: RendRequestOptions = {}
+  ) {
+    const headers = new Headers(options.headers);
+    headers.set("content-type", "application/json");
+    return this.requestJson<SignMultipartUploadPartsResponse>(
+      "api",
+      pathParameter(OPERATION_PATHS.signMultipartUploadParts, "uploadId", uploadId),
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers,
+        signal: options.signal
+      }
+    );
+  }
+
+  completeMultipartUpload(
+    uploadId: string,
+    payload: CompleteMultipartUploadRequest,
+    options: RendRequestOptions = {}
+  ) {
+    const headers = new Headers(options.headers);
+    headers.set("content-type", "application/json");
+    return this.requestJson<MultipartUploadSession>(
+      "api",
+      pathParameter(OPERATION_PATHS.completeMultipartUpload, "uploadId", uploadId),
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers,
+        signal: options.signal
+      }
+    );
+  }
+
+  async abortMultipartUpload(uploadId: string, options: RendRequestOptions = {}) {
+    await this.requestRaw(
+      "api",
+      pathParameter(OPERATION_PATHS.abortMultipartUpload, "uploadId", uploadId),
+      { method: "DELETE", headers: options.headers, signal: options.signal }
+    );
   }
 
   listAssets(options: ListAssetsOptions = {}) {
@@ -478,7 +624,11 @@ export class RendClient {
 }
 
 function assetPath(template: string, assetId: string) {
-  return template.replace("{assetId}", encodeURIComponent(assetId));
+  return pathParameter(template, "assetId", assetId);
+}
+
+function pathParameter(template: string, name: string, value: string) {
+  return template.replace(`{${name}}`, encodeURIComponent(value));
 }
 
 function normalizeBaseUrl(value: string) {

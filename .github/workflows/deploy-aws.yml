@@ -1,0 +1,292 @@
+name: Deploy Rend to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply Terraform and promote ECS after the plan
+        required: true
+        default: false
+        type: boolean
+      services_enabled:
+        description: Start Rend services; requires a previous migration-only apply and drained Latitude worker
+        required: true
+        default: false
+        type: boolean
+      confirm_latitude_worker_drained:
+        description: Confirm Latitude media worker is stopped before enabling Fargate
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: rend-aws-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: Production
+    env:
+      AWS_ACCOUNT_ID: "211125561119"
+      AWS_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.REND_AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Refuse the wrong AWS account
+        run: |
+          set -euo pipefail
+          actual="$(aws sts get-caller-identity --query Account --output text)"
+          test "$actual" = "$AWS_ACCOUNT_ID"
+
+      - name: Enforce two-phase service activation
+        if: ${{ inputs.services_enabled }}
+        env:
+          LATITUDE_DRAINED: ${{ inputs.confirm_latitude_worker_drained }}
+        run: |
+          set -euo pipefail
+          activation_complete="$(aws ssm get-parameter \
+            --name /rend/production/deployment-gates/activation-complete \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || true)"
+          if [[ -z "$activation_complete" ]]; then
+            test "$LATITUDE_DRAINED" = true
+            migrated_revision="$(aws ssm get-parameter \
+              --name /rend/production/deployment-gates/migration-ready \
+              --query 'Parameter.Value' \
+              --output text)"
+            test "$migrated_revision" = "$GITHUB_SHA"
+          fi
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push immutable service images
+        id: images
+        run: |
+          set -euo pipefail
+          registry="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for service in rend-api rend-edge rend-media-worker; do
+            if digest="$(aws ecr describe-images \
+              --repository-name "$service" \
+              --image-ids "imageTag=$GITHUB_SHA" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null)" && [[ "$digest" == sha256:* ]]; then
+              echo "Reusing immutable $service:$GITHUB_SHA ($digest)"
+            else
+              metadata="$RUNNER_TEMP/$service-metadata.json"
+              docker buildx build \
+                --platform linux/amd64 \
+                --target "$service" \
+                --build-arg REND_GIT_SHA="$GITHUB_SHA" \
+                --build-arg REND_BUILD_TIME="$build_time" \
+                --build-arg REND_IMAGE_VERSION="aws-${GITHUB_SHA::12}" \
+                --build-arg REND_IMAGE_SOURCE="https://github.com/$GITHUB_REPOSITORY" \
+                --tag "$registry/$service:$GITHUB_SHA" \
+                --metadata-file "$metadata" \
+                --push .
+              digest="$(jq -r '."containerimage.digest"' "$metadata")"
+              [[ "$digest" == sha256:* ]]
+            fi
+            key="${service//-/_}_image"
+            echo "$key=$registry/$service@$digest" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.2
+
+      - name: Install pinned Tigris infrastructure client
+        run: npm install --global @tigrisdata/cli@3.4.3
+
+      - name: Materialize non-secret Terraform inputs
+        env:
+          REND_AWS_TFVARS: ${{ secrets.REND_AWS_TFVARS }}
+        run: |
+          set -euo pipefail
+          test -n "$REND_AWS_TFVARS"
+          install -m 600 /dev/null "$RUNNER_TEMP/production.tfvars"
+          printf '%s\n' "$REND_AWS_TFVARS" > "$RUNNER_TEMP/production.tfvars"
+
+      - name: Terraform plan
+        working-directory: infra/aws/platform
+        run: |
+          set -euo pipefail
+          terraform init \
+            -backend-config="bucket=rend-terraform-state-$AWS_ACCOUNT_ID" \
+            -backend-config="key=production/platform.tfstate" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="use_lockfile=true"
+          terraform plan \
+            -var-file="$RUNNER_TEMP/production.tfvars" \
+            -var="api_image=${{ steps.images.outputs.rend_api_image }}" \
+            -var="edge_image=${{ steps.images.outputs.rend_edge_image }}" \
+            -var="worker_image=${{ steps.images.outputs.rend_media_worker_image }}" \
+            -var="services_enabled=${{ inputs.services_enabled }}" \
+            -var="worker_cutover_confirmed=${{ inputs.confirm_latitude_worker_drained }}" \
+            -var="release_revision=$GITHUB_SHA" \
+            -out="$RUNNER_TEMP/production.tfplan"
+
+      - name: Apply infrastructure without promoting services
+        if: ${{ inputs.apply }}
+        working-directory: infra/aws/platform
+        run: terraform apply -auto-approve "$RUNNER_TEMP/production.tfplan"
+
+      - name: Run additive database migrations
+        if: ${{ inputs.apply }}
+        id: migrate
+        working-directory: infra/aws/platform
+        run: |
+          set -euo pipefail
+          cluster="$(terraform output -raw ecs_cluster_name)"
+          task_definition="$(terraform output -json task_definition_arns | jq -r .migrate)"
+          security_group="$(terraform output -raw ecs_security_group_id)"
+          subnets="$(terraform output -json ecs_public_subnet_ids | jq -r 'join(",")')"
+          task_arn="$(aws ecs run-task \
+            --cluster "$cluster" \
+            --launch-type FARGATE \
+            --task-definition "$task_definition" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)"
+          test "$task_arn" != None
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task_arn"
+          exit_code="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" --output json | jq -r '.tasks[0].containers[] | select(.name == "rend-api") | .exitCode')"
+          test "$exit_code" = 0
+
+      - name: Apply idempotent ClickHouse schema
+        if: ${{ inputs.apply }}
+        working-directory: infra/aws/platform
+        run: |
+          set -euo pipefail
+          instance_id="$(terraform output -raw clickhouse_instance_id)"
+          schema_etag="$(terraform output -raw clickhouse_schema_etag)"
+          schema_uri="$(terraform output -raw clickhouse_schema_uri)"
+          schema_marker=/rend/production/deployment-gates/clickhouse-schema-applied
+          current_etag="$(aws ssm get-parameter \
+            --name "$schema_marker" \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || true)"
+
+          if [[ "$current_etag" != "$schema_etag" ]]; then
+            schema_uri_b64="$(printf '%s' "$schema_uri" | base64 | tr -d '\n')"
+            schema_etag_b64="$(printf '%s' "$schema_etag" | base64 | tr -d '\n')"
+            remote_command="$(cat <<'SCRIPT'
+          set -euo pipefail
+          schema_uri="$(printf '%s' '__SCHEMA_URI_B64__' | base64 -d)"
+          schema_etag="$(printf '%s' '__SCHEMA_ETAG_B64__' | base64 -d)"
+          schema_file="$(mktemp)"
+          trap 'rm -f "$schema_file"' EXIT
+
+          for attempt in $(seq 1 120); do
+            if [[ -f /var/lib/rend-clickhouse/bootstrap-complete ]] && \
+              [[ -s /etc/rend-clickhouse.env ]] && \
+              docker exec rend-clickhouse clickhouse-client \
+                --user "$(sed -n 's/^CLICKHOUSE_USER=//p' /etc/rend-clickhouse.env)" \
+                --password "$(sed -n 's/^CLICKHOUSE_PASSWORD=//p' /etc/rend-clickhouse.env)" \
+                --query 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" == 120 ]]; then
+              echo 'ClickHouse did not become ready for schema migration' >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          aws s3 cp "$schema_uri" "$schema_file" --region us-east-1 --only-show-errors
+          docker exec -i rend-clickhouse clickhouse-client \
+            --user "$(sed -n 's/^CLICKHOUSE_USER=//p' /etc/rend-clickhouse.env)" \
+            --password "$(sed -n 's/^CLICKHOUSE_PASSWORD=//p' /etc/rend-clickhouse.env)" \
+            --multiquery <"$schema_file"
+          aws ssm put-parameter \
+            --region us-east-1 \
+            --name /rend/production/deployment-gates/clickhouse-schema-applied \
+            --type String \
+            --value "$schema_etag" \
+            --overwrite >/dev/null
+          SCRIPT
+          )"
+            remote_command="${remote_command/__SCHEMA_URI_B64__/$schema_uri_b64}"
+            remote_command="${remote_command/__SCHEMA_ETAG_B64__/$schema_etag_b64}"
+            parameters="$(jq -cn --arg command "$remote_command" '{commands:[$command]}')"
+
+            command_id=""
+            for _ in $(seq 1 60); do
+              if command_id="$(aws ssm send-command \
+                --instance-ids "$instance_id" \
+                --document-name AWS-RunShellScript \
+                --comment "Apply Rend ClickHouse schema $schema_etag" \
+                --parameters "$parameters" \
+                --timeout-seconds 900 \
+                --query 'Command.CommandId' \
+                --output text 2>/dev/null)"; then
+                break
+              fi
+              sleep 10
+            done
+            [[ "$command_id" =~ ^[0-9a-f-]{36}$ ]]
+
+            for _ in $(seq 1 180); do
+              current_etag="$(aws ssm get-parameter \
+                --name "$schema_marker" \
+                --query 'Parameter.Value' \
+                --output text 2>/dev/null || true)"
+              [[ "$current_etag" == "$schema_etag" ]] && break
+              sleep 5
+            done
+            test "$current_etag" = "$schema_etag"
+          fi
+
+          aws ssm put-parameter \
+            --name /rend/production/deployment-gates/migration-ready \
+            --type String \
+            --value "$GITHUB_SHA" \
+            --overwrite >/dev/null
+
+      - name: Promote API, edge, then worker
+        if: ${{ inputs.apply && inputs.services_enabled }}
+        working-directory: infra/aws/platform
+        run: |
+          set -euo pipefail
+          cluster="$(terraform output -raw ecs_cluster_name)"
+          for service in api edge worker; do
+            task_definition="$(terraform output -json task_definition_arns | jq -r ".[\"$service\"]")"
+            aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$task_definition" >/dev/null
+            aws ecs wait services-stable --cluster "$cluster" --services "$service"
+          done
+
+      - name: Verify public health and flat-rate gate
+        if: ${{ inputs.apply && inputs.services_enabled }}
+        working-directory: infra/aws/platform
+        env:
+          REND_READINESS_API_KEY: ${{ secrets.REND_READINESS_API_KEY }}
+        run: |
+          set -euo pipefail
+          test "$(terraform output -raw cloudfront_flat_rate_plan_verified)" = true
+          api_url="$(terraform output -raw api_url)"
+          playback_url="$(terraform output -raw playback_url)"
+          curl --fail --silent --show-error "$api_url/readyz" >/dev/null
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "$playback_url/v/00000000-0000-0000-0000-000000000000/opener.mp4")"
+          test "$status" = 403
+          test -n "$REND_READINESS_API_KEY"
+          REND_API_BASE_URL="$api_url" \
+          REND_PLAYBACK_BASE_URL="$playback_url" \
+            node ../../../scripts/smoke-aws-public.mjs
+          aws ssm put-parameter \
+            --name /rend/production/deployment-gates/activation-complete \
+            --type String \
+            --value "$GITHUB_SHA" \
+            --overwrite >/dev/null

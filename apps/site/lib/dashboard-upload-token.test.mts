@@ -74,9 +74,11 @@ test("dashboard upload intent returns a scoped signed token for the public API",
       const expectedSignature = createHmac("sha256", "site-internal-token").update(payload).digest("base64url");
       const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
 
-      assert.equal(intent.upload_url, "https://api.rend.so/v1/videos");
+      assert.equal(intent.upload_url, "https://api.rend.so/v1/uploads");
       assert.equal(intent.content_type, "video/mp4");
       assert.equal(signature, expectedSignature);
+      assert.equal(claims.v, 2);
+      assert.equal(claims.purpose, "multipart_upload");
       assert.equal(claims.org_id, CONTEXT.organizationId);
       assert.equal(claims.content_type, "video/mp4");
       assert.equal(claims.content_length, 3);
@@ -100,6 +102,14 @@ test("dashboard upload intent rejects unsupported or oversized files before toke
       assert.throws(
         () => createDashboardUploadIntent(CONTEXT, { contentLength: 3, contentType: "video/mp4" }),
         (error) => error instanceof AssetApiError && error.status === 413
+      );
+      assert.throws(
+        () => createDashboardUploadIntent(CONTEXT, { contentLength: 0, contentType: "video/mp4" }),
+        (error) => error instanceof AssetApiError && error.status === 400
+      );
+      assert.throws(
+        () => createDashboardUploadIntent(CONTEXT, { contentType: "video/mp4" }),
+        (error) => error instanceof AssetApiError && error.status === 400
       );
     }
   );

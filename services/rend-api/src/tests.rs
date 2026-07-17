@@ -80,13 +80,14 @@ fn test_config() -> ApiConfig {
     ApiConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         database_url: "postgres://rend:rend@localhost:5432/rend".to_owned(),
-        redis_url: "redis://localhost:6379".to_owned(),
         object_store_health_url: "http://localhost:9100/minio/health/ready".to_owned(),
         dev_api_key: "dev-secret".to_owned(),
         site_internal_token: "site-internal".to_owned(),
         s3_endpoint: "http://localhost:9100".to_owned(),
+        s3_presign_endpoint: "http://localhost:9100".to_owned(),
         s3_region: "us-east-1".to_owned(),
         s3_bucket: "rend-local".to_owned(),
+        source_bucket: "rend-local-source".to_owned(),
         aws_access_key_id: "test".to_owned(),
         aws_secret_access_key: "test".to_owned(),
         playback_mode: PlaybackMode::Tigris,
@@ -95,6 +96,8 @@ fn test_config() -> ApiConfig {
         public_playback_enabled: false,
         public_playback_alias: None,
         playback_cookie_domain: None,
+        cloudfront_cookie_signer: None,
+        cloudfront_distribution_id: None,
         playback_token_issuer: test_issuer(),
         playback_keyring: SingleKeyring::from_key(test_signing_key()),
         playback_bootstrap_prefetch_segments: DEFAULT_PLAYBACK_BOOTSTRAP_PREFETCH_SEGMENTS,
@@ -133,12 +136,27 @@ fn test_config() -> ApiConfig {
             ffprobe_path: "ffprobe".to_owned(),
             process_timeout: Duration::from_secs(60),
         },
+        upload_limits: uploads::UploadLimits {
+            part_size: uploads::DEFAULT_PART_SIZE,
+            session_ttl: Duration::from_secs(24 * 60 * 60),
+            signed_url_ttl: Duration::from_secs(15 * 60),
+            video_limit: 50,
+            organization_byte_limit: 250 * 1024 * 1024 * 1024,
+            global_byte_limit: 5 * 1024 * 1024 * 1024 * 1024,
+            max_open_sessions: 10,
+            media_job_max_attempts: 3,
+            max_upload_bytes: 10 * 1024 * 1024 * 1024,
+        },
+        compute_budget: budget::ComputeBudgetConfig::default(),
         media_job_max_attempts: 3,
         inline_media_processing: false,
         media_worker: MediaWorkerConfig {
             worker_id: "test-worker".to_owned(),
             poll_interval: Duration::from_secs(1),
-            lock_timeout: Duration::from_secs(300),
+            lease_duration: Duration::from_secs(120),
+            heartbeat_interval: Duration::from_secs(30),
+            shutdown_grace: Duration::from_secs(90),
+            max_active_jobs_per_organization: 2,
         },
         auto_migrate: false,
         request_timeout: Duration::from_secs(10),
@@ -156,6 +174,8 @@ fn test_state() -> Arc<AppState> {
         .connect_lazy(&config.database_url)
         .unwrap();
     let s3 = build_s3_client(&config);
+    let source_s3 = build_s3_client_for_endpoint(&config, &config.s3_endpoint);
+    let upload_s3 = build_s3_client_for_endpoint(&config, &config.s3_presign_endpoint);
 
     Arc::new(AppState {
         config,
@@ -163,6 +183,9 @@ fn test_state() -> Arc<AppState> {
         http: reqwest::Client::new(),
         origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
         s3,
+        source_s3,
+        upload_s3,
+        cloudfront: None,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
     })
@@ -457,6 +480,7 @@ fn request_auth_scope_checks_gate_mutations() {
         organization_id: LOCAL_ORG_ID.to_owned(),
         scopes: [ApiScope::Read].into_iter().collect(),
         credential: RequestCredential::ApiKey,
+        upload_claims: None,
     };
 
     assert!(require_scope(&read_only, ApiScope::Read).is_ok());
@@ -517,6 +541,7 @@ async fn dashboard_upload_token_auth_is_upload_only_and_bound_to_file_metadata()
         "site-internal",
         &DashboardUploadTokenClaims {
             v: 1,
+            purpose: None,
             org_id: "00000000-0000-0000-0000-0000000000ab".to_owned(),
             exp: NOW,
             content_type: "video/mp4".to_owned(),
@@ -553,6 +578,7 @@ async fn dashboard_upload_token_rejects_expired_or_tampered_tokens() {
         "site-internal",
         &DashboardUploadTokenClaims {
             v: 1,
+            purpose: None,
             org_id: LOCAL_ORG_ID.to_owned(),
             exp: 1,
             content_type: "video/mp4".to_owned(),
@@ -578,6 +604,7 @@ async fn dashboard_upload_token_rejects_expired_or_tampered_tokens() {
         "site-internal",
         &DashboardUploadTokenClaims {
             v: 1,
+            purpose: None,
             org_id: LOCAL_ORG_ID.to_owned(),
             exp: NOW,
             content_type: "video/mp4".to_owned(),
@@ -595,6 +622,58 @@ async fn dashboard_upload_token_rejects_expired_or_tampered_tokens() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn dashboard_upload_token_v2_binds_multipart_json_metadata() {
+    let state = test_state();
+    let token = encode_dashboard_upload_token(
+        "site-internal",
+        &DashboardUploadTokenClaims {
+            v: 2,
+            purpose: Some("multipart_upload".to_owned()),
+            org_id: LOCAL_ORG_ID.to_owned(),
+            exp: NOW,
+            content_type: "video/mp4".to_owned(),
+            content_length: Some(16_777_217),
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let auth = authenticate_request(&state, &headers)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(auth.has_scope(ApiScope::Upload));
+    assert!(
+        ensure_dashboard_upload_metadata(
+            &auth,
+            &CreateUploadRequest {
+                content_type: "video/mp4".to_owned(),
+                content_length: 16_777_217,
+                filename: Some("large.mp4".to_owned()),
+            },
+        )
+        .is_ok()
+    );
+    assert!(
+        ensure_dashboard_upload_metadata(
+            &auth,
+            &CreateUploadRequest {
+                content_type: "video/mp4".to_owned(),
+                content_length: 16_777_218,
+                filename: None,
+            },
+        )
+        .is_err()
     );
 }
 
@@ -1097,21 +1176,17 @@ fn delete_asset_normalizes_uuid_and_rejects_malformed_id() {
 }
 
 #[test]
-fn delete_origin_cleanup_only_accepts_rend_owned_asset_prefix() {
-    let asset_id = "00000000-0000-0000-0000-0000000000ab";
-
-    assert!(is_rend_owned_asset_object_key(
-        asset_id,
-        "videos/00000000-0000-0000-0000-0000000000ab/hls/master.m3u8"
-    ));
-    assert!(!is_rend_owned_asset_object_key(
-        asset_id,
-        "videos/00000000-0000-0000-0000-0000000000ac/hls/master.m3u8"
-    ));
-    assert!(!is_rend_owned_asset_object_key(
-        asset_id,
-        "videos/00000000-0000-0000-0000-0000000000ab/../other"
-    ));
+fn organization_invalidation_paths_chunk_above_cloudfront_limit() {
+    let asset_ids = (0..1_001)
+        .map(|index| format!("asset-{index}"))
+        .collect::<Vec<_>>();
+    let paths = organization_invalidation_paths(&asset_ids);
+    let batches = paths
+        .chunks(CLOUDFRONT_INVALIDATION_PATH_LIMIT)
+        .collect::<Vec<_>>();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].len(), 1_000);
+    assert_eq!(batches[1].len(), 1);
 }
 
 #[test]
@@ -1568,6 +1643,22 @@ fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
 }
 
 #[test]
+fn cloudfront_cookie_values_and_attributes_match_aws_format() {
+    assert_eq!(cloudfront_cookie_value(&[251, 255]), "-~8_");
+    let cookie = playback_authorization_cookie(
+        "CloudFront-Policy",
+        "policy",
+        900,
+        "https://video.rend.so",
+        Some("video.rend.so"),
+    );
+    assert_eq!(
+        cookie,
+        "CloudFront-Policy=policy; Path=/v/; Max-Age=900; HttpOnly; SameSite=None; Domain=video.rend.so; Secure"
+    );
+}
+
+#[test]
 fn api_fast_embed_prefers_progressive_startup_without_token_material() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
@@ -1724,6 +1815,9 @@ async fn api_fast_embed_playback_base_override_is_allowlisted() {
             .unwrap(),
         http: reqwest::Client::new(),
         origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
+        source_s3: s3.clone(),
+        upload_s3: s3.clone(),
+        cloudfront: None,
         s3,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
@@ -2330,6 +2424,9 @@ async fn upload_endpoint_rejects_content_length_over_limit_before_db() {
         db,
         http: reqwest::Client::new(),
         origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
+        source_s3: s3.clone(),
+        upload_s3: s3.clone(),
+        cloudfront: None,
         s3,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),

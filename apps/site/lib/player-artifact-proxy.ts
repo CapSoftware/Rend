@@ -12,6 +12,17 @@ const FORWARDED_RESPONSE_HEADERS = [
 
 export const PLAYBACK_COOKIE_NAME = "__rend_playback";
 
+export const CLOUDFRONT_AUTHORIZATION_COOKIE_NAMES = [
+  "CloudFront-Policy",
+  "CloudFront-Signature",
+  "CloudFront-Key-Pair-Id",
+] as const;
+
+export type CloudFrontAuthorizationCookies = Record<
+  (typeof CLOUDFRONT_AUTHORIZATION_COOKIE_NAMES)[number],
+  string
+>;
+
 type ArtifactResponseHeaderOptions = {
   artifactPath?: string;
   cacheable?: boolean;
@@ -87,6 +98,34 @@ export function playbackCookieFromSetCookieHeaders(headers: Headers) {
   return undefined;
 }
 
+export function cloudFrontAuthorizationCookiesFromSetCookieHeaders(
+  headers: Headers,
+) {
+  const values = (
+    headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie?.() ?? [headers.get("set-cookie")];
+  const cookies = new Map<string, string>();
+
+  for (const headerValue of values) {
+    if (!headerValue) continue;
+    for (const name of CLOUDFRONT_AUTHORIZATION_COOKIE_NAMES) {
+      const match = headerValue.match(
+        new RegExp(`(?:^|,\\s*)${name}=([^;,\\s]+)`),
+      );
+      const value = safeCookieValue(match?.[1]);
+      if (value) cookies.set(name, value);
+    }
+  }
+
+  if (
+    !CLOUDFRONT_AUTHORIZATION_COOKIE_NAMES.every((name) => cookies.has(name))
+  ) {
+    return undefined;
+  }
+
+  return Object.fromEntries(cookies) as CloudFrontAuthorizationCookies;
+}
+
 export function playbackProxyCookieHeader(
   requestUrl: string,
   assetId: string,
@@ -144,6 +183,42 @@ export function playbackDirectCookieHeader(
   if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
   if (isSecure) parts.push("Secure");
   return parts.join("; ");
+}
+
+export function cloudFrontAuthorizationCookieHeaders(
+  requestUrl: string,
+  assetId: string,
+  ttlSeconds: unknown,
+  playbackBaseUrl: string,
+  cookies: CloudFrontAuthorizationCookies | undefined,
+  cookieDomain?: string,
+) {
+  const maxAge =
+    typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)
+      ? Math.max(0, Math.floor(ttlSeconds))
+      : 0;
+  if (!cookies || maxAge <= 0) return [];
+
+  const request = new URL(requestUrl);
+  const playbackBase = new URL(playbackBaseUrl);
+  const isSecure =
+    request.protocol === "https:" || playbackBase.protocol === "https:";
+  const path = `/v/${encodeURIComponent(assetId)}/`;
+
+  return CLOUDFRONT_AUTHORIZATION_COOKIE_NAMES.flatMap((name) => {
+    const value = safeCookieValue(cookies[name]);
+    if (!value) return [];
+    const parts = [
+      `${name}=${value}`,
+      `Path=${path}`,
+      `Max-Age=${maxAge}`,
+      "HttpOnly",
+      `SameSite=${isSecure ? "None" : "Lax"}`,
+    ];
+    if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
+    if (isSecure) parts.push("Secure");
+    return [parts.join("; ")];
+  });
 }
 
 export function playbackArtifactFetchHeaders(

@@ -2,8 +2,12 @@ use std::{
     collections::{HashMap, HashSet},
     io::SeekFrom,
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path as FsPath, PathBuf},
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +28,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::stream;
+use lru::LruCache;
 use rend_config::{
     ExpectedEdges, RendEnv, env_bool, env_duration_secs, env_path, env_socket_addr, env_string,
     env_u64, env_usize, load_dotenv, optional_env_url,
@@ -62,6 +67,10 @@ const CACHE_METADATA_DIR_NAME: &str = ".rend-edge-cache-meta";
 const CACHE_METADATA_VERSION: u8 = 1;
 const FIRST_SEGMENT_KEEP_COUNT: u32 = 2;
 const DEFAULT_FAST_EMBED_CACHE_TTL_SECS: u64 = 60;
+const DEFAULT_ARTIFACT_RESOLUTION_CACHE_TTL_SECS: u64 = 300;
+const DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES: usize = 10_000;
+const HARD_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES: usize = 100_000;
+const DEFAULT_ASSET_AVAILABILITY_CACHE_TTL_SECS: u64 = 5;
 
 #[derive(Clone)]
 struct EdgeConfig {
@@ -81,9 +90,13 @@ struct EdgeConfig {
     warm_max_artifacts: usize,
     max_in_flight_fills: usize,
     cache_max_bytes: Option<u64>,
+    validate_cache_origin: bool,
     max_origin_artifact_bytes: u64,
     cache_min_free_bytes: u64,
     control_plane: Option<ControlPlaneConfig>,
+    artifact_resolution_cache_ttl: Duration,
+    artifact_resolution_cache_max_entries: usize,
+    asset_availability_cache_ttl: Duration,
     fast_embed_control_plane_url: Option<String>,
     fast_embed_cache_ttl: Duration,
     request_timeout: Duration,
@@ -119,6 +132,10 @@ impl EdgeConfig {
             (1..=HARD_WARM_MAX_ARTIFACTS).contains(&warm_max_artifacts),
             "REND_EDGE_WARM_MAX_ARTIFACTS must be between 1 and {HARD_WARM_MAX_ARTIFACTS}"
         );
+        let asset_availability_cache_ttl = env_duration_secs(
+            "REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS",
+            DEFAULT_ASSET_AVAILABILITY_CACHE_TTL_SECS,
+        )?;
         let max_in_flight_fills =
             env_usize("REND_EDGE_MAX_IN_FLIGHT_FILLS", DEFAULT_MAX_IN_FLIGHT_FILLS)?;
         anyhow::ensure!(
@@ -158,6 +175,11 @@ impl EdgeConfig {
         )?;
         let bind_addr = env_socket_addr("REND_EDGE_BIND_ADDR", "127.0.0.1:4100")?;
         let control_plane_url = optional_env_url("REND_CONTROL_PLANE_URL");
+        if rend_env.is_strict() && control_plane_url.is_none() {
+            anyhow::bail!(
+                "REND_CONTROL_PLANE_URL is required in production so immutable artifact keys can be resolved"
+            );
+        }
         let edge_base_url = optional_env_url("REND_EDGE_BASE_URL")
             .unwrap_or_else(|| format!("http://127.0.0.1:{}", bind_addr.port()));
         let expected_edges =
@@ -198,6 +220,7 @@ impl EdgeConfig {
         }
         let cache_max_bytes_i64 = optional_i64_env("REND_EDGE_CACHE_MAX_BYTES")?;
         let cache_max_bytes = cache_max_bytes_i64.and_then(|value| u64::try_from(value).ok());
+        let validate_cache_origin = env_bool("REND_EDGE_VALIDATE_CACHE_ORIGIN", true)?;
         let max_origin_artifact_bytes = env_u64(
             "REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES",
             DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
@@ -221,6 +244,19 @@ impl EdgeConfig {
             cache_max_bytes: cache_max_bytes_i64,
             heartbeat_interval,
         });
+        let artifact_resolution_cache_ttl = env_duration_secs(
+            "REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS",
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_TTL_SECS,
+        )?;
+        let artifact_resolution_cache_max_entries = env_usize(
+            "REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES",
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )?;
+        anyhow::ensure!(
+            (1..=HARD_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES)
+                .contains(&artifact_resolution_cache_max_entries),
+            "REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES must be between 1 and {HARD_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES}"
+        );
         let fast_embed_cache_ttl = env_duration_secs(
             "REND_EDGE_FAST_EMBED_CACHE_TTL_SECS",
             DEFAULT_FAST_EMBED_CACHE_TTL_SECS,
@@ -246,9 +282,13 @@ impl EdgeConfig {
             warm_max_artifacts,
             max_in_flight_fills,
             cache_max_bytes,
+            validate_cache_origin,
             max_origin_artifact_bytes,
             cache_min_free_bytes,
             control_plane,
+            artifact_resolution_cache_ttl,
+            artifact_resolution_cache_max_entries,
+            asset_availability_cache_ttl,
             fast_embed_control_plane_url,
             fast_embed_cache_ttl,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 10)?,
@@ -265,6 +305,9 @@ struct AppState {
     in_flight_fills: Arc<FillRegistry>,
     active_streams: Arc<ActiveStreamRegistry>,
     cache_maintenance: Arc<tokio::sync::Mutex<()>>,
+    asset_cache_fences: Arc<AssetCacheFenceRegistry>,
+    artifact_resolution_cache: Arc<ArtifactResolutionCache>,
+    asset_availability_cache: Arc<AssetAvailabilityCache>,
     fast_embed_cache: Arc<FastEmbedCache>,
     metrics: Arc<EdgeMetrics>,
     telemetry: telemetry::TelemetryHandle,
@@ -464,6 +507,17 @@ struct PlaybackArtifact {
     content_type: &'static str,
 }
 
+#[derive(Deserialize)]
+struct ArtifactResolutionResponse {
+    storage_object_key: String,
+    content_type: String,
+}
+
+#[derive(Deserialize)]
+struct AssetAvailabilityResponse {
+    available: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ByteRange {
     start: u64,
@@ -505,11 +559,37 @@ struct FastEmbedCache {
     entries: std::sync::Mutex<HashMap<String, FastEmbedCacheEntry>>,
 }
 
+struct ArtifactResolutionCache {
+    entries: std::sync::Mutex<LruCache<String, ArtifactResolutionCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct ArtifactResolutionCacheEntry {
+    storage_object_key: String,
+    inserted_at: Instant,
+}
+
+struct AssetAvailabilityCache {
+    entries: std::sync::Mutex<LruCache<String, Instant>>,
+}
+
+#[derive(Default)]
+struct AssetCacheFenceRegistry {
+    entries: std::sync::Mutex<HashMap<String, Weak<AssetCacheFence>>>,
+}
+
+#[derive(Default)]
+struct AssetCacheFence {
+    generation: AtomicU64,
+    commit_barrier: tokio::sync::Mutex<()>,
+    availability_refresh: tokio::sync::Mutex<()>,
+}
+
 #[derive(Clone)]
 struct FastEmbedCacheEntry {
     body: Bytes,
     content_type: String,
-    set_cookie: Option<String>,
+    set_cookies: Vec<String>,
     inserted_at: Instant,
 }
 
@@ -595,6 +675,8 @@ struct PreparedCacheWrite {
     temp_path: PathBuf,
     file: fs::File,
     reserved_bytes: u64,
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
     active_guard: Option<ActiveStreamGuard>,
 }
 
@@ -710,6 +792,108 @@ impl FastEmbedCache {
     fn insert(&self, key: String, entry: FastEmbedCacheEntry) {
         lock_mutex(&self.entries).insert(key, entry);
     }
+
+    fn remove_asset(&self, asset_id: &str) {
+        let prefix = format!("{asset_id}|");
+        lock_mutex(&self.entries).retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
+impl ArtifactResolutionCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(max_entries).expect("artifact resolution cache is non-empty"),
+            )),
+        }
+    }
+
+    fn get(&self, cache_key: &str, ttl: Duration) -> Option<String> {
+        let mut entries = lock_mutex(&self.entries);
+        let entry = entries.get(cache_key)?;
+        if entry.inserted_at.elapsed() > ttl {
+            entries.pop(cache_key);
+            return None;
+        }
+        Some(entry.storage_object_key.clone())
+    }
+
+    fn insert(&self, cache_key: String, storage_object_key: String) {
+        lock_mutex(&self.entries).put(
+            cache_key,
+            ArtifactResolutionCacheEntry {
+                storage_object_key,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
+
+    fn remove(&self, cache_key: &str) {
+        lock_mutex(&self.entries).pop(cache_key);
+    }
+
+    fn remove_asset(&self, asset_id: &str) {
+        let prefix = format!("videos/{asset_id}/");
+        let mut entries = lock_mutex(&self.entries);
+        let keys = entries
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            entries.pop(&key);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        lock_mutex(&self.entries).len()
+    }
+}
+
+impl AssetAvailabilityCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(max_entries).expect("asset availability cache is non-empty"),
+            )),
+        }
+    }
+
+    fn is_available(&self, asset_id: &str, ttl: Duration) -> bool {
+        let mut entries = lock_mutex(&self.entries);
+        let Some(inserted_at) = entries.get(asset_id) else {
+            return false;
+        };
+        if inserted_at.elapsed() > ttl {
+            entries.pop(asset_id);
+            return false;
+        }
+        true
+    }
+
+    fn mark_available(&self, asset_id: String) {
+        lock_mutex(&self.entries).put(asset_id, Instant::now());
+    }
+
+    fn remove(&self, asset_id: &str) {
+        lock_mutex(&self.entries).pop(asset_id);
+    }
+}
+
+impl AssetCacheFenceRegistry {
+    fn acquire(&self, asset_id: &str) -> Arc<AssetCacheFence> {
+        let mut entries = lock_mutex(&self.entries);
+        if let Some(fence) = entries.get(asset_id).and_then(Weak::upgrade) {
+            return fence;
+        }
+        if entries.len() >= DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES {
+            entries.retain(|_, fence| fence.strong_count() > 0);
+        }
+        let fence = Arc::new(AssetCacheFence::default());
+        entries.insert(asset_id.to_owned(), Arc::downgrade(&fence));
+        fence
+    }
 }
 
 impl InFlightFill {
@@ -801,6 +985,12 @@ async fn main() -> Result<()> {
     let http = reqwest::Client::new();
     let telemetry =
         telemetry::TelemetryHandle::start(config.playback_telemetry.clone(), http.clone());
+    let artifact_resolution_cache = Arc::new(ArtifactResolutionCache::new(
+        config.artifact_resolution_cache_max_entries,
+    ));
+    let asset_availability_cache = Arc::new(AssetAvailabilityCache::new(
+        config.artifact_resolution_cache_max_entries,
+    ));
     let state = Arc::new(AppState {
         config,
         http,
@@ -808,6 +998,9 @@ async fn main() -> Result<()> {
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        asset_cache_fences: Arc::new(AssetCacheFenceRegistry::default()),
+        artifact_resolution_cache,
+        asset_availability_cache,
         fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
@@ -1390,11 +1583,12 @@ async fn fast_embed_inner(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("text/html; charset=utf-8")
         .to_owned();
-    let set_cookie = upstream
+    let set_cookies = upstream
         .headers()
-        .get(header::SET_COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
     let body = upstream.bytes().await.map_err(|error| {
         tracing::warn!(error = %error, "edge fast embed upstream body read failed");
         error_response(
@@ -1406,7 +1600,7 @@ async fn fast_embed_inner(
     let entry = FastEmbedCacheEntry {
         body,
         content_type,
-        set_cookie,
+        set_cookies,
         inserted_at: Instant::now(),
     };
     state.fast_embed_cache.insert(cache_key, entry.clone());
@@ -1426,8 +1620,12 @@ fn fast_embed_cached_response(
         .header("x-rend-cache", cache_status)
         .header("x-rend-edge-id", &config.edge_id)
         .header("x-rend-region", &config.region);
-    if let Some(set_cookie) = entry.set_cookie {
-        builder = builder.header(header::SET_COOKIE, set_cookie);
+    if let Some(headers) = builder.headers_mut() {
+        for set_cookie in entry.set_cookies {
+            if let Ok(value) = set_cookie.parse() {
+                headers.append(header::SET_COOKIE, value);
+            }
+        }
     }
     builder
         .body(Body::from(entry.body))
@@ -1529,25 +1727,91 @@ async fn playback_inner(
     let organization_id = claims.organization_id;
 
     let requested_artifact_path = path.artifact_path.clone();
-    let is_progressive_fmp4 = hls_progressive_rendition(&requested_artifact_path).is_some();
-    let artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
-    let cache_path = state.config.cache_dir.join(&artifact.cache_key);
+    let progressive_rendition = hls_progressive_rendition(&requested_artifact_path);
+    let is_progressive_fmp4 = progressive_rendition.is_some();
+    let logical_artifact = map_playback_artifact(&path.asset_id, &path.artifact_path)?;
+    let cache_path = state.config.cache_dir.join(&logical_artifact.cache_key);
+    let asset_cache_fence = state.asset_cache_fences.acquire(&path.asset_id);
+    let cache_generation = asset_cache_fence.generation.load(Ordering::Acquire);
 
-    if let Some(response) = cached_artifact_response(
-        &state,
-        &artifact,
-        &cache_path,
-        "HIT",
-        cors_origin,
-        range_header,
-    )
-    .await?
+    // Authorization is independent of the disk cache. Validate every request
+    // before a cache hit, miss, range stream, or origin fetch so a stale
+    // resolver mapping can never bypass asset/org suspension.
+    if let Err(error) =
+        validate_asset_availability(&state, &asset_cache_fence, &path.asset_id).await
     {
-        return Ok(PlaybackOutcome {
-            response,
-            organization_id,
-        });
+        if matches!(error, PlaybackError::OriginNotFound(_)) {
+            remove_cached_artifact(&state, &logical_artifact.cache_key, &cache_path).await;
+        }
+        return Err(error);
     }
+
+    if fs::try_exists(&cache_path).await.unwrap_or(false) {
+        if state.config.validate_cache_origin {
+            let validation_artifact = match progressive_rendition {
+                Some(rendition) => {
+                    resolve_playback_artifact(
+                        &state,
+                        &path.asset_id,
+                        &format!("hls/{rendition}/index.m3u8"),
+                        hls_progressive_playlist_artifact(&path.asset_id, rendition)?,
+                    )
+                    .await?
+                }
+                None => {
+                    resolve_playback_artifact(
+                        &state,
+                        &path.asset_id,
+                        &path.artifact_path,
+                        logical_artifact.clone(),
+                    )
+                    .await?
+                }
+            };
+            validate_cached_artifact_origin(&state, &validation_artifact, &cache_path).await?;
+        }
+
+        if let Some(response) = cached_artifact_response(
+            &state,
+            &logical_artifact,
+            &cache_path,
+            "HIT",
+            cors_origin,
+            range_header,
+        )
+        .await?
+        {
+            return Ok(PlaybackOutcome {
+                response,
+                organization_id,
+            });
+        }
+    }
+
+    let progressive_validation_artifact = match progressive_rendition {
+        Some(rendition) => Some(
+            resolve_playback_artifact(
+                &state,
+                &path.asset_id,
+                &format!("hls/{rendition}/index.m3u8"),
+                hls_progressive_playlist_artifact(&path.asset_id, rendition)?,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let artifact = match progressive_validation_artifact.as_ref() {
+        Some(_) => logical_artifact,
+        None => {
+            resolve_playback_artifact(
+                &state,
+                &path.asset_id,
+                &path.artifact_path,
+                logical_artifact,
+            )
+            .await?
+        }
+    };
 
     if let Some(range_header) =
         range_header.filter(|_| is_range_media_content_type(&artifact) && !is_progressive_fmp4)
@@ -1572,6 +1836,8 @@ async fn playback_inner(
                     requested_artifact_path,
                     artifact,
                     cache_path,
+                    cache_generation,
+                    asset_cache_fence,
                     leader,
                     cors_origin,
                 )
@@ -1581,6 +1847,8 @@ async fn playback_inner(
                     state.clone(),
                     artifact,
                     cache_path,
+                    cache_generation,
+                    asset_cache_fence,
                     leader,
                     cors_origin,
                 )
@@ -1611,6 +1879,200 @@ async fn playback_inner(
         response,
         organization_id,
     })
+}
+
+async fn resolve_playback_artifact(
+    state: &AppState,
+    asset_id: &str,
+    artifact_path: &str,
+    mut artifact: PlaybackArtifact,
+) -> std::result::Result<PlaybackArtifact, PlaybackError> {
+    if let Some(storage_object_key) = state.artifact_resolution_cache.get(
+        &artifact.cache_key,
+        state.config.artifact_resolution_cache_ttl,
+    ) {
+        artifact.object_key = storage_object_key;
+        return Ok(artifact);
+    }
+    let Some(control_plane) = state.config.control_plane.as_ref() else {
+        return Ok(artifact);
+    };
+    let asset_cache_fence = state.asset_cache_fences.acquire(asset_id);
+    let resolution_generation = asset_cache_fence.generation.load(Ordering::Acquire);
+    let mut url = reqwest::Url::parse(&control_plane.url).map_err(|error| {
+        PlaybackError::Origin(format!("invalid artifact resolver URL: {error}"))
+    })?;
+    url.set_path("/internal/edges/playback/artifact");
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("asset_id", asset_id)
+        .append_pair("artifact_path", artifact_path);
+    let response = state
+        .http
+        .get(url)
+        .header("x-rend-internal-token", &state.config.internal_token)
+        .send()
+        .await
+        .map_err(|error| {
+            PlaybackError::Origin(format!("artifact resolver request failed: {error}"))
+        })?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        state.artifact_resolution_cache.remove(&artifact.cache_key);
+        return Err(PlaybackError::OriginNotFound(format!(
+            "artifact {} was not found in origin",
+            artifact.cache_key
+        )));
+    }
+    if !response.status().is_success() {
+        return Err(PlaybackError::Origin(format!(
+            "artifact resolver returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let resolution: ArtifactResolutionResponse = response.json().await.map_err(|error| {
+        PlaybackError::Origin(format!("artifact resolver returned invalid JSON: {error}"))
+    })?;
+    let required_prefix = format!("videos/{asset_id}/");
+    if !resolution.storage_object_key.starts_with(&required_prefix)
+        || resolution.storage_object_key.contains("/../")
+        || resolution.storage_object_key.contains("/./")
+        || resolution.content_type != artifact.content_type
+    {
+        return Err(PlaybackError::Origin(
+            "artifact resolver returned an invalid storage mapping".to_owned(),
+        ));
+    }
+    {
+        let _commit_barrier = asset_cache_fence.commit_barrier.lock().await;
+        if asset_cache_fence.generation.load(Ordering::Acquire) != resolution_generation {
+            return Err(PlaybackError::Origin(
+                "artifact resolution was invalidated by a concurrent purge".to_owned(),
+            ));
+        }
+        state.artifact_resolution_cache.insert(
+            artifact.cache_key.clone(),
+            resolution.storage_object_key.clone(),
+        );
+    }
+    artifact.object_key = resolution.storage_object_key;
+    Ok(artifact)
+}
+
+async fn validate_asset_availability(
+    state: &AppState,
+    asset_cache_fence: &AssetCacheFence,
+    asset_id: &str,
+) -> std::result::Result<(), PlaybackError> {
+    if state
+        .asset_availability_cache
+        .is_available(asset_id, state.config.asset_availability_cache_ttl)
+    {
+        return Ok(());
+    }
+    let Some(control_plane) = state.config.control_plane.as_ref() else {
+        return Ok(());
+    };
+    let _refresh = asset_cache_fence.availability_refresh.lock().await;
+    if state
+        .asset_availability_cache
+        .is_available(asset_id, state.config.asset_availability_cache_ttl)
+    {
+        return Ok(());
+    }
+
+    let refresh_generation = asset_cache_fence.generation.load(Ordering::Acquire);
+    let mut url = reqwest::Url::parse(&control_plane.url).map_err(|error| {
+        PlaybackError::Origin(format!("invalid asset availability URL: {error}"))
+    })?;
+    url.set_path("/internal/edges/playback/availability");
+    url.set_query(None);
+    url.query_pairs_mut().append_pair("asset_id", asset_id);
+    let response = state
+        .http
+        .get(url)
+        .header("x-rend-internal-token", &state.config.internal_token)
+        .send()
+        .await
+        .map_err(|error| {
+            PlaybackError::Origin(format!("asset availability request failed: {error}"))
+        })?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        state.asset_availability_cache.remove(asset_id);
+        state.artifact_resolution_cache.remove_asset(asset_id);
+        return Err(PlaybackError::OriginNotFound(format!(
+            "asset {asset_id} is not available"
+        )));
+    }
+    if !response.status().is_success() {
+        return Err(PlaybackError::Origin(format!(
+            "asset availability returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let availability: AssetAvailabilityResponse = response.json().await.map_err(|error| {
+        PlaybackError::Origin(format!("asset availability returned invalid JSON: {error}"))
+    })?;
+    if !availability.available {
+        state.asset_availability_cache.remove(asset_id);
+        state.artifact_resolution_cache.remove_asset(asset_id);
+        return Err(PlaybackError::OriginNotFound(format!(
+            "asset {asset_id} is not available"
+        )));
+    }
+    {
+        let _commit_barrier = asset_cache_fence.commit_barrier.lock().await;
+        if asset_cache_fence.generation.load(Ordering::Acquire) != refresh_generation {
+            return Err(PlaybackError::Origin(
+                "asset availability was invalidated by a concurrent purge".to_owned(),
+            ));
+        }
+        state
+            .asset_availability_cache
+            .mark_available(asset_id.to_owned());
+    }
+    Ok(())
+}
+
+async fn validate_cached_artifact_origin(
+    state: &AppState,
+    artifact: &PlaybackArtifact,
+    cache_path: &FsPath,
+) -> std::result::Result<(), PlaybackError> {
+    match state
+        .s3
+        .head_object()
+        .bucket(&state.config.s3_bucket)
+        .key(&artifact.object_key)
+        .send()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error
+                .as_service_error()
+                .is_some_and(|service_error| service_error.is_not_found()) =>
+        {
+            let _ = fs::remove_file(cache_path).await;
+            let _ = fs::remove_file(cache_metadata_path(
+                &state.config.cache_dir,
+                &artifact.cache_key,
+            ))
+            .await;
+            Err(PlaybackError::OriginNotFound(format!(
+                "artifact {} was not found in origin",
+                artifact.object_key
+            )))
+        }
+        Err(error) => Err(PlaybackError::Origin(format!(
+            "failed to validate cached artifact {} against origin: {error}",
+            artifact.object_key
+        ))),
+    }
+}
+
+async fn remove_cached_artifact(state: &AppState, cache_key: &str, cache_path: &FsPath) {
+    let _ = fs::remove_file(cache_path).await;
+    let _ = fs::remove_file(cache_metadata_path(&state.config.cache_dir, cache_key)).await;
 }
 
 struct PlaybackOutcome {
@@ -1948,10 +2410,20 @@ async fn stream_origin_artifact_response(
     state: Arc<AppState>,
     artifact: PlaybackArtifact,
     cache_path: PathBuf,
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
     leader: FillLeaderGuard,
     cors_origin: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
-    let stream = match prepare_streamed_origin_fill(&state, &artifact, cache_path).await {
+    let stream = match prepare_streamed_origin_fill(
+        &state,
+        &artifact,
+        cache_path,
+        cache_generation,
+        asset_cache_fence,
+    )
+    .await
+    {
         Ok(stream) => stream,
         Err(error) => {
             leader.complete(FillOutcome::Failed(error.clone()));
@@ -1988,6 +2460,8 @@ async fn stream_progressive_artifact_response(
     artifact_path: String,
     artifact: PlaybackArtifact,
     cache_path: PathBuf,
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
     leader: FillLeaderGuard,
     cors_origin: Option<&str>,
 ) -> std::result::Result<Response, PlaybackError> {
@@ -2007,6 +2481,8 @@ async fn stream_progressive_artifact_response(
         cache_path,
         0,
         0,
+        cache_generation,
+        asset_cache_fence,
         Some(active_guard),
     )
     .await
@@ -2048,7 +2524,13 @@ async fn progressive_artifact_parts(
 ) -> std::result::Result<Vec<PlaybackArtifact>, PlaybackError> {
     let rendition = hls_progressive_rendition(artifact_path)
         .ok_or_else(|| PlaybackError::NotFound("unsupported playback path".to_owned()))?;
-    let playlist_artifact = hls_progressive_playlist_artifact(asset_id, rendition)?;
+    let playlist_artifact = resolve_playback_artifact(
+        state,
+        asset_id,
+        &format!("hls/{rendition}/index.m3u8"),
+        hls_progressive_playlist_artifact(asset_id, rendition)?,
+    )
+    .await?;
     let playlist_bytes = fetch_origin_artifact(state, &playlist_artifact).await?;
     let playlist = std::str::from_utf8(&playlist_bytes)
         .map_err(|_| PlaybackError::Origin("invalid progressive media playlist".to_owned()))?;
@@ -2060,13 +2542,26 @@ async fn progressive_artifact_parts(
     }
 
     let mut parts = Vec::with_capacity(segment_names.len() + 1);
-    parts.push(hls_progressive_init_artifact(asset_id, rendition)?);
-    for segment_name in segment_names {
-        parts.push(hls_progressive_segment_artifact(
+    parts.push(
+        resolve_playback_artifact(
+            state,
             asset_id,
-            rendition,
-            &segment_name,
-        )?);
+            &format!("hls/{rendition}/init_{rendition}.mp4"),
+            hls_progressive_init_artifact(asset_id, rendition)?,
+        )
+        .await?,
+    );
+    for segment_name in segment_names {
+        let artifact_path = format!("hls/{rendition}/{segment_name}");
+        parts.push(
+            resolve_playback_artifact(
+                state,
+                asset_id,
+                &artifact_path,
+                hls_progressive_segment_artifact(asset_id, rendition, &segment_name)?,
+            )
+            .await?,
+        );
     }
     Ok(parts)
 }
@@ -2144,6 +2639,8 @@ async fn prepare_streamed_origin_fill(
     state: &Arc<AppState>,
     artifact: &PlaybackArtifact,
     cache_path: PathBuf,
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
 ) -> std::result::Result<OriginCacheStream, PlaybackError> {
     let object = state
         .s3
@@ -2171,6 +2668,8 @@ async fn prepare_streamed_origin_fill(
         cache_path,
         0,
         content_length.unwrap_or(0),
+        cache_generation,
+        asset_cache_fence,
         Some(active_guard),
     )
     .await
@@ -2289,7 +2788,7 @@ async fn warm_inner(
     let mut results = Vec::with_capacity(entries.len());
 
     for (artifact_path, artifact) in entries {
-        results.push(warm_artifact(&state, artifact_path, artifact).await);
+        results.push(warm_artifact(&state, &request.asset_id, artifact_path, artifact).await);
     }
 
     let mut summary = WarmSummary {
@@ -2328,6 +2827,17 @@ async fn purge_inner(
             "asset_id must use the playback asset id character set".to_owned(),
         ));
     }
+
+    let asset_cache_fence = state.asset_cache_fences.acquire(&request.asset_id);
+    {
+        let _commit_barrier = asset_cache_fence.commit_barrier.lock().await;
+        asset_cache_fence.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    state.asset_availability_cache.remove(&request.asset_id);
+    state
+        .artifact_resolution_cache
+        .remove_asset(&request.asset_id);
+    state.fast_embed_cache.remove_asset(&request.asset_id);
 
     let mut response = PurgeResponse {
         asset_id: request.asset_id.clone(),
@@ -2845,9 +3355,12 @@ fn validate_warm_request(
 
 async fn warm_artifact(
     state: &AppState,
+    asset_id: &str,
     artifact_path: String,
-    artifact: PlaybackArtifact,
+    mut artifact: PlaybackArtifact,
 ) -> WarmEntryResponse {
+    let asset_cache_fence = state.asset_cache_fences.acquire(asset_id);
+    let cache_generation = asset_cache_fence.generation.load(Ordering::Acquire);
     let cache_path = state.config.cache_dir.join(&artifact.cache_key);
 
     match valid_cache_file_size(&cache_path).await {
@@ -2877,6 +3390,29 @@ async fn warm_artifact(
             );
         }
     }
+
+    artifact =
+        match resolve_playback_artifact(state, asset_id, &artifact_path, artifact.clone()).await {
+            Ok(artifact) => artifact,
+            Err(PlaybackError::OriginNotFound(message)) => {
+                return warm_entry(
+                    artifact_path,
+                    artifact,
+                    WarmEntryStatus::NotFound,
+                    None,
+                    Some(message),
+                );
+            }
+            Err(error) => {
+                return warm_entry(
+                    artifact_path,
+                    artifact,
+                    WarmEntryStatus::Failed,
+                    None,
+                    Some(error.log_message()),
+                );
+            }
+        };
 
     let bytes = match fetch_origin_artifact(state, &artifact).await {
         Ok(bytes) => bytes,
@@ -2908,7 +3444,15 @@ async fn warm_artifact(
     };
 
     let byte_size = u64::try_from(bytes.len()).ok();
-    if let Err(error) = write_cache_file(state, &cache_path, &bytes).await {
+    if let Err(error) = write_cache_file(
+        state,
+        &cache_path,
+        &bytes,
+        cache_generation,
+        asset_cache_fence,
+    )
+    .await
+    {
         let message = error.log_message();
         tracing::warn!(
             artifact_path,
@@ -3204,6 +3748,8 @@ async fn write_cache_file(
     state: &AppState,
     path: &FsPath,
     bytes: &[u8],
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
 ) -> std::result::Result<(), PlaybackError> {
     let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     ensure_cache_object_size_allowed(state, byte_len)?;
@@ -3214,6 +3760,8 @@ async fn write_cache_file(
         path.to_path_buf(),
         byte_len,
         byte_len,
+        cache_generation,
+        asset_cache_fence,
         None,
     )
     .await?;
@@ -3256,6 +3804,8 @@ async fn prepare_cache_write(
     cache_path: PathBuf,
     additional_bytes: u64,
     reserved_bytes: u64,
+    cache_generation: u64,
+    asset_cache_fence: Arc<AssetCacheFence>,
     active_guard: Option<ActiveStreamGuard>,
 ) -> std::result::Result<PreparedCacheWrite, PlaybackError> {
     fs::create_dir_all(&state.config.cache_dir)
@@ -3299,6 +3849,8 @@ async fn prepare_cache_write(
         temp_path,
         file,
         reserved_bytes,
+        cache_generation,
+        asset_cache_fence,
         active_guard,
     })
 }
@@ -3338,18 +3890,37 @@ async fn commit_prepared_cache_write(
         cache_path,
         temp_path,
         mut file,
+        cache_generation,
+        asset_cache_fence,
         active_guard: _active_guard,
         ..
     } = prepared;
 
-    let commit_result = async {
+    let flush_result = async {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
-        fs::rename(&temp_path, &cache_path).await?;
         Ok::<_, std::io::Error>(())
     }
     .await;
+    if let Err(error) = flush_result {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(PlaybackError::Io(format!(
+            "failed to flush cache file {}: {error}",
+            cache_path.display()
+        )));
+    }
+
+    let commit_result = {
+        let _commit_barrier = asset_cache_fence.commit_barrier.lock().await;
+        if asset_cache_fence.generation.load(Ordering::Acquire) != cache_generation {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(PlaybackError::OriginNotFound(format!(
+                "cache fill for {cache_key} was invalidated by a purge"
+            )));
+        }
+        fs::rename(&temp_path, &cache_path).await
+    };
 
     if let Err(error) = commit_result {
         let _ = fs::remove_file(&temp_path).await;
@@ -3362,6 +3933,17 @@ async fn commit_prepared_cache_write(
     if let Err(error) = write_cache_metadata(state, cache_key, byte_len, now_unix_ms()).await {
         let _ = fs::remove_file(&cache_path).await;
         return Err(error);
+    }
+
+    let invalidated = {
+        let _commit_barrier = asset_cache_fence.commit_barrier.lock().await;
+        asset_cache_fence.generation.load(Ordering::Acquire) != cache_generation
+    };
+    if invalidated {
+        remove_cached_artifact(state, cache_key, &cache_path).await;
+        return Err(PlaybackError::OriginNotFound(format!(
+            "cache fill for {cache_key} was invalidated by a purge"
+        )));
     }
 
     Ok(())

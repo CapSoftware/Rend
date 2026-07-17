@@ -62,7 +62,6 @@ ffprobe -version >/dev/null
 
 export DATABASE_URL="${DATABASE_URL:-postgres://rend:rend@localhost:5432/rend}"
 export REND_ENV="${REND_SMOKE_REND_ENV:-local}"
-export REND_REDIS_URL="${REND_REDIS_URL:-redis://localhost:6379}"
 export OBJECT_STORE_HEALTH_URL="${OBJECT_STORE_HEALTH_URL:-http://localhost:9100/minio/health/ready}"
 export S3_ENDPOINT="${S3_ENDPOINT:-http://localhost:9100}"
 export S3_REGION="${S3_REGION:-us-east-1}"
@@ -98,11 +97,10 @@ export REND_EDGE_INTERNAL_TOKEN="${REND_EDGE_INTERNAL_TOKEN:-dev-internal-token}
 export REND_EDGE_WARM_MAX_ARTIFACTS="${REND_EDGE_WARM_MAX_ARTIFACTS:-16}"
 
 docker compose stop rend-api rend-media-worker rend-edge >/dev/null 2>&1 || true
-docker compose up -d postgres redis clickhouse minio minio-init clickhouse-init
+docker compose up -d postgres clickhouse minio minio-init clickhouse-init
 
 for _ in $(seq 1 60); do
   if docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null 2>&1 &&
-    docker compose exec -T redis redis-cli ping >/dev/null 2>&1 &&
     curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null 2>&1; then
     break
   fi
@@ -110,7 +108,6 @@ for _ in $(seq 1 60); do
 done
 
 docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null
-docker compose exec -T redis redis-cli ping >/dev/null
 curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null
 
 "$root_dir/scripts/generate-fixture-video.sh" "$fixture_path" >/dev/null

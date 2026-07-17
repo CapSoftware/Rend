@@ -1,0 +1,68 @@
+name: Publish self-host images
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: rend-api
+            target: rend-api
+          - image: rend-media-worker
+            target: rend-media-worker
+          - image: rend-edge
+            target: rend-edge
+          - image: rend-site
+            target: rend-site-standalone
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize the GHCR namespace
+        id: registry
+        shell: bash
+        run: echo "namespace=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish pinned amd64 and arm64 manifest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.registry.outputs.namespace }}/${{ matrix.image }}:sha-${{ github.sha }}
+            ghcr.io/${{ steps.registry.outputs.namespace }}/${{ matrix.image }}:${{ github.event.release.tag_name || format('manual-{0}', github.run_number) }}
+          build-args: |
+            REND_GIT_SHA=${{ github.sha }}
+            REND_BUILD_TIME=${{ github.event.release.published_at || github.event.repository.updated_at }}
+            REND_IMAGE_VERSION=${{ github.event.release.tag_name || format('manual-{0}', github.run_number) }}
+            REND_IMAGE_SOURCE=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+      - name: Record immutable digest
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: printf '%s@%s\n' "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

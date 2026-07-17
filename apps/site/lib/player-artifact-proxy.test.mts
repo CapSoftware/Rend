@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  cloudFrontAuthorizationCookieHeaders,
+  cloudFrontAuthorizationCookiesFromSetCookieHeaders,
   isHlsManifestArtifactPath,
   playbackCookieFromHeaders,
   playbackCookieFromSetCookieHeader,
@@ -193,6 +195,62 @@ test("playback cookie can be extracted from upstream set-cookie headers", () => 
     "set-cookie": "__rend_playback=v1.claims.signature; Path=/v/",
   });
   assert.equal(playbackCookieFromSetCookieHeaders(headers), "v1.claims.signature");
+});
+
+test("CloudFront authorization cookies are extracted only as a complete safe set", () => {
+  const headers = new Headers();
+  headers.append(
+    "set-cookie",
+    "CloudFront-Policy=policy_value; Path=/v/; Max-Age=900; HttpOnly",
+  );
+  headers.append(
+    "set-cookie",
+    "CloudFront-Signature=signature-value; Path=/v/; Max-Age=900; HttpOnly",
+  );
+  headers.append(
+    "set-cookie",
+    "CloudFront-Key-Pair-Id=K123ABC; Path=/v/; Max-Age=900; HttpOnly",
+  );
+
+  assert.deepEqual(cloudFrontAuthorizationCookiesFromSetCookieHeaders(headers), {
+    "CloudFront-Policy": "policy_value",
+    "CloudFront-Signature": "signature-value",
+    "CloudFront-Key-Pair-Id": "K123ABC",
+  });
+
+  headers.delete("set-cookie");
+  headers.set("set-cookie", "CloudFront-Policy=policy_value; Path=/v/");
+  assert.equal(
+    cloudFrontAuthorizationCookiesFromSetCookieHeaders(headers),
+    undefined,
+  );
+});
+
+test("CloudFront authorization cookies are scoped to the direct asset path", () => {
+  const headers = cloudFrontAuthorizationCookieHeaders(
+    "https://www.rend.so/api/player/00000000-0000-0000-0000-000000000001",
+    "00000000-0000-0000-0000-000000000001",
+    600,
+    "https://media.rend.so",
+    {
+      "CloudFront-Policy": "policy_value",
+      "CloudFront-Signature": "signature-value",
+      "CloudFront-Key-Pair-Id": "K123ABC",
+    },
+    "rend.so",
+  );
+
+  assert.equal(headers.length, 3);
+  for (const header of headers) {
+    assert.match(
+      header,
+      /Path=\/v\/00000000-0000-0000-0000-000000000001\//,
+    );
+    assert.match(header, /Max-Age=600/);
+    assert.match(header, /Domain=rend\.so/);
+    assert.match(header, /SameSite=None/);
+    assert.match(header, /Secure/);
+  }
 });
 
 test("playback cookie parser returns only safe cookie values", () => {

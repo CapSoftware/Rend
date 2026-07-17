@@ -17,33 +17,46 @@ x-rend-build-edge: &rend-build-edge
 
 x-rend-common-env: &rend-common-env
   REND_ENV: local
-  DATABASE_URL: postgres://rend:rend@postgres:5432/rend
-  REND_REDIS_URL: redis://redis:6379
+  DATABASE_URL: ${DATABASE_URL:-postgres://rend:rend@postgres:5432/rend}
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_DATABASE: rend
   CLICKHOUSE_USER: rend
-  CLICKHOUSE_PASSWORD: rend
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-rend}
   OBJECT_STORE_HEALTH_URL: http://minio:9000/minio/health/ready
   S3_ENDPOINT: http://minio:9000
+  S3_PRESIGN_ENDPOINT: ${S3_PRESIGN_ENDPOINT:-http://127.0.0.1:9100}
   S3_REGION: us-east-1
-  S3_BUCKET: rend-local
-  AWS_ACCESS_KEY_ID: rend_minio
-  AWS_SECRET_ACCESS_KEY: rend_minio_password
-  REND_DEV_API_KEY: dev-api-key
-  REND_SITE_INTERNAL_TOKEN: local-site-internal-token
-  REND_EDGE_INTERNAL_TOKEN: dev-internal-token
-  REND_INTERNAL_TELEMETRY_TOKEN: dev-internal-token
-  REND_PLAYBACK_SIGNING_KEY_ID: local-dev-playback-key
-  REND_PLAYBACK_SIGNING_SECRET: local-dev-playback-signing-secret
+  S3_BUCKET: rend-local-media
+  S3_SOURCE_BUCKET: rend-local-source
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-rend_minio}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-rend_minio_password}
+  REND_DEV_API_KEY: ${REND_DEV_API_KEY:-dev-api-key}
+  REND_SITE_INTERNAL_TOKEN: ${REND_SITE_INTERNAL_TOKEN:-local-site-internal-token}
+  REND_EDGE_INTERNAL_TOKEN: ${REND_EDGE_INTERNAL_TOKEN:-dev-internal-token}
+  REND_INTERNAL_TELEMETRY_TOKEN: ${REND_INTERNAL_TELEMETRY_TOKEN:-dev-internal-token}
+  REND_PLAYBACK_SIGNING_KEY_ID: ${REND_PLAYBACK_SIGNING_KEY_ID:-local-dev-playback-key}
+  REND_PLAYBACK_SIGNING_SECRET: ${REND_PLAYBACK_SIGNING_SECRET:-local-dev-playback-signing-secret}
   REND_PLAYBACK_TOKEN_TTL_SECS: "900"
-  REND_MAX_UPLOAD_BYTES: "536870912"
+  REND_MAX_UPLOAD_BYTES: ${REND_MAX_UPLOAD_BYTES:-536870912}
+  REND_ORGANIZATION_STORAGE_BYTES: ${REND_ORGANIZATION_STORAGE_BYTES:-268435456000}
+  REND_PLATFORM_STORAGE_BYTES: ${REND_PLATFORM_STORAGE_BYTES:-5497558138880}
+  REND_ORGANIZATION_VIDEO_LIMIT: ${REND_ORGANIZATION_VIDEO_LIMIT:-50}
+  REND_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION: ${REND_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION:-10}
+  REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION: ${REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION:-2}
   REND_EXPECTED_EDGES: local-edge-001=local=http://rend-edge:4100,rend-edge-us-east=us-east=http://rend-edge-us-east:4100,rend-edge-london=london=http://rend-edge-london:4100
   REND_ALLOW_INSECURE_EDGE_URLS: "false"
   REND_HTTP_TIMEOUT_SECS: "120"
   REND_MEDIA_PROCESS_TIMEOUT_SECS: "60"
   REND_MEDIA_JOB_MAX_ATTEMPTS: "3"
   REND_MEDIA_WORKER_POLL_INTERVAL_SECS: "1"
-  REND_MEDIA_JOB_LOCK_TIMEOUT_SECS: "300"
+  REND_MEDIA_JOB_LEASE_SECS: ${REND_MEDIA_JOB_LEASE_SECS:-120}
+  REND_MEDIA_JOB_HEARTBEAT_SECS: ${REND_MEDIA_JOB_HEARTBEAT_SECS:-30}
+  REND_MEDIA_SHUTDOWN_GRACE_SECS: ${REND_MEDIA_SHUTDOWN_GRACE_SECS:-90}
+  REND_MEDIA_MONTHLY_BUDGET_MICROUSD: ${REND_MEDIA_MONTHLY_BUDGET_MICROUSD:-250000000}
+  REND_MEDIA_MONTHLY_BASE_MICROUSD: ${REND_MEDIA_MONTHLY_BASE_MICROUSD:-154000000}
+  REND_MEDIA_JOB_CEILING_MICROUSD: ${REND_MEDIA_JOB_CEILING_MICROUSD:-25000000}
+  REND_MEDIA_TASK_MICROUSD_PER_SECOND: ${REND_MEDIA_TASK_MICROUSD_PER_SECOND:-57}
+  REND_MEDIA_BUDGET_SAFETY_FACTOR: ${REND_MEDIA_BUDGET_SAFETY_FACTOR:-2}
   REND_PLAYBACK_TELEMETRY_MAX_BODY_BYTES: "262144"
   REND_PLAYBACK_TELEMETRY_MAX_EVENTS_PER_BATCH: "100"
   REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS: "86400"
@@ -51,6 +64,10 @@ x-rend-common-env: &rend-common-env
   REND_EDGE_WARM_MAX_ARTIFACTS: "4"
   REND_EDGE_MAX_IN_FLIGHT_FILLS: "64"
   REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES: "536870912"
+  REND_EDGE_VALIDATE_CACHE_ORIGIN: ${REND_EDGE_VALIDATE_CACHE_ORIGIN:-true}
+  REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS: ${REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS:-300}
+  REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES: ${REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES:-10000}
+  REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS: ${REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS:-5}
   REND_EDGE_CACHE_MIN_FREE_BYTES: "67108864"
   REND_EDGE_TELEMETRY_ENABLED: "true"
   REND_EDGE_TELEMETRY_QUEUE_CAPACITY: "1024"
@@ -63,8 +80,6 @@ x-rend-common-env: &rend-common-env
 x-rend-service-deps: &rend-service-deps
   postgres:
     condition: service_healthy
-  redis:
-    condition: service_healthy
   minio:
     condition: service_healthy
   minio-init:
@@ -75,7 +90,7 @@ x-rend-service-deps: &rend-service-deps
     condition: service_completed_successfully
 
 x-edge-service: &edge-service
-  image: rend-edge:local
+  image: ${REND_EDGE_IMAGE:-rend-edge:local}
   build: *rend-build-edge
   restart: unless-stopped
   depends_on:
@@ -94,13 +109,13 @@ x-edge-service: &edge-service
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
     environment:
       POSTGRES_DB: rend
       POSTGRES_USER: rend
-      POSTGRES_PASSWORD: rend
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rend}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - rend-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -109,30 +124,18 @@ services:
       timeout: 3s
       retries: 20
 
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
-    volumes:
-      - rend-redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   clickhouse:
-    image: clickhouse/clickhouse-server:24.12-alpine
+    image: clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621
     environment:
       CLICKHOUSE_DB: rend
       CLICKHOUSE_USER: rend
-      CLICKHOUSE_PASSWORD: rend
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-rend}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "8123:8123"
+      - "127.0.0.1:8123:8123"
     volumes:
       - rend-clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/backup-disk.xml:/etc/clickhouse-server/config.d/backup-disk.xml:ro
     healthcheck:
       test:
         [
@@ -144,13 +147,13 @@ services:
       retries: 20
 
   clickhouse-init:
-    image: clickhouse/clickhouse-server:24.12-alpine
+    image: clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621
     depends_on:
       clickhouse:
         condition: service_healthy
     environment:
       CLICKHOUSE_USER: rend
-      CLICKHOUSE_PASSWORD: rend
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-rend}
     volumes:
       - ./clickhouse:/schema:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -166,14 +169,15 @@ services:
     restart: "no"
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: rend_minio
-      MINIO_ROOT_PASSWORD: rend_minio_password
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-rend_minio}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-rend_minio_password}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${REND_SELFHOST_CORS_ALLOWED_ORIGINS:-*}
     ports:
-      - "9100:9000"
-      - "9101:9001"
+      - "127.0.0.1:9100:9000"
+      - "127.0.0.1:9101:9001"
     volumes:
       - rend-minio-data:/data
     healthcheck:
@@ -183,21 +187,25 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-rend_minio}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-rend_minio_password}
     entrypoint:
       - /bin/sh
       - -c
       - |
-        mc alias set local http://minio:9000 rend_minio rend_minio_password &&
-        mc mb --ignore-existing local/rend-local &&
-        mc anonymous set none local/rend-local
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing local/rend-local-source local/rend-local-media &&
+        mc anonymous set none local/rend-local-source &&
+        mc anonymous set none local/rend-local-media
     restart: "no"
 
   rend-api:
-    image: rend-api:local
+    image: ${REND_API_IMAGE:-rend-api:local}
     build: *rend-build-api
     restart: unless-stopped
     depends_on: *rend-service-deps
@@ -212,7 +220,7 @@ services:
       REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
       REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/readyz"]
       interval: 10s
@@ -221,7 +229,7 @@ services:
       start_period: 20s
 
   rend-media-worker:
-    image: rend-media-worker:local
+    image: ${REND_WORKER_IMAGE:-rend-media-worker:local}
     build: *rend-build-worker
     restart: unless-stopped
     depends_on:
@@ -231,7 +239,6 @@ services:
       <<: *rend-common-env
       REND_API_AUTO_MIGRATE: "false"
       REND_API_INLINE_MEDIA_PROCESSING: "false"
-      REND_MEDIA_WORKER_ID: docker-media-worker-001
       REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: "30"
       REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
       REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
@@ -264,7 +271,7 @@ services:
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
       REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
     ports:
-      - "4100:4100"
+      - "127.0.0.1:4100:4100"
     volumes:
       - rend-edge-cache:/var/lib/rend/edge-cache
       - rend-edge-telemetry-spool:/var/spool/rend/edge-telemetry
@@ -287,7 +294,7 @@ services:
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
       REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
     ports:
-      - "4101:4100"
+      - "127.0.0.1:4101:4100"
     volumes:
       - rend-edge-us-east-cache:/var/lib/rend/edge-cache
       - rend-edge-us-east-telemetry-spool:/var/spool/rend/edge-telemetry
@@ -310,14 +317,13 @@ services:
       REND_EDGE_TELEMETRY_INGEST_URL: http://rend-api:4000/internal/telemetry/playback
       REND_EDGE_TELEMETRY_SPOOL_DIR: /var/spool/rend/edge-telemetry
     ports:
-      - "4102:4100"
+      - "127.0.0.1:4102:4100"
     volumes:
       - rend-edge-london-cache:/var/lib/rend/edge-cache
       - rend-edge-london-telemetry-spool:/var/spool/rend/edge-telemetry
 
 volumes:
   rend-postgres-data:
-  rend-redis-data:
   rend-clickhouse-data:
   rend-minio-data:
   rend-edge-cache:

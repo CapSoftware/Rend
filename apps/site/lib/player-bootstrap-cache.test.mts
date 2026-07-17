@@ -72,6 +72,11 @@ test("playback bootstrap cache shortens returned ttl and expires near token expi
   const cacheKey = "asset|edge|direct|rend.so|";
   rememberBootstrapResponse(cacheKey, {
     cachedAtMs: 10_000,
+    cloudFrontAuthorizationCookies: {
+      "CloudFront-Policy": "policy_value",
+      "CloudFront-Signature": "signature-value",
+      "CloudFront-Key-Pair-Id": "K123ABC",
+    },
     directCookieDomain: "rend.so",
     directPlaybackEnabled: true,
     playbackBaseUrl: "https://ams-1.play.rend.so",
@@ -82,6 +87,10 @@ test("playback bootstrap cache shortens returned ttl and expires near token expi
   const hit = cachedBootstrapResponse(cacheKey, 20_000);
   assert.equal(hit?.safeResponse.ttl_seconds, 11);
   assert.equal(hit?.playbackToken, "v1.claims.signature");
+  assert.equal(
+    hit?.cloudFrontAuthorizationCookies?.["CloudFront-Key-Pair-Id"],
+    "K123ABC",
+  );
 
   assert.equal(cachedBootstrapResponse(cacheKey, 26_000), null);
 });

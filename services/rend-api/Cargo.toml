@@ -7,6 +7,8 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aws-config.workspace = true
+aws-sdk-cloudfront.workspace = true
 aws-sdk-s3.workspace = true
 axum.workspace = true
 base64.workspace = true
@@ -15,13 +17,14 @@ chrono.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 http-body.workspace = true
-redis.workspace = true
 rend-config.workspace = true
 rend-playback-auth.workspace = true
 reqwest.workspace = true
+rsa.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true

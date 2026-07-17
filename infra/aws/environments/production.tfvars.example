@@ -1,0 +1,80 @@
+expected_account_id = "211125561119"
+aws_region          = "us-east-1"
+environment         = "production"
+
+availability_zones = ["us-east-1a", "us-east-1b"]
+vpc_cidr            = "10.42.0.0/16"
+
+api_route53_zone_id      = "replace-me-with-bootstrap-api-zone-id"
+playback_route53_zone_id = "replace-me-with-bootstrap-playback-zone-id"
+api_domain_name          = "api.rend.so"
+playback_domain_name     = "video.rend.so"
+internal_domain_name     = "origin.api.rend.so"
+site_domain_name     = "https://rend.so"
+additional_site_origins = ["https://www.rend.so"]
+playback_cookie_domain = "rend.so"
+
+# Release automation replaces these with ECR digest references from the
+# accepted Rend release manifest. Tags are intentionally rejected.
+api_image    = "replace-me-with-ecr-image-at-sha256"
+edge_image   = "replace-me-with-ecr-image-at-sha256"
+worker_image = "replace-me-with-ecr-image-at-sha256"
+
+# Terraform creates and reconciles these private buckets through the Tigris S3
+# API. Credential values are read from SSM at apply time and never enter state.
+tigris_endpoint      = "https://fly.storage.tigris.dev"
+tigris_region        = "auto"
+tigris_source_bucket = "replace-me-rend-production-source"
+tigris_media_bucket  = "replace-me-rend-production-media"
+tigris_source_location = "global"
+tigris_media_location  = "iad"
+planetscale_vpc_endpoint_service_name = "com.amazonaws.vpce.us-east-1.vpce-svc-replace-me"
+
+# Existing SSM SecureString parameter ARNs only. Populate values separately;
+# never put them in this file or Terraform state.
+tigris_access_key_id_parameter_arn       = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/tigris-access-key-id"
+tigris_secret_access_key_parameter_arn   = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/tigris-secret-access-key"
+database_url_parameter_arn               = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/database-url"
+clickhouse_password_parameter_arn        = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/clickhouse-password"
+site_internal_token_parameter_arn        = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/site-internal-token"
+edge_internal_token_parameter_arn        = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/edge-internal-token"
+internal_telemetry_token_parameter_arn   = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/internal-telemetry-token"
+playback_signing_secret_parameter_arn    = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/playback-signing-secret"
+cloudfront_private_key_parameter_arn     = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/cloudfront-private-key"
+autumn_secret_key_parameter_arn          = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/autumn-secret-key"
+parameter_kms_key_arns                   = []
+
+# Create an RSA key pair for CloudFront trusted-key-group signed cookies. Store
+# the private PEM only in the secret above; the public PEM is safe in state.
+cloudfront_public_key_pem = <<-PEM
+-----BEGIN PUBLIC KEY-----
+replace-me-with-the-public-key-body
+-----END PUBLIC KEY-----
+PEM
+
+clickhouse_instance_type        = "m7g.large"
+clickhouse_data_volume_gib      = 100
+clickhouse_backup_retention_days = 35
+
+# These ceilings are deliberate cost controls. Raising them is an explicit
+# infrastructure review, not an automatic response to demand.
+services_enabled         = false
+worker_cutover_confirmed = false
+api_min_tasks    = 2
+api_max_tasks    = 6
+edge_min_tasks   = 2
+edge_max_tasks   = 6
+worker_min_tasks = 1
+worker_max_tasks = 10
+
+cloudfront_price_class = "PriceClass_All"
+# VPC Origins require Business or Premium. For a brand-new distribution only,
+# set bootstrap=true for its first apply, immediately subscribe it to Business
+# in the CloudFront console, then set verified=true and bootstrap=false.
+cloudfront_flat_rate_plan_tier     = "Business"
+cloudfront_flat_rate_plan_bootstrap = false
+cloudfront_flat_rate_plan_verified  = false
+monthly_budget_usd                  = 400
+rend_cost_allocation_tag_active     = false
+alert_email            = "replace-me@example.com"
+log_retention_days     = 30

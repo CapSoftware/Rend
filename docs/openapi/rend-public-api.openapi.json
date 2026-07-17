@@ -85,6 +85,154 @@
         }
       }
     },
+    "/v1/uploads": {
+      "post": {
+        "operationId": "createMultipartUpload",
+        "tags": ["Assets"],
+        "summary": "Create a resumable video upload",
+        "description": "Creates a resumable multipart upload without proxying source bytes through the Rend API. API keys and dashboard upload tokens need the `upload` scope. The declared content type and length are bound to the upload session and checked before storage is reserved. Send the same Idempotency-Key when retrying an uncertain create request.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "A caller-generated key that makes session creation safe to retry.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 200 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateMultipartUploadRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Multipart upload session created or recovered by idempotency key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultipartUploadSession" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      }
+    },
+    "/v1/uploads/{uploadId}": {
+      "parameters": [{ "$ref": "#/components/parameters/UploadId" }],
+      "get": {
+        "operationId": "getMultipartUpload",
+        "tags": ["Assets"],
+        "summary": "Get resumable upload status",
+        "description": "Returns the current session state and provider-confirmed uploaded parts so an interrupted upload can resume without resending completed parts.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "responses": {
+          "200": {
+            "description": "Current multipart upload session.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultipartUploadSession" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "abortMultipartUpload",
+        "tags": ["Assets"],
+        "summary": "Abort a resumable upload",
+        "description": "Aborts the provider multipart upload and releases its reserved storage. Repeated aborts are idempotent.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "responses": {
+          "204": { "description": "Upload aborted or already terminal." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/uploads/{uploadId}/parts": {
+      "parameters": [{ "$ref": "#/components/parameters/UploadId" }],
+      "post": {
+        "operationId": "signMultipartUploadParts",
+        "tags": ["Assets"],
+        "summary": "Sign multipart upload parts",
+        "description": "Returns short-lived direct-to-storage requests for up to 10 parts. Each checksum is the base64-encoded SHA-256 digest of the exact part bytes.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SignMultipartUploadPartsRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed direct-to-storage part requests.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignMultipartUploadPartsResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/uploads/{uploadId}/complete": {
+      "parameters": [{ "$ref": "#/components/parameters/UploadId" }],
+      "post": {
+        "operationId": "completeMultipartUpload",
+        "tags": ["Assets"],
+        "summary": "Complete a resumable upload",
+        "description": "Completes the provider multipart upload, verifies the final object, records the source artifact, and enqueues media processing exactly once. The request is idempotent when retried with the same ordered parts.",
+        "security": [{ "RendApiKey": [] }],
+        "x-rend-server": "api",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteMultipartUploadRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload completed and media processing queued.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultipartUploadSession" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/v1/assets": {
       "get": {
         "operationId": "listAssets",
@@ -493,6 +641,12 @@
         "in": "path",
         "required": true,
         "schema": { "$ref": "#/components/schemas/AssetId" }
+      },
+      "UploadId": {
+        "name": "uploadId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/UploadId" }
       }
     },
     "responses": {
@@ -533,6 +687,15 @@
           "application/json": {
             "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
             "examples": { "notFound": { "value": { "error": "asset not found" } } }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Upload session state conflicts with the requested operation.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ControlPlaneError" },
+            "examples": { "conflict": { "value": { "error": "upload session is expired" } } }
           }
         }
       },
@@ -639,6 +802,161 @@
       "BinaryUploadBody": {
         "type": "string",
         "format": "binary"
+      },
+      "UploadId": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "MultipartUploadStatus": {
+        "type": "string",
+        "enum": ["uploading", "completing", "completed", "aborted", "expired", "failed"]
+      },
+      "CreateMultipartUploadRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content_type", "content_length"],
+        "properties": {
+          "content_type": {
+            "type": "string",
+            "pattern": "^(video/[^;]+|application/octet-stream)$",
+            "maxLength": 128
+          },
+          "content_length": { "type": "integer", "minimum": 1 },
+          "filename": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      },
+      "MultipartUploadChecksum": {
+        "type": "string",
+        "description": "Base64-encoded SHA-256 digest of the exact part bytes.",
+        "pattern": "^[A-Za-z0-9+/]{43}=$"
+      },
+      "MultipartUploadPartNumber": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      },
+      "MultipartUploadCompletedPart": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["part_number", "etag", "checksum_sha256"],
+        "properties": {
+          "part_number": { "$ref": "#/components/schemas/MultipartUploadPartNumber" },
+          "etag": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "checksum_sha256": { "$ref": "#/components/schemas/MultipartUploadChecksum" }
+        }
+      },
+      "MultipartUploadStoredPart": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["part_number", "etag", "size"],
+        "properties": {
+          "part_number": { "$ref": "#/components/schemas/MultipartUploadPartNumber" },
+          "etag": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "checksum_sha256": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/MultipartUploadChecksum" },
+              { "type": "null" }
+            ]
+          },
+          "size": { "type": "integer", "minimum": 1, "maximum": 5368709120 }
+        }
+      },
+      "MultipartUploadSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "asset_id",
+          "upload_id",
+          "part_size",
+          "part_count",
+          "max_parallel_parts",
+          "expires_at",
+          "status",
+          "uploaded_parts"
+        ],
+        "properties": {
+          "asset_id": { "$ref": "#/components/schemas/AssetId" },
+          "upload_id": { "$ref": "#/components/schemas/UploadId" },
+          "part_size": {
+            "type": "integer",
+            "minimum": 16777216,
+            "maximum": 5368709120,
+            "description": "Normally 16 MiB. Rend may increase it for unusually large sources to stay within the object store multipart-count limit."
+          },
+          "part_count": { "type": "integer", "minimum": 1, "maximum": 10000 },
+          "max_parallel_parts": { "const": 6 },
+          "expires_at": { "$ref": "#/components/schemas/IsoTimestamp" },
+          "status": { "$ref": "#/components/schemas/MultipartUploadStatus" },
+          "uploaded_parts": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": { "$ref": "#/components/schemas/MultipartUploadStoredPart" }
+          }
+        }
+      },
+      "SignMultipartUploadPartRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["part_number", "checksum_sha256"],
+        "properties": {
+          "part_number": { "$ref": "#/components/schemas/MultipartUploadPartNumber" },
+          "checksum_sha256": { "$ref": "#/components/schemas/MultipartUploadChecksum" }
+        }
+      },
+      "SignMultipartUploadPartsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["parts"],
+        "properties": {
+          "parts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": { "$ref": "#/components/schemas/SignMultipartUploadPartRequest" }
+          }
+        }
+      },
+      "PresignedMultipartUploadPart": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["part_number", "url", "method", "headers"],
+        "properties": {
+          "part_number": { "$ref": "#/components/schemas/MultipartUploadPartNumber" },
+          "url": { "type": "string", "format": "uri" },
+          "method": { "const": "PUT" },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      },
+      "SignMultipartUploadPartsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["upload_id", "parts"],
+        "properties": {
+          "upload_id": { "$ref": "#/components/schemas/UploadId" },
+          "parts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": { "$ref": "#/components/schemas/PresignedMultipartUploadPart" }
+          }
+        }
+      },
+      "CompleteMultipartUploadRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["parts"],
+        "properties": {
+          "parts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10000,
+            "items": { "$ref": "#/components/schemas/MultipartUploadCompletedPart" }
+          }
+        }
       },
       "AssetState": {
         "type": "string",

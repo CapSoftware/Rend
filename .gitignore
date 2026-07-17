@@ -1,5 +1,6 @@
 docs/*
 !docs/deployment-v1.md
+!docs/deployment-aws.md
 !docs/deployment-automation.md
 !docs/billing-autumn-v1.md
 !docs/launch-gate-v1.md
@@ -19,6 +20,13 @@ docs/*
 
 # rust
 target/
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
 
 # dependencies
 node_modules/

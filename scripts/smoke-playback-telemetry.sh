@@ -100,7 +100,6 @@ ffmpeg -version >/dev/null
 ffprobe -version >/dev/null
 
 export DATABASE_URL="${DATABASE_URL:-postgres://rend:rend@localhost:5432/rend}"
-export REND_REDIS_URL="${REND_REDIS_URL:-redis://localhost:6379}"
 export CLICKHOUSE_URL="${CLICKHOUSE_URL:-http://localhost:8123}"
 export CLICKHOUSE_DATABASE="${CLICKHOUSE_DATABASE:-rend}"
 export CLICKHOUSE_USER="${CLICKHOUSE_USER:-rend}"
@@ -152,7 +151,6 @@ docker compose up -d
 
 for _ in $(seq 1 60); do
   if docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null 2>&1 &&
-    docker compose exec -T redis redis-cli ping >/dev/null 2>&1 &&
     docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null 2>&1 &&
     curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null 2>&1; then
     break
@@ -161,7 +159,6 @@ for _ in $(seq 1 60); do
 done
 
 docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null
-docker compose exec -T redis redis-cli ping >/dev/null
 docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null
 curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null
 for schema in "$root_dir"/clickhouse/*.sql; do

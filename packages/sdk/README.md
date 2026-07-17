@@ -36,6 +36,13 @@ The example uploads `fixtures/media/rend-fixture.mp4`, waits for a playable
 asset state, fetches the site playback bootstrap, prints a tokenless `<video>`
 embed, and deletes the asset.
 
+For large or resumable uploads, use `createMultipartUpload`,
+`signMultipartUploadParts`, `getMultipartUpload`, and
+`completeMultipartUpload`. Upload each signed part URL directly to object
+storage, retain its ETag and base64 SHA-256 checksum, and call
+`abortMultipartUpload` when cancelling. The legacy `uploadAsset` method remains
+available for compatibility.
+
 Local integration smoke:
 
 ```bash
@@ -48,9 +55,8 @@ and verifies playback is unavailable after deletion.
 
 Billing and usage limits:
 
-Uploads can fail with `RendApiError` status `403` and response body
-`{ "error": "limit_exceeded" }` when Autumn denies the organization's billing
-state or usage balance. Public V1 usage is metered as delivery seconds and
-storage second-months by 720p/1080p/2K/4K resolution tier; upload/source bytes
-are only local request-size safeguards. Treat this as a plan/usage state, not as
-a retryable transport failure.
+Uploads can fail with `RendApiError` status `403` when the organization's video
+count, stored-byte allowance, or the platform storage budget has been reached.
+Public V1 usage is metered as delivery seconds and storage second-months by
+720p/1080p/2K/4K resolution tier. Treat a quota response as plan or capacity
+state, not as a retryable transport failure.

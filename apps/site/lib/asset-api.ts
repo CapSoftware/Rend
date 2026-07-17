@@ -19,7 +19,7 @@ import type {
 } from "./asset-types.ts";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:4000";
-const DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MAX_UPLOAD_BYTES = 250 * 1024 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 8 * 1024;
 const LOCAL_SITE_INTERNAL_TOKEN = "local-site-internal-token";
 

@@ -189,11 +189,16 @@ test("fast embed route forwards bootstrap cookies to the document response by de
         headers: { "content-type": "video/mp4" },
       });
     }
-    return Response.json(readyBootstrap(), {
-      headers: {
-        "set-cookie": "__rend_playback=v1.claims.signature; Path=/; HttpOnly; Secure; SameSite=None",
-      },
-    });
+    const response = Response.json(readyBootstrap());
+    for (const cookie of [
+      "__rend_playback=v1.claims.signature; Path=/; HttpOnly; Secure; SameSite=None",
+      "CloudFront-Policy=policy_value; Path=/; HttpOnly; Secure; SameSite=None",
+      "CloudFront-Signature=signature_value; Path=/; HttpOnly; Secure; SameSite=None",
+      "CloudFront-Key-Pair-Id=key_pair; Path=/; HttpOnly; Secure; SameSite=None",
+    ]) {
+      response.headers.append("set-cookie", cookie);
+    }
+    return response;
   }) as typeof fetch;
 
   try {
@@ -223,6 +228,9 @@ test("fast embed route forwards bootstrap cookies to the document response by de
     );
     assert.equal(fetches[0]?.headers.get("x-vercel-ip-country"), "GB");
     assert.match(fetches[1]?.headers.get("cookie") ?? "", /__rend_playback=/);
+    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Policy=policy_value/);
+    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Signature=signature_value/);
+    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Key-Pair-Id=key_pair/);
     assert.match(body, /autoplay/);
     assert.doesNotMatch(body, /controls/);
     assert.match(body, /mse_inline/);

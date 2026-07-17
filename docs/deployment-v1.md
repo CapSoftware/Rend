@@ -116,8 +116,8 @@ coordinates.
 - optional `rend-edge-us-east` on host port `4101`
 - optional `rend-edge-london` on host port `4102`
 
-Container-to-container URLs use Docker service names: `postgres`, `redis`,
-`minio`, `clickhouse`, `rend-api`, and `rend-edge`. Local playback defaults to
+Container-to-container URLs use Docker service names: `postgres`, `minio`,
+`clickhouse`, `rend-api`, and `rend-edge`. Local playback defaults to
 `REND_PLAYBACK_MODE=tigris` with `REND_TIGRIS_PLAYBACK_BASE_URL` pointing at
 `rend-api`. Edge containers can still register API-reachable `REND_EDGE_BASE_URL`
 values in `rend.edge_nodes`, but API and worker warm/purge fanout is skipped
@@ -163,7 +163,6 @@ API:
 
 - `REND_ENV=local|production`
 - `DATABASE_URL`
-- `REND_REDIS_URL`
 - `CLICKHOUSE_URL`
 - `CLICKHOUSE_DATABASE`
 - `CLICKHOUSE_USER`
@@ -225,7 +224,7 @@ URLs must be HTTPS.
 
 Worker:
 
-- all API dependency vars used for Postgres, Redis, S3, ClickHouse, playback
+- all API dependency vars used for Postgres, S3, ClickHouse, playback
   signing, edge internal auth, and Autumn billing
 - `REND_API_AUTO_MIGRATE=false` after the API migration step is deployed
 
@@ -238,7 +237,8 @@ unless the Autumn key is visibly live, and logs only key names.
 
 - `REND_MEDIA_WORKER_ID`
 - `REND_MEDIA_WORKER_POLL_INTERVAL_SECS`
-- `REND_MEDIA_JOB_LOCK_TIMEOUT_SECS`
+- `REND_MEDIA_JOB_LEASE_SECS` (default `120`)
+- `REND_MEDIA_JOB_HEARTBEAT_SECS` (default `30`)
 - `REND_MEDIA_PROCESS_TIMEOUT_SECS`
 - `REND_FFMPEG_PATH`
 - `REND_FFPROBE_PATH`
@@ -256,6 +256,12 @@ Edge:
 - `REND_CONTROL_PLANE_URL`
 - `REND_EDGE_HEARTBEAT_INTERVAL_SECS`
 - `REND_EDGE_CACHE_MAX_BYTES`
+- `REND_EDGE_VALIDATE_CACHE_ORIGIN` (keep `true` on standalone edge hosts;
+  AWS sets it to `false` because a five-second per-asset availability check and
+  durable purge queue authorize cached bytes without a Tigris `HEAD`)
+- `REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS`
+- `REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES`
+- `REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS` (default `5`)
 - `REND_EDGE_CACHE_MIN_FREE_BYTES`
 - `REND_EDGE_CACHE_DIR`
 - `REND_EDGE_ORIGIN_HEALTH_URL`
@@ -307,7 +313,6 @@ or host/platform env vars. They do not load `.env.local`.
 Local Compose uses persistent volumes for:
 
 - `rend-postgres-data`
-- `rend-redis-data`
 - `rend-minio-data`
 - `rend-clickhouse-data`
 - `rend-edge-cache`
@@ -317,14 +322,13 @@ Local Compose uses persistent volumes for:
 - `rend-edge-london-cache`
 - `rend-edge-london-telemetry-spool`
 
-In production, Postgres, Redis, object storage, and ClickHouse are managed
+In production, Postgres, object storage, and ClickHouse are managed
 externally. Each edge node keeps local cache and telemetry spool volumes. These
 edge volumes are node-local, not shared.
 
 ## Healthchecks
 
 - Postgres: `pg_isready`
-- Redis: `redis-cli ping`
 - MinIO: `/minio/health/ready`
 - ClickHouse: `SELECT 1`
 - `rend-api`: `GET /readyz`

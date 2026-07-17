@@ -266,7 +266,7 @@ pub fn validate_required_url(rend_env: RendEnv, key: &str, value: &str) -> Resul
     if rend_env == RendEnv::Local {
         anyhow::ensure!(
             is_local_url(&parsed),
-            "{key} must point at localhost, loopback, .local, or a Docker service in local mode"
+            "{key} must point at localhost, loopback, .localhost, .local, or a Docker service in local mode"
         );
     }
     if rend_env.is_strict() {
@@ -294,7 +294,7 @@ pub fn validate_required_service_url(rend_env: RendEnv, key: &str, value: &str) 
     if rend_env == RendEnv::Local {
         anyhow::ensure!(
             is_local_url(&parsed),
-            "{key} must point at localhost, loopback, .local, or a Docker service in local mode"
+            "{key} must point at localhost, loopback, .localhost, .local, or a Docker service in local mode"
         );
     }
     if rend_env.is_strict() {
@@ -325,7 +325,7 @@ pub fn normalize_edge_base_url(
     if rend_env == RendEnv::Local {
         anyhow::ensure!(
             is_local_url(&parsed),
-            "base_url must point at localhost, loopback, .local, or a Docker service in local mode"
+            "base_url must point at localhost, loopback, .localhost, .local, or a Docker service in local mode"
         );
     }
     if rend_env.is_strict() {
@@ -460,6 +460,7 @@ fn is_local_url(url: &Url) -> bool {
         || host == "::1"
         || host.starts_with("127.")
         || host.ends_with(".local")
+        || host.ends_with(".localhost")
         || host == "host.docker.internal"
         || matches!(
             host.as_str(),
@@ -506,9 +507,9 @@ mod tests {
 
     #[test]
     fn local_secret_validation_rejects_production_secret_shapes() {
+        let aws_access_key = format!("AKIA{}", "0".repeat(16));
         assert!(
-            validate_required_secret(RendEnv::Local, "AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
-                .is_err()
+            validate_required_secret(RendEnv::Local, "AWS_ACCESS_KEY_ID", &aws_access_key).is_err()
         );
         assert!(
             validate_required_secret(
@@ -533,6 +534,12 @@ mod tests {
                 .is_err()
         );
         validate_required_url(RendEnv::Local, "S3_ENDPOINT", "http://minio:9000").unwrap();
+        validate_required_url(
+            RendEnv::Local,
+            "S3_PRESIGN_ENDPOINT",
+            "http://uploads.localhost:8080",
+        )
+        .unwrap();
         assert!(
             validate_required_url(RendEnv::Production, "S3_ENDPOINT", "http://minio:9000").is_err()
         );
