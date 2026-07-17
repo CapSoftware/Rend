@@ -37,7 +37,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system --gid 10001 rend \
   && useradd --system --uid 10001 --gid rend --home-dir /nonexistent --shell /usr/sbin/nologin rend \
@@ -45,13 +44,20 @@ RUN apt-get update \
   && chown -R rend:rend /var/lib/rend /var/spool/rend
 
 ENV RUST_LOG=info
-ENV REND_FFMPEG_PATH=/usr/bin/ffmpeg
-ENV REND_FFPROBE_PATH=/usr/bin/ffprobe
 ENV REND_GIT_SHA=${REND_GIT_SHA}
 ENV REND_BUILD_TIME=${REND_BUILD_TIME}
 ENV REND_IMAGE_VERSION=${REND_IMAGE_VERSION}
 
 WORKDIR /app
+USER rend
+
+FROM runtime AS media-runtime
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+ENV REND_FFMPEG_PATH=/usr/bin/ffmpeg
+ENV REND_FFPROBE_PATH=/usr/bin/ffprobe
 USER rend
 
 FROM runtime AS rend-api
@@ -68,7 +74,7 @@ LABEL com.rend.service=rend-api
 COPY --from=builder /app/target/release/rend-api /usr/local/bin/rend-api
 ENTRYPOINT ["rend-api"]
 
-FROM runtime AS rend-media-worker
+FROM media-runtime AS rend-media-worker
 ARG REND_IMAGE_SOURCE=unknown
 ARG REND_GIT_SHA=unknown
 ARG REND_BUILD_TIME=unknown
