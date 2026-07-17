@@ -393,7 +393,7 @@ variable "monthly_budget_usd" {
 }
 
 variable "rend_cost_allocation_tag_active" {
-  description = "Confirms the user-defined Application cost allocation tag is active in AWS Billing before creating a Rend-only budget."
+  description = "Creates the Rend-only budget after the AWS Organizations management account activates the Application cost allocation tag. Other infrastructure remains deployable while false."
   type        = bool
   default     = false
 }

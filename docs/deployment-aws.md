@@ -165,7 +165,10 @@ create general infrastructure. It can pass only the fixed Rend ECS task roles;
 autoscaling writes are limited to the exact target ARNs enrolled after the
 administrator bootstrap. Activate the `Application` cost allocation tag
 before setting `rend_cost_allocation_tag_active=true`; otherwise Terraform
-refuses to create a misleading account-wide budget.
+omits only the tag-filtered Budget. The AWS Organizations management account
+must activate this tag when Rend runs in a linked account. Service, worker,
+storage, and organization hard ceilings remain active while the Budget is
+pending; set the flag true and apply again as soon as the tag is active.
 
 Production planning is also gated by
 `cloudfront_flat_rate_plan_verified = true`. Set it only after AWS shows the

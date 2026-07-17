@@ -75,6 +75,9 @@ cloudfront_flat_rate_plan_tier     = "Business"
 cloudfront_flat_rate_plan_bootstrap = false
 cloudfront_flat_rate_plan_verified  = false
 monthly_budget_usd                  = 400
+# Linked accounts cannot activate this tag themselves. Leave false for the
+# initial migration, then enable it after the Organizations management account
+# activates the Application cost allocation tag.
 rend_cost_allocation_tag_active     = false
 alert_email            = "replace-me@example.com"
 log_retention_days     = 30

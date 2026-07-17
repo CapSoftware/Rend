@@ -54,6 +54,8 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 resource "aws_budgets_budget" "monthly" {
+  count = var.rend_cost_allocation_tag_active ? 1 : 0
+
   name         = "${local.resource_prefix}-monthly"
   budget_type  = "COST"
   limit_amount = tostring(var.monthly_budget_usd)
@@ -63,13 +65,6 @@ resource "aws_budgets_budget" "monthly" {
   cost_filter {
     name   = "TagKeyValue"
     values = ["user:Application$rend"]
-  }
-
-  lifecycle {
-    precondition {
-      condition     = var.rend_cost_allocation_tag_active
-      error_message = "Activate the Application user-defined cost allocation tag in AWS Billing before creating the Rend budget."
-    }
   }
 
   notification {
