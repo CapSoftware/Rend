@@ -1417,11 +1417,9 @@ mod tests {
         let error =
             validate_autumn_api_url(RendEnv::Local, "https://billing.example.com/v1").unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("must point at localhost, loopback, .local, or a Docker service")
-        );
+        assert!(error.to_string().contains(
+            "must point at localhost, loopback, .localhost, .local, or a Docker service"
+        ));
     }
 
     #[test]

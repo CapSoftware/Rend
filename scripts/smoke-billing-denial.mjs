@@ -139,7 +139,6 @@ function startApi(autumnUrl) {
       AUTUMN_SECRET_KEY: "local-billing-denial-secret",
       AUTUMN_API_VERSION: process.env.AUTUMN_API_VERSION || "2.3.0",
       REND_BILLING_ENTITLEMENT_FAILURE_POLICY: "fail_closed",
-      REND_REDIS_URL: process.env.REND_REDIS_URL || "redis://localhost:6379",
       CLICKHOUSE_URL: process.env.CLICKHOUSE_URL || "http://localhost:8123",
       CLICKHOUSE_DATABASE: process.env.CLICKHOUSE_DATABASE || "rend",
       CLICKHOUSE_USER: process.env.CLICKHOUSE_USER || "rend",
@@ -193,10 +192,10 @@ async function waitForReady(api) {
 
 async function main() {
   log("starting local Docker dependencies");
-  run("docker", ["compose", "up", "-d", "postgres", "redis", "clickhouse", "minio", "minio-init", "clickhouse-init"], {
+  run("docker", ["compose", "up", "-d", "postgres", "clickhouse", "minio", "minio-init", "clickhouse-init"], {
     stdio: "inherit",
   });
-  run("docker", ["compose", "up", "-d", "--wait", "postgres", "redis", "clickhouse", "minio"], {
+  run("docker", ["compose", "up", "-d", "--wait", "postgres", "clickhouse", "minio"], {
     stdio: "inherit",
   });
 

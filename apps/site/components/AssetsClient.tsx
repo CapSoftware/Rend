@@ -12,6 +12,7 @@ import {
   Play,
   RefreshCw,
   Upload,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -20,6 +21,11 @@ import type {
   AssetSummary,
   AssetErrorResponse,
   AssetUploadResponse,
+  MultipartUploadCompletedPart,
+  MultipartUploadPartIntent,
+  MultipartUploadPartRequest,
+  MultipartUploadPartsResponse,
+  MultipartUploadSession,
 } from "../lib/asset-types.ts";
 import type { DashboardUploadIntentResponse } from "../lib/dashboard-upload-token.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
@@ -47,21 +53,57 @@ import {
 } from "@/components/dashboard";
 
 const PAGE_SIZE = 10;
+const MIN_MULTIPART_PART_SIZE = 16 * 1024 * 1024;
+const MAX_MULTIPART_PART_SIZE = 5 * 1024 * 1024 * 1024;
+const MAX_PARALLEL_PARTS = 6;
+const MAX_SIGNED_PARTS_PER_REQUEST = 10;
+const MAX_PART_ATTEMPTS = 3;
 
-type UploadState =
-  | { status: "idle" }
-  | { status: "uploading"; progress: number | null }
-  | { status: "error"; message: string }
-  | { status: "done"; message: string };
-
-type DirectUploadResponse = {
-  asset_id?: unknown;
-  source_state?: unknown;
-  playable_state?: unknown;
-  byte_size?: unknown;
-  message?: unknown;
-  error?: unknown;
+type UploadResumeContext = {
+  idempotencyKey: string;
+  uploadId?: string;
+  assetId?: string;
+  completedParts: MultipartUploadCompletedPart[];
 };
+
+type UploadItem = {
+  id: string;
+  file: File;
+  status: "queued" | "uploading" | "done" | "error" | "cancelled";
+  progress: number;
+  message?: string;
+  resume?: UploadResumeContext;
+};
+
+class MultipartUploadFailure extends Error {
+  constructor(
+    message: string,
+    readonly resume?: UploadResumeContext
+  ) {
+    super(message);
+    this.name = "MultipartUploadFailure";
+  }
+}
+
+class ConcurrencyLimiter {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    this.active += 1;
+    try {
+      return await task();
+    } finally {
+      this.active -= 1;
+      this.waiting.shift()?.();
+    }
+  }
+}
 
 function formatCreated(value: string) {
   const date = new Date(value);
@@ -102,74 +144,502 @@ async function requestUploadIntent(file: File) {
   return body;
 }
 
-function directUploadResponseToAssetUpload(body: DirectUploadResponse): AssetUploadResponse | null {
-  if (
-    typeof body.asset_id !== "string" ||
-    typeof body.source_state !== "string" ||
-    typeof body.playable_state !== "string"
-  ) {
-    return null;
+function uploadErrorMessage(status: number, body: AssetErrorResponse | null) {
+  if (body) {
+    if (typeof body.message === "string") return body.message;
+    if (typeof body.error === "string") return body.error;
   }
+  return `Upload failed with HTTP ${status}`;
+}
 
+function isUploadSession(value: unknown): value is MultipartUploadSession {
+  if (!value || typeof value !== "object") return false;
+  const session = value as Record<string, unknown>;
+  return (
+    typeof session.asset_id === "string" &&
+    typeof session.upload_id === "string" &&
+    typeof session.part_size === "number" &&
+    Number.isInteger(session.part_size) &&
+    session.part_size >= MIN_MULTIPART_PART_SIZE &&
+    session.part_size <= MAX_MULTIPART_PART_SIZE &&
+    typeof session.part_count === "number" &&
+    Number.isInteger(session.part_count) &&
+    session.part_count > 0 &&
+    typeof session.max_parallel_parts === "number" &&
+    Number.isInteger(session.max_parallel_parts) &&
+    session.max_parallel_parts === MAX_PARALLEL_PARTS &&
+    typeof session.expires_at === "string" &&
+    ["uploading", "completing", "completed", "aborted", "expired", "failed"].includes(
+      String(session.status)
+    ) &&
+    Array.isArray(session.uploaded_parts) &&
+    session.uploaded_parts.every((part) => {
+      if (!part || typeof part !== "object") return false;
+      const candidate = part as Record<string, unknown>;
+      return (
+        typeof candidate.part_number === "number" &&
+        Number.isInteger(candidate.part_number) &&
+        candidate.part_number > 0 &&
+        typeof candidate.etag === "string" &&
+        (candidate.checksum_sha256 === undefined ||
+          candidate.checksum_sha256 === null ||
+          typeof candidate.checksum_sha256 === "string") &&
+        typeof candidate.size === "number" &&
+        Number.isInteger(candidate.size) &&
+        candidate.size > 0
+      );
+    })
+  );
+}
+
+function isUploadPartsResponse(value: unknown): value is MultipartUploadPartsResponse {
+  if (!value || typeof value !== "object") return false;
+  const response = value as Record<string, unknown>;
+  return (
+    typeof response.upload_id === "string" &&
+    Array.isArray(response.parts) &&
+    response.parts.every((part) => {
+      if (!part || typeof part !== "object") return false;
+      const candidate = part as Record<string, unknown>;
+      return (
+        typeof candidate.part_number === "number" &&
+        Number.isInteger(candidate.part_number) &&
+        candidate.part_number > 0 &&
+        typeof candidate.url === "string" &&
+        candidate.method === "PUT" &&
+        Boolean(candidate.headers) &&
+        typeof candidate.headers === "object" &&
+        Object.values(candidate.headers as Record<string, unknown>).every(
+          (header) => typeof header === "string"
+        )
+      );
+    })
+  );
+}
+
+async function uploadApiJson(
+  url: string,
+  token: string,
+  init: RequestInit,
+  signal?: AbortSignal
+): Promise<unknown> {
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  const response = await fetch(url, {
+    ...init,
+    signal,
+    headers,
+  });
+  const body = (await response.json().catch(() => null)) as AssetErrorResponse | unknown;
+  if (!response.ok) {
+    throw new Error(uploadErrorMessage(response.status, body as AssetErrorResponse | null));
+  }
+  return body;
+}
+
+async function createUploadSession(
+  file: File,
+  uploadIntent: DashboardUploadIntentResponse,
+  idempotencyKey: string,
+  signal: AbortSignal
+) {
+  const body = await uploadApiJson(
+    uploadIntent.upload_url,
+    uploadIntent.token,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify({
+        content_type: uploadIntent.content_type,
+        content_length: file.size,
+        filename: file.name,
+      }),
+    },
+    signal
+  );
+  if (!isUploadSession(body)) throw new Error("Rend API returned an invalid upload session");
+  return body;
+}
+
+async function getUploadSession(
+  uploadUrl: string,
+  uploadId: string,
+  token: string,
+  signal: AbortSignal
+) {
+  const body = await uploadApiJson(
+    `${uploadUrl}/${encodeURIComponent(uploadId)}`,
+    token,
+    { method: "GET" },
+    signal
+  );
+  if (!isUploadSession(body)) throw new Error("Rend API returned an invalid upload session");
+  return body;
+}
+
+async function requestSignedParts(
+  uploadUrl: string,
+  uploadId: string,
+  token: string,
+  parts: MultipartUploadPartRequest[],
+  signal: AbortSignal
+) {
+  if (parts.length < 1 || parts.length > MAX_SIGNED_PARTS_PER_REQUEST) {
+    throw new Error("Invalid multipart signing batch");
+  }
+  const body = await uploadApiJson(
+    `${uploadUrl}/${encodeURIComponent(uploadId)}/parts`,
+    token,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parts }),
+    },
+    signal
+  );
+  if (!isUploadPartsResponse(body) || body.upload_id !== uploadId) {
+    throw new Error("Rend API returned invalid signed upload parts");
+  }
+  return body.parts;
+}
+
+async function sha256Base64(blob: Blob, signal: AbortSignal) {
+  if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function uploadPart(
+  part: MultipartUploadPartIntent,
+  body: Blob,
+  signal: AbortSignal,
+  onProgress: (loaded: number) => void
+) {
+  return new Promise<string>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload cancelled", "AbortError"));
+      return;
+    }
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => xhr.abort();
+
+    xhr.open(part.method, part.url);
+    for (const [name, value] of Object.entries(part.headers)) {
+      if (["host", "content-length"].includes(name.toLowerCase())) continue;
+      xhr.setRequestHeader(name, value);
+    }
+    xhr.upload.onprogress = (event) => onProgress(event.loaded);
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Part upload failed with HTTP ${xhr.status}`));
+        return;
+      }
+      const etag = xhr.getResponseHeader("etag");
+      if (!etag) {
+        reject(new Error("Storage did not expose an ETag for the uploaded part"));
+        return;
+      }
+      onProgress(body.size);
+      resolve(etag);
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error("Part upload failed"));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    xhr.send(body);
+  });
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+async function waitBeforeRetry(attempt: number, signal: AbortSignal) {
+  if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, attempt * 250);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function uploadPartWithRetry({
+  uploadUrl,
+  uploadId,
+  token,
+  partRequest,
+  initialIntent,
+  body,
+  signal,
+  limiter,
+  onProgress,
+}: {
+  uploadUrl: string;
+  uploadId: string;
+  token: string;
+  partRequest: MultipartUploadPartRequest;
+  initialIntent: MultipartUploadPartIntent;
+  body: Blob;
+  signal: AbortSignal;
+  limiter: ConcurrencyLimiter;
+  onProgress: (loaded: number) => void;
+}) {
+  let intent = initialIntent;
+  for (let attempt = 1; attempt <= MAX_PART_ATTEMPTS; attempt += 1) {
+    try {
+      const etag = await limiter.run(() => uploadPart(intent, body, signal, onProgress));
+      return { ...partRequest, etag };
+    } catch (error) {
+      if (isAbortError(error) || attempt === MAX_PART_ATTEMPTS) throw error;
+      onProgress(0);
+      const session = await getUploadSession(uploadUrl, uploadId, token, signal);
+      if (session.status !== "uploading") {
+        throw new Error(`Upload session is ${session.status}`);
+      }
+      await waitBeforeRetry(attempt, signal);
+      const [refreshedIntent] = await requestSignedParts(
+        uploadUrl,
+        uploadId,
+        token,
+        [partRequest],
+        signal
+      );
+      if (!refreshedIntent || refreshedIntent.part_number !== partRequest.part_number) {
+        throw new Error("Rend API did not return the requested upload part");
+      }
+      intent = refreshedIntent;
+    }
+  }
+  throw new Error("Part upload failed");
+}
+
+async function completeUpload(
+  uploadUrl: string,
+  uploadId: string,
+  token: string,
+  parts: MultipartUploadCompletedPart[],
+  signal: AbortSignal
+) {
+  const body = await uploadApiJson(
+    `${uploadUrl}/${encodeURIComponent(uploadId)}/complete`,
+    token,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parts }),
+    },
+    signal
+  );
+  if (!isUploadSession(body) || body.status !== "completed") {
+    throw new Error("Rend API did not complete the upload session");
+  }
+  return body;
+}
+
+async function abortUpload(uploadUrl: string, uploadId: string, token: string) {
+  await fetch(`${uploadUrl}/${encodeURIComponent(uploadId)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  }).catch(() => null);
+}
+
+function completedSessionToAsset(session: MultipartUploadSession, file: File): AssetUploadResponse {
   const now = new Date().toISOString();
   return {
     status: "ok",
     asset: {
-      asset_id: body.asset_id,
-      source_state: body.source_state,
-      playable_state: body.playable_state,
+      asset_id: session.asset_id,
+      source_state: "uploaded",
+      playable_state: "not_playable",
       created_at: now,
       updated_at: now,
-      source_byte_size: typeof body.byte_size === "number" && Number.isFinite(body.byte_size) ? body.byte_size : undefined,
+      source_byte_size: file.size,
       artifact_count: 1,
     },
   };
 }
 
-function uploadErrorMessage(status: number, body: DirectUploadResponse | AssetErrorResponse | null) {
-  if (body) {
-    if ("message" in body && typeof body.message === "string") return body.message;
-    if ("error" in body && typeof body.error === "string") return body.error;
-  }
-  return `Upload failed with HTTP ${status}`;
-}
-
-async function uploadFile(file: File, onProgress: (progress: number | null) => void) {
+async function uploadFile(
+  file: File,
+  signal: AbortSignal,
+  limiter: ConcurrencyLimiter,
+  onProgress: (progress: number) => void,
+  existingResume?: UploadResumeContext
+) {
+  if (file.size <= 0) throw new Error("Choose a non-empty video file");
   const uploadIntent = await requestUploadIntent(file);
+  const resume: UploadResumeContext = existingResume ?? {
+    idempotencyKey: crypto.randomUUID(),
+    completedParts: [],
+  };
+  let session: MultipartUploadSession | undefined;
 
-  return new Promise<AssetUploadResponse>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", uploadIntent.upload_url);
-    xhr.responseType = "json";
-    xhr.withCredentials = false;
-    xhr.setRequestHeader("authorization", `Bearer ${uploadIntent.token}`);
-    xhr.setRequestHeader("content-type", uploadIntent.content_type);
+  try {
+    if (resume.uploadId) {
+      session = await getUploadSession(
+        uploadIntent.upload_url,
+        resume.uploadId,
+        uploadIntent.token,
+        signal
+      );
+    } else {
+      session = await createUploadSession(
+        file,
+        uploadIntent,
+        resume.idempotencyKey,
+        signal
+      );
+      resume.uploadId = session.upload_id;
+      resume.assetId = session.asset_id;
+    }
 
-    xhr.upload.onprogress = (event) => {
-      onProgress(event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : null);
+    if (session.status === "completed") return completedSessionToAsset(session, file);
+    if (session.status !== "uploading" && session.status !== "completing") {
+      throw new Error(`Upload session is ${session.status}`);
+    }
+    if (session.part_count !== Math.ceil(file.size / session.part_size)) {
+      throw new Error("Upload session part count does not match the selected file");
+    }
+
+    const uploadedPartNumbers = new Set<number>();
+    resume.completedParts = await Promise.all(
+      session.uploaded_parts.map(async ({ part_number, etag, checksum_sha256, size }) => {
+        if (uploadedPartNumbers.has(part_number) || part_number > session!.part_count) {
+          throw new Error("Upload session returned invalid completed parts");
+        }
+        uploadedPartNumbers.add(part_number);
+        const start = (part_number - 1) * session!.part_size;
+        const body = file.slice(start, Math.min(file.size, start + session!.part_size));
+        if (body.size !== size) {
+          throw new Error(`Uploaded part ${part_number} does not match the selected file`);
+        }
+        return {
+          part_number,
+          etag,
+          checksum_sha256:
+            checksum_sha256 ?? (await limiter.run(() => sha256Base64(body, signal))),
+        };
+      })
+    );
+    const loadedByPart = new Map<number, number>();
+    for (const part of resume.completedParts) {
+      const start = (part.part_number - 1) * session.part_size;
+      loadedByPart.set(part.part_number, Math.min(session.part_size, file.size - start));
+    }
+    const reportProgress = () => {
+      const loaded = [...loadedByPart.values()].reduce((total, value) => total + value, 0);
+      onProgress(Math.min(100, Math.round((loaded / file.size) * 100)));
     };
-    xhr.onload = () => {
-      const body = xhr.response as DirectUploadResponse | AssetUploadResponse | AssetErrorResponse | null;
-      if (xhr.status >= 200 && xhr.status < 300 && body) {
-        if ("asset" in body) {
-          resolve(body as AssetUploadResponse);
-          return;
+    reportProgress();
+
+    const completedByNumber = new Map(
+      resume.completedParts.map((part) => [part.part_number, part])
+    );
+    const remainingPartNumbers = Array.from(
+      { length: session.part_count },
+      (_, index) => index + 1
+    ).filter((partNumber) => !completedByNumber.has(partNumber));
+    if (session.status === "completing" && remainingPartNumbers.length > 0) {
+      throw new Error("Upload session is completing but has missing parts");
+    }
+
+    for (let offset = 0; offset < remainingPartNumbers.length; offset += MAX_SIGNED_PARTS_PER_REQUEST) {
+      const partNumbers = remainingPartNumbers.slice(offset, offset + MAX_SIGNED_PARTS_PER_REQUEST);
+      const requests = await Promise.all(
+        partNumbers.map((partNumber) =>
+          limiter.run(async () => {
+            const start = (partNumber - 1) * session!.part_size;
+            const body = file.slice(start, Math.min(file.size, start + session!.part_size));
+            return {
+              body,
+              request: {
+                part_number: partNumber,
+                checksum_sha256: await sha256Base64(body, signal),
+              },
+            };
+          })
+        )
+      );
+      const intents = await requestSignedParts(
+        uploadIntent.upload_url,
+        session.upload_id,
+        uploadIntent.token,
+        requests.map(({ request }) => request),
+        signal
+      );
+      const intentsByNumber = new Map(intents.map((part) => [part.part_number, part]));
+      const settledParts = await Promise.allSettled(
+        requests.map(({ body, request }) => {
+          const intent = intentsByNumber.get(request.part_number);
+          if (!intent) throw new Error(`Missing signed URL for part ${request.part_number}`);
+          return uploadPartWithRetry({
+            uploadUrl: uploadIntent.upload_url,
+            uploadId: session!.upload_id,
+            token: uploadIntent.token,
+            partRequest: request,
+            initialIntent: intent,
+            body,
+            signal,
+            limiter,
+            onProgress: (loaded) => {
+              loadedByPart.set(request.part_number, loaded);
+              reportProgress();
+            },
+          });
+        })
+      );
+      for (const result of settledParts) {
+        if (result.status === "fulfilled") {
+          completedByNumber.set(result.value.part_number, result.value);
         }
-        const uploadResponse = directUploadResponseToAssetUpload(body);
-        if (uploadResponse) {
-          resolve(uploadResponse);
-          return;
-        }
-        reject(new Error("Rend API returned an invalid upload response"));
-      } else {
-        const errorBody = body && !("asset" in body) ? body : null;
-        reject(new Error(uploadErrorMessage(xhr.status, errorBody)));
       }
-    };
-    xhr.onerror = () => reject(new Error("Upload failed"));
-    xhr.onabort = () => reject(new Error("Upload cancelled"));
-    xhr.send(file);
-  });
+      resume.completedParts = [...completedByNumber.values()].sort(
+        (left, right) => left.part_number - right.part_number
+      );
+      const failedPart = settledParts.find((result) => result.status === "rejected");
+      if (failedPart?.status === "rejected") throw failedPart.reason;
+    }
+
+    session = await completeUpload(
+      uploadIntent.upload_url,
+      session.upload_id,
+      uploadIntent.token,
+      resume.completedParts,
+      signal
+    );
+    onProgress(100);
+    return completedSessionToAsset(session, file);
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      if (resume.uploadId) {
+        await abortUpload(uploadIntent.upload_url, resume.uploadId, uploadIntent.token);
+      }
+      throw new DOMException("Upload cancelled", "AbortError");
+    }
+    throw new MultipartUploadFailure(
+      error instanceof Error ? error.message : "Upload failed",
+      resume
+    );
+  }
 }
 
 function AssetThumb({ assetId, hasThumbnail }: { assetId: string; hasThumbnail: boolean }) {
@@ -253,14 +723,21 @@ export default function AssetsClient({
 }) {
   const [assets, setAssets] = useState(initialAssets);
   const [listError, setListError] = useState(initialError ?? "");
-  const [upload, setUpload] = useState<UploadState>({ status: "idle" });
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(0);
   const [origin, setOrigin] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
+  const uploadLimiterRef = useRef(new ConcurrencyLimiter(MAX_PARALLEL_PARTS));
 
   useEffect(() => {
     setOrigin(window.location.origin);
+    const controllers = uploadControllersRef.current;
+    return () => {
+      for (const controller of controllers.values()) controller.abort();
+      controllers.clear();
+    };
   }, []);
 
   const sortedAssets = useMemo(
@@ -297,29 +774,97 @@ export default function AssetsClient({
     }
   }
 
-  async function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.currentTarget.files?.[0];
+  function updateUpload(id: string, update: Partial<UploadItem>) {
+    setUploads((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...update } : item))
+    );
+  }
+
+  async function runUpload(id: string, file: File, resume?: UploadResumeContext) {
+    const controller = new AbortController();
+    uploadControllersRef.current.set(id, controller);
+    updateUpload(id, { status: "uploading", progress: 0, message: undefined });
+
+    try {
+      const result = await uploadFile(
+        file,
+        controller.signal,
+        uploadLimiterRef.current,
+        (progress) => updateUpload(id, { status: "uploading", progress }),
+        resume
+      );
+      setAssets((current) => [
+        result.asset,
+        ...current.filter((asset) => asset.asset_id !== result.asset.asset_id),
+      ]);
+      setPage(0);
+      updateUpload(id, {
+        status: "done",
+        progress: 100,
+        message: `Uploaded ${file.name}`,
+        resume: undefined,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) {
+        updateUpload(id, {
+          status: "cancelled",
+          message: `Cancelled ${file.name}`,
+          resume: undefined,
+        });
+      } else {
+        updateUpload(id, {
+          status: "error",
+          message: error instanceof Error ? error.message : "Upload failed",
+          resume: error instanceof MultipartUploadFailure ? error.resume : resume,
+        });
+      }
+    } finally {
+      uploadControllersRef.current.delete(id);
+    }
+  }
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    if (!file) return;
+    if (files.length === 0) return;
     if (uploadDisabledReason) {
-      setUpload({ status: "error", message: uploadDisabledReason });
+      const [file] = files;
+      if (!file) return;
+      setUploads((current) => [
+        {
+          id: crypto.randomUUID(),
+          file,
+          status: "error",
+          progress: 0,
+          message: uploadDisabledReason,
+        },
+        ...current,
+      ]);
       return;
     }
 
-    setUpload({ status: "uploading", progress: null });
-    try {
-      const result = await uploadFile(file, (progress) => {
-        setUpload({ status: "uploading", progress });
-      });
-      setAssets((current) => [result.asset, ...current.filter((asset) => asset.asset_id !== result.asset.asset_id)]);
-      setPage(0);
-      setUpload({ status: "done", message: `Uploaded ${file.name}` });
-    } catch (error) {
-      setUpload({
-        status: "error",
-        message: error instanceof Error ? error.message : "Upload failed",
-      });
+    const nextUploads = files.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      status: "queued" as const,
+      progress: 0,
+    }));
+    setUploads((current) => [...nextUploads, ...current]);
+    for (const item of nextUploads) {
+      void runUpload(item.id, item.file);
     }
+  }
+
+  function cancelUpload(id: string) {
+    uploadControllersRef.current.get(id)?.abort();
+  }
+
+  function retryUpload(item: UploadItem) {
+    void runUpload(item.id, item.file, item.resume);
+  }
+
+  function dismissUpload(id: string) {
+    setUploads((current) => current.filter((item) => item.id !== id));
   }
 
   return (
@@ -347,7 +892,7 @@ export default function AssetsClient({
             >
               <Upload className="size-4" />
               <span className="hidden sm:inline">
-                {uploadDisabledReason ? "Uploads disabled" : "Upload video"}
+                {uploadDisabledReason ? "Uploads disabled" : "Upload videos"}
               </span>
             </Button>
           </>
@@ -359,6 +904,7 @@ export default function AssetsClient({
           ref={fileInputRef}
           type="file"
           accept="video/*"
+          multiple
           className="sr-only"
           disabled={Boolean(uploadDisabledReason)}
           onChange={onFileChange}
@@ -383,23 +929,74 @@ export default function AssetsClient({
 
           {readOnlyReason ? <Callout tone="danger">{readOnlyReason}</Callout> : null}
 
-          {upload.status === "uploading" ? (
-            <Callout tone="info" title="Uploading video" icon={null}>
-              <div className="flex items-center gap-3">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-sunken">
-                  <div
-                    className="h-full rounded-full bg-ink transition-[width] duration-200"
-                    style={{ width: `${upload.progress ?? 12}%` }}
-                  />
-                </div>
-                <span className="shrink-0 font-mono text-[12px] tabular-nums text-ink-soft">
-                  {upload.progress === null ? "Streaming" : `${upload.progress}%`}
-                </span>
-              </div>
-            </Callout>
-          ) : null}
-          {upload.status === "done" ? <Callout tone="success">{upload.message}</Callout> : null}
-          {upload.status === "error" ? <Callout tone="danger">{upload.message}</Callout> : null}
+          {uploads.map((item) => {
+            const isActive = item.status === "queued" || item.status === "uploading";
+            const tone = item.status === "error" ? "danger" : item.status === "done" ? "success" : "info";
+            return (
+              <Callout
+                key={item.id}
+                tone={tone}
+                title={isActive ? `Uploading ${item.file.name}` : item.message}
+                icon={null}
+                action={
+                  item.status === "uploading" ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="rounded-md"
+                      onClick={() => cancelUpload(item.id)}
+                    >
+                      Cancel
+                    </Button>
+                  ) : item.status === "error" || item.status === "cancelled" ? (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="rounded-md"
+                        onClick={() => retryUpload(item)}
+                      >
+                        Retry
+                      </Button>
+                      <button
+                        type="button"
+                        aria-label={`Dismiss ${item.file.name} upload`}
+                        onClick={() => dismissUpload(item.id)}
+                        className="inline-flex size-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-bg-sunken hover:text-ink"
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </div>
+                  ) : item.status === "done" ? (
+                    <button
+                      type="button"
+                      aria-label={`Dismiss ${item.file.name} upload`}
+                      onClick={() => dismissUpload(item.id)}
+                      className="inline-flex size-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-bg-sunken hover:text-ink"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  ) : null
+                }
+              >
+                {isActive ? (
+                  <div className="flex items-center gap-3">
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-sunken">
+                      <div
+                        className="h-full rounded-full bg-ink transition-[width] duration-200"
+                        style={{ width: `${item.progress}%` }}
+                      />
+                    </div>
+                    <span className="shrink-0 font-mono text-[12px] tabular-nums text-ink-soft">
+                      {item.progress}%
+                    </span>
+                  </div>
+                ) : item.status === "error" ? (
+                  item.message
+                ) : null}
+              </Callout>
+            );
+          })}
 
           {listError ? <Callout tone="danger">{listError}</Callout> : null}
         </div>
@@ -453,7 +1050,7 @@ export default function AssetsClient({
               {!uploadDisabledReason ? (
                 <Button className="mt-1 rounded-md" onClick={() => fileInputRef.current?.click()}>
                   <Upload className="size-4" />
-                  Upload video
+                  Upload videos
                 </Button>
               ) : null}
             </div>

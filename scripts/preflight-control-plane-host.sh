@@ -235,19 +235,6 @@ probe_postgres() {
   fi
 }
 
-probe_redis() {
-  local redis_url="$1"
-  if ! command -v redis-cli >/dev/null 2>&1; then
-    operator_warn "redis-cli is not installed; skipping Redis connectivity probe"
-    return 0
-  fi
-  if redis-cli -u "$redis_url" --no-auth-warning ping >/dev/null 2>&1; then
-    operator_ok "Redis connectivity probe passed"
-  else
-    operator_fail "Redis connectivity probe failed"
-  fi
-}
-
 probe_clickhouse() {
   local url="$1"
   local database="$2"
@@ -287,7 +274,6 @@ if [[ "$dry_run" == "true" || "$skip_connectivity" == "true" ]]; then
   operator_warn "skipping managed dependency connectivity probes"
 else
   probe_postgres "$(operator_env_value "$api_env" DATABASE_URL)"
-  probe_redis "$(operator_env_value "$api_env" REND_REDIS_URL)"
   probe_clickhouse \
     "$(operator_env_value "$api_env" CLICKHOUSE_URL)" \
     "$(operator_env_value "$api_env" CLICKHOUSE_DATABASE)" \

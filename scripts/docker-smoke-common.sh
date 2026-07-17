@@ -30,7 +30,6 @@ wait_for_default_stack() {
 
   for _ in $(seq 1 120); do
     if docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null 2>&1 &&
-      docker compose exec -T redis redis-cli ping >/dev/null 2>&1 &&
       docker compose exec -T clickhouse clickhouse-client --user "$clickhouse_user" --password "$clickhouse_password" --query "SELECT 1" >/dev/null 2>&1 &&
       curl -fsS "$minio_health_url" >/dev/null 2>&1; then
       return 0

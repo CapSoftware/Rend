@@ -42,7 +42,6 @@ ffmpeg -version >/dev/null
 ffprobe -version >/dev/null
 
 export DATABASE_URL="${DATABASE_URL:-postgres://rend:rend@localhost:5432/rend}"
-export REND_REDIS_URL="${REND_REDIS_URL:-redis://localhost:6379}"
 export OBJECT_STORE_HEALTH_URL="${OBJECT_STORE_HEALTH_URL:-http://localhost:9100/minio/health/ready}"
 export S3_ENDPOINT="${S3_ENDPOINT:-http://localhost:9100}"
 export S3_REGION="${S3_REGION:-us-east-1}"
@@ -66,7 +65,6 @@ docker compose up -d
 
 for _ in $(seq 1 60); do
   if docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null 2>&1 &&
-    docker compose exec -T redis redis-cli ping >/dev/null 2>&1 &&
     curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null 2>&1; then
     break
   fi
@@ -74,7 +72,6 @@ for _ in $(seq 1 60); do
 done
 
 docker compose exec -T postgres pg_isready -U rend -d rend >/dev/null
-docker compose exec -T redis redis-cli ping >/dev/null
 curl -fsS "$OBJECT_STORE_HEALTH_URL" >/dev/null
 
 "$root_dir/scripts/generate-fixture-video.sh" "$fixture_path" >/dev/null

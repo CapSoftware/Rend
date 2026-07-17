@@ -14,6 +14,9 @@ import {
   rememberBootstrapResponse,
 } from "../../../../lib/player-bootstrap-cache.ts";
 import {
+  cloudFrontAuthorizationCookieHeaders,
+  cloudFrontAuthorizationCookiesFromSetCookieHeaders,
+  type CloudFrontAuthorizationCookies,
   playbackCookieFromSetCookieHeaders,
   playbackDirectCookieHeader,
   playbackProxyCookieHeader,
@@ -219,6 +222,7 @@ function setPlaybackCookieHeader(
   directPlaybackEnabled: boolean,
   directCookieDomain: string | undefined,
   playbackCredentialMode: "include" | "omit",
+  cloudFrontAuthorizationCookies?: CloudFrontAuthorizationCookies,
 ) {
   if (playbackCredentialMode === "omit") return;
   const playbackCookie =
@@ -238,6 +242,18 @@ function setPlaybackCookieHeader(
           ttlSeconds,
         );
   if (playbackCookie) headers.append("set-cookie", playbackCookie);
+  if (directPlaybackEnabled && playbackBaseUrl) {
+    for (const cloudFrontCookie of cloudFrontAuthorizationCookieHeaders(
+      request.url,
+      assetId,
+      ttlSeconds,
+      playbackBaseUrl,
+      cloudFrontAuthorizationCookies,
+      directCookieDomain,
+    )) {
+      headers.append("set-cookie", cloudFrontCookie);
+    }
+  }
 }
 
 function normalizeAssetId(value: string) {
@@ -394,6 +410,7 @@ export async function GET(
       cached.directPlaybackEnabled,
       cached.directCookieDomain,
       cached.safeResponse.playback_credential_mode ?? "include",
+      cached.cloudFrontAuthorizationCookies,
     );
     return jsonResponse(cached.safeResponse, { headers });
   }
@@ -480,6 +497,9 @@ export async function GET(
     upstream.headers,
   );
   const playbackToken = upstreamPlaybackCookie ?? data?.playback_token;
+  const cloudFrontAuthorizationCookies = directPlaybackEnabled
+    ? cloudFrontAuthorizationCookiesFromSetCookieHeaders(upstream.headers)
+    : undefined;
   setPlaybackCookieHeader(
     headers,
     request,
@@ -490,11 +510,13 @@ export async function GET(
     directPlaybackEnabled,
     directCookieDomain,
     safeResponse.playback_credential_mode ?? "include",
+    cloudFrontAuthorizationCookies,
   );
   if (typeof playbackToken === "string") {
     rememberBootstrapResponse(cacheKey, {
       assetId: normalizedAssetId,
       cachedAtMs: Date.now(),
+      cloudFrontAuthorizationCookies,
       directCookieDomain,
       directPlaybackEnabled,
       organizationId,

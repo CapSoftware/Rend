@@ -14,6 +14,7 @@ chrono.workspace = true
 futures-util.workspace = true
 fs2.workspace = true
 http-body-util.workspace = true
+lru.workspace = true
 rend-config.workspace = true
 rend-playback-auth.workspace = true
 reqwest.workspace = true

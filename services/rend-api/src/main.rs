@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use aws_sdk_cloudfront::Client as CloudFrontClient;
 use aws_sdk_s3::{
     Client as S3Client,
     config::{BehaviorVersion, Credentials, Region, RequestChecksumCalculation},
@@ -45,20 +46,36 @@ use rend_playback_auth::{
     PlaybackAuthError, PlaybackTokenIssuer, SigningKey, SingleKeyring, current_unix_timestamp,
     is_asset_playback_path, validate_playback_token,
 };
+use rsa::{
+    RsaPrivateKey,
+    pkcs1::DecodeRsaPrivateKey,
+    pkcs1v15::SigningKey as RsaSigningKey,
+    pkcs8::DecodePrivateKey,
+    signature::{SignatureEncoding, Signer},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
-use tokio::{io::AsyncReadExt, net::TcpListener, sync::mpsc};
+use tokio::{
+    io::AsyncReadExt,
+    net::TcpListener,
+    sync::{mpsc, watch},
+};
 use tower_http::cors::CorsLayer;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 mod billing;
+mod budget;
+mod cloudfront_invalidations;
 mod events;
 mod jobs;
 mod media;
+mod origin_cleanup;
 mod telemetry;
+mod uploads;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -82,11 +99,17 @@ const EVENT_STREAM_CHANNEL_CAPACITY: usize = 16;
 const EVENT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const EVENT_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_MEDIA_JOB_MAX_ATTEMPTS: usize = 3;
+const CLOUDFRONT_INVALIDATION_PATH_LIMIT: usize = 1_000;
 const HARD_MEDIA_JOB_MAX_ATTEMPTS: usize = 25;
 const MEDIA_JOB_LAST_ERROR_LIMIT_BYTES: usize = 4 * 1024;
 const INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS: u64 = 120;
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_ORGANIZATION_STORAGE_BYTES: u64 = 250 * 1024 * 1024 * 1024;
+const DEFAULT_PLATFORM_STORAGE_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+const DEFAULT_ORGANIZATION_VIDEO_LIMIT: usize = 50;
+const DEFAULT_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION: usize = 10;
+const DEFAULT_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION: usize = 2;
 const DASHBOARD_UPLOAD_TOKEN_PREFIX: &str = "rend_upload_";
 const PLAYER_HARNESS_HTML: &str = include_str!("player_harness.html");
 const LOCAL_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -102,13 +125,14 @@ const FAST_EMBED_INLINE_STARTUP_MAX_BYTES: usize = 512 * 1024;
 struct ApiConfig {
     bind_addr: SocketAddr,
     database_url: String,
-    redis_url: String,
     object_store_health_url: String,
     dev_api_key: String,
     site_internal_token: String,
     s3_endpoint: String,
+    s3_presign_endpoint: String,
     s3_region: String,
     s3_bucket: String,
+    source_bucket: String,
     aws_access_key_id: String,
     aws_secret_access_key: String,
     playback_mode: PlaybackMode,
@@ -117,6 +141,8 @@ struct ApiConfig {
     public_playback_enabled: bool,
     public_playback_alias: Option<media::PublicPlaybackAliasConfig>,
     playback_cookie_domain: Option<String>,
+    cloudfront_cookie_signer: Option<CloudFrontCookieSigner>,
+    cloudfront_distribution_id: Option<String>,
     playback_token_issuer: PlaybackTokenIssuer,
     playback_keyring: SingleKeyring,
     playback_bootstrap_prefetch_segments: usize,
@@ -126,6 +152,8 @@ struct ApiConfig {
     playback_telemetry: telemetry::TelemetryConfig,
     billing: billing::BillingConfig,
     media_processing: media::MediaProcessingConfig,
+    upload_limits: uploads::UploadLimits,
+    compute_budget: budget::ComputeBudgetConfig,
     media_job_max_attempts: i32,
     inline_media_processing: bool,
     media_worker: MediaWorkerConfig,
@@ -169,7 +197,23 @@ enum PlaybackMode {
 struct MediaWorkerConfig {
     worker_id: String,
     poll_interval: Duration,
-    lock_timeout: Duration,
+    lease_duration: Duration,
+    heartbeat_interval: Duration,
+    shutdown_grace: Duration,
+    max_active_jobs_per_organization: i32,
+}
+
+#[derive(Clone)]
+struct CloudFrontCookieSigner {
+    key_pair_id: String,
+    private_key: RsaPrivateKey,
+}
+
+enum MediaJobDisposition {
+    Completed(i64),
+    Deferred,
+    DeferredUnavailable,
+    Rejected(String),
 }
 
 impl PlaybackMode {
@@ -195,7 +239,6 @@ impl ApiConfig {
         let rend_env = RendEnv::from_env()?;
         let allow_insecure_edge_urls = env_bool("REND_ALLOW_INSECURE_EDGE_URLS", false)?;
         let database_url = env_string("DATABASE_URL", "postgres://rend:rend@localhost:5432/rend");
-        let redis_url = env_string("REND_REDIS_URL", "redis://localhost:6379");
         let clickhouse_url = env_string("CLICKHOUSE_URL", "http://localhost:8123");
         let object_store_health_url = env_string(
             "OBJECT_STORE_HEALTH_URL",
@@ -208,10 +251,18 @@ impl ApiConfig {
         };
         let site_internal_token = env_string("REND_SITE_INTERNAL_TOKEN", LOCAL_SITE_INTERNAL_TOKEN);
         let s3_endpoint = env_string("S3_ENDPOINT", "http://localhost:9100");
+        let s3_presign_endpoint = env_string("S3_PRESIGN_ENDPOINT", &s3_endpoint);
         let s3_region = env_string("S3_REGION", "us-east-1");
         let s3_bucket = env_string("S3_BUCKET", "rend-local");
-        let aws_access_key_id = env_string("AWS_ACCESS_KEY_ID", "rend_minio");
-        let aws_secret_access_key = env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password");
+        let source_bucket = env_string("S3_SOURCE_BUCKET", &s3_bucket);
+        let aws_access_key_id = env_string(
+            "S3_ACCESS_KEY_ID",
+            &env_string("AWS_ACCESS_KEY_ID", "rend_minio"),
+        );
+        let aws_secret_access_key = env_string(
+            "S3_SECRET_ACCESS_KEY",
+            &env_string("AWS_SECRET_ACCESS_KEY", "rend_minio_password"),
+        );
         let playback_signing_key_id =
             env_string("REND_PLAYBACK_SIGNING_KEY_ID", "local-dev-playback-key");
         let playback_signing_secret = env_string(
@@ -225,6 +276,10 @@ impl ApiConfig {
         let public_playback_enabled = env_bool("REND_PUBLIC_PLAYBACK_ENABLED", false)?;
         let public_playback_alias = public_playback_alias_config_from_env(public_playback_enabled)?;
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
+        let cloudfront_cookie_signer = cloudfront_cookie_signer_from_env()?;
+        let cloudfront_distribution_id = env_string("REND_CLOUDFRONT_DISTRIBUTION_ID", "");
+        let cloudfront_distribution_id = (!cloudfront_distribution_id.trim().is_empty())
+            .then(|| cloudfront_distribution_id.trim().to_owned());
         let playback_token_ttl = env_duration_secs("REND_PLAYBACK_TOKEN_TTL_SECS", 900)?;
         let max_upload_bytes = env_u64("REND_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)?;
         anyhow::ensure!(
@@ -273,17 +328,56 @@ impl ApiConfig {
         let internal_telemetry_token = env_string("REND_INTERNAL_TELEMETRY_TOKEN", "");
         let playback_telemetry = telemetry::TelemetryConfig::from_env(&edge_internal_token)?;
         let billing = billing::BillingConfig::from_env(rend_env)?;
+        let organization_storage_bytes = env_u64(
+            "REND_ORGANIZATION_STORAGE_BYTES",
+            DEFAULT_ORGANIZATION_STORAGE_BYTES,
+        )?;
+        let platform_storage_bytes = env_u64(
+            "REND_PLATFORM_STORAGE_BYTES",
+            DEFAULT_PLATFORM_STORAGE_BYTES,
+        )?;
+        let organization_video_limit = env_usize(
+            "REND_ORGANIZATION_VIDEO_LIMIT",
+            DEFAULT_ORGANIZATION_VIDEO_LIMIT,
+        )?;
+        let open_upload_sessions = env_usize(
+            "REND_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION",
+            DEFAULT_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION,
+        )?;
+        let max_active_media_jobs = env_usize(
+            "REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION",
+            DEFAULT_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION,
+        )?;
+        anyhow::ensure!(
+            organization_video_limit > 0,
+            "REND_ORGANIZATION_VIDEO_LIMIT must be positive"
+        );
+        anyhow::ensure!(
+            open_upload_sessions > 0,
+            "REND_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION must be positive"
+        );
+        anyhow::ensure!(
+            max_active_media_jobs > 0,
+            "REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION must be positive"
+        );
 
         for (key, value) in [
             ("DATABASE_URL", &database_url),
-            ("REND_REDIS_URL", &redis_url),
             ("CLICKHOUSE_URL", &clickhouse_url),
             ("OBJECT_STORE_HEALTH_URL", &object_store_health_url),
             ("S3_ENDPOINT", &s3_endpoint),
+            ("S3_PRESIGN_ENDPOINT", &s3_presign_endpoint),
             ("S3_REGION", &s3_region),
             ("S3_BUCKET", &s3_bucket),
-            ("AWS_ACCESS_KEY_ID", &aws_access_key_id),
-            ("AWS_SECRET_ACCESS_KEY", &aws_secret_access_key),
+            ("S3_SOURCE_BUCKET", &source_bucket),
+            (
+                "S3_ACCESS_KEY_ID (or AWS_ACCESS_KEY_ID)",
+                &aws_access_key_id,
+            ),
+            (
+                "S3_SECRET_ACCESS_KEY (or AWS_SECRET_ACCESS_KEY)",
+                &aws_secret_access_key,
+            ),
             ("REND_SITE_INTERNAL_TOKEN", &site_internal_token),
         ] {
             anyhow::ensure!(!value.trim().is_empty(), "{key} must not be empty");
@@ -299,8 +393,8 @@ impl ApiConfig {
                 "REND_DEV_API_KEY must not be empty in local profile"
             );
         }
-        validate_required_secret(rend_env, "AWS_ACCESS_KEY_ID", &aws_access_key_id)?;
-        validate_required_secret(rend_env, "AWS_SECRET_ACCESS_KEY", &aws_secret_access_key)?;
+        validate_required_secret(rend_env, "S3_ACCESS_KEY_ID", &aws_access_key_id)?;
+        validate_required_secret(rend_env, "S3_SECRET_ACCESS_KEY", &aws_secret_access_key)?;
         validate_required_secret(rend_env, "REND_EDGE_INTERNAL_TOKEN", &edge_internal_token)?;
         validate_required_secret(rend_env, "REND_SITE_INTERNAL_TOKEN", &site_internal_token)?;
         let telemetry_secret_for_validation = if rend_env.is_strict() {
@@ -324,7 +418,6 @@ impl ApiConfig {
             &playback_signing_secret,
         )?;
         validate_required_service_url(rend_env, "DATABASE_URL", &database_url)?;
-        validate_required_service_url(rend_env, "REND_REDIS_URL", &redis_url)?;
         validate_required_url(rend_env, "CLICKHOUSE_URL", &clickhouse_url)?;
         validate_required_url(
             rend_env,
@@ -332,6 +425,7 @@ impl ApiConfig {
             &object_store_health_url,
         )?;
         validate_required_url(rend_env, "S3_ENDPOINT", &s3_endpoint)?;
+        validate_required_url(rend_env, "S3_PRESIGN_ENDPOINT", &s3_presign_endpoint)?;
         match playback_mode {
             PlaybackMode::Tigris => validate_required_url(
                 rend_env,
@@ -359,13 +453,14 @@ impl ApiConfig {
         Ok(Self {
             bind_addr: env_socket_addr("REND_API_BIND_ADDR", "127.0.0.1:4000")?,
             database_url,
-            redis_url,
             object_store_health_url,
             dev_api_key,
             site_internal_token,
             s3_endpoint,
+            s3_presign_endpoint,
             s3_region,
             s3_bucket,
+            source_bucket,
             aws_access_key_id,
             aws_secret_access_key,
             playback_mode,
@@ -374,6 +469,8 @@ impl ApiConfig {
             public_playback_enabled,
             public_playback_alias,
             playback_cookie_domain,
+            cloudfront_cookie_signer,
+            cloudfront_distribution_id,
             playback_token_issuer,
             playback_keyring,
             playback_bootstrap_prefetch_segments,
@@ -402,13 +499,62 @@ impl ApiConfig {
                 ffprobe_path: env_string("REND_FFPROBE_PATH", "ffprobe"),
                 process_timeout: env_duration_secs("REND_MEDIA_PROCESS_TIMEOUT_SECS", 60)?,
             },
+            upload_limits: uploads::UploadLimits {
+                part_size: uploads::DEFAULT_PART_SIZE,
+                session_ttl: env_duration_secs("REND_UPLOAD_SESSION_TTL_SECS", 24 * 60 * 60)?,
+                signed_url_ttl: env_duration_secs("REND_UPLOAD_SIGNED_URL_TTL_SECS", 15 * 60)?,
+                video_limit: i32::try_from(organization_video_limit)
+                    .context("REND_ORGANIZATION_VIDEO_LIMIT is too large")?,
+                organization_byte_limit: i64::try_from(organization_storage_bytes)
+                    .context("REND_ORGANIZATION_STORAGE_BYTES is too large")?,
+                global_byte_limit: i64::try_from(platform_storage_bytes)
+                    .context("REND_PLATFORM_STORAGE_BYTES is too large")?,
+                max_open_sessions: i64::try_from(open_upload_sessions)
+                    .context("REND_OPEN_UPLOAD_SESSIONS_PER_ORGANIZATION is too large")?,
+                media_job_max_attempts: i32::try_from(media_job_max_attempts)
+                    .context("REND_MEDIA_JOB_MAX_ATTEMPTS is too large")?,
+                max_upload_bytes,
+            },
+            compute_budget: budget::ComputeBudgetConfig {
+                monthly_cap_microusd: i64::try_from(env_u64(
+                    "REND_MEDIA_MONTHLY_BUDGET_MICROUSD",
+                    250_000_000,
+                )?)
+                .context("REND_MEDIA_MONTHLY_BUDGET_MICROUSD is too large")?,
+                monthly_base_microusd: i64::try_from(env_u64(
+                    "REND_MEDIA_MONTHLY_BASE_MICROUSD",
+                    154_000_000,
+                )?)
+                .context("REND_MEDIA_MONTHLY_BASE_MICROUSD is too large")?,
+                per_job_ceiling_microusd: i64::try_from(env_u64(
+                    "REND_MEDIA_JOB_CEILING_MICROUSD",
+                    25_000_000,
+                )?)
+                .context("REND_MEDIA_JOB_CEILING_MICROUSD is too large")?,
+                task_microusd_per_second: i64::try_from(env_u64(
+                    "REND_MEDIA_TASK_MICROUSD_PER_SECOND",
+                    57,
+                )?)
+                .context("REND_MEDIA_TASK_MICROUSD_PER_SECOND is too large")?,
+                output_microusd_per_gib: i64::try_from(env_u64(
+                    "REND_MEDIA_EGRESS_MICROUSD_PER_GIB",
+                    100_000,
+                )?)
+                .context("REND_MEDIA_EGRESS_MICROUSD_PER_GIB is too large")?,
+                safety_factor: u32::try_from(env_u64("REND_MEDIA_BUDGET_SAFETY_FACTOR", 2)?)
+                    .context("REND_MEDIA_BUDGET_SAFETY_FACTOR is too large")?,
+            },
             media_job_max_attempts: i32::try_from(media_job_max_attempts)
                 .context("REND_MEDIA_JOB_MAX_ATTEMPTS is too large")?,
             inline_media_processing,
             media_worker: MediaWorkerConfig {
                 worker_id: media_worker_id(),
                 poll_interval: env_duration_secs("REND_MEDIA_WORKER_POLL_INTERVAL_SECS", 1)?,
-                lock_timeout: env_duration_secs("REND_MEDIA_JOB_LOCK_TIMEOUT_SECS", 300)?,
+                lease_duration: env_duration_secs("REND_MEDIA_JOB_LEASE_SECS", 120)?,
+                heartbeat_interval: env_duration_secs("REND_MEDIA_JOB_HEARTBEAT_SECS", 30)?,
+                shutdown_grace: env_duration_secs("REND_MEDIA_SHUTDOWN_GRACE_SECS", 90)?,
+                max_active_jobs_per_organization: i32::try_from(max_active_media_jobs)
+                    .context("REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION is too large")?,
             },
             auto_migrate: env_bool("REND_API_AUTO_MIGRATE", !rend_env.is_strict())?,
             request_timeout: env_duration_secs("REND_HTTP_TIMEOUT_SECS", 120)?,
@@ -558,6 +704,7 @@ fn is_local_playback_base_url(value: &str) -> bool {
         || host == "host.docker.internal"
         || host.starts_with("127.")
         || host.ends_with(".local")
+        || host.ends_with(".localhost")
         || matches!(
             host.as_str(),
             "postgres"
@@ -636,6 +783,7 @@ fn cors_layer(allowed_origins: &[HeaderValue]) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::RANGE,
+            header::HeaderName::from_static("idempotency-key"),
         ])
         .allow_credentials(true)
         .expose_headers([
@@ -655,6 +803,9 @@ struct AppState {
     http: reqwest::Client,
     origin_playback_cache: Arc<OriginPlaybackCache>,
     s3: S3Client,
+    source_s3: S3Client,
+    upload_s3: S3Client,
+    cloudfront: Option<CloudFrontClient>,
     started_at: Instant,
     metrics: Arc<ApiMetrics>,
 }
@@ -769,11 +920,14 @@ struct RequestAuth {
     organization_id: String,
     scopes: BTreeSet<ApiScope>,
     credential: RequestCredential,
+    upload_claims: Option<DashboardUploadTokenClaims>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct DashboardUploadTokenClaims {
     v: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
     org_id: String,
     exp: u64,
     content_type: String,
@@ -793,6 +947,7 @@ impl RequestAuth {
             .into_iter()
             .collect(),
             credential,
+            upload_claims: None,
         }
     }
 
@@ -841,6 +996,24 @@ struct CreateVideoResponse {
     byte_size: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     playback_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateUploadRequest {
+    content_type: String,
+    content_length: i64,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SignUploadPartsRequest {
+    parts: Vec<uploads::RequestedPart>,
+}
+
+#[derive(Deserialize)]
+struct CompleteUploadRequest {
+    parts: Vec<uploads::CompletedUploadPart>,
 }
 
 #[derive(Serialize)]
@@ -1070,6 +1243,28 @@ struct AssetEventRecord {
 struct PlaybackArtifact {
     artifact_path: String,
     content_type: String,
+}
+
+#[derive(Deserialize)]
+struct InternalArtifactResolutionQuery {
+    asset_id: String,
+    artifact_path: String,
+}
+
+#[derive(Serialize)]
+struct InternalArtifactResolutionResponse {
+    storage_object_key: String,
+    content_type: &'static str,
+}
+
+#[derive(Deserialize)]
+struct InternalAssetAvailabilityQuery {
+    asset_id: String,
+}
+
+#[derive(Serialize)]
+struct InternalAssetAvailabilityResponse {
+    available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1310,12 +1505,26 @@ async fn main() -> Result<()> {
 
     let request_timeout = config.request_timeout;
     let s3 = build_s3_client(&config);
+    let source_s3 = build_s3_client_for_endpoint(&config, &config.s3_endpoint);
+    let upload_s3 = build_s3_client_for_endpoint(&config, &config.s3_presign_endpoint);
+    let cloudfront = if config.cloudfront_distribution_id.is_some() {
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_cloudfront::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        Some(CloudFrontClient::new(&sdk_config))
+    } else {
+        None
+    };
     let state = Arc::new(AppState {
         config,
         db,
         http: reqwest::Client::new(),
         origin_playback_cache: Arc::new(OriginPlaybackCache::default()),
         s3,
+        source_s3,
+        upload_s3,
+        cloudfront,
         started_at: Instant::now(),
         metrics: Arc::new(ApiMetrics::default()),
     });
@@ -1329,6 +1538,8 @@ async fn main() -> Result<()> {
     }
 
     let app = build_app(state.clone(), request_timeout);
+    cloudfront_invalidations::spawn_worker(state.clone());
+    origin_cleanup::spawn_worker(state.clone());
 
     let listener = TcpListener::bind(state.config.bind_addr)
         .await
@@ -1342,8 +1553,8 @@ async fn main() -> Result<()> {
 }
 
 fn install_rustls_crypto_provider() {
-    // Redis TLS does not select a provider when both ring and aws-lc-rs are
-    // enabled transitively through the workspace dependency graph.
+    // Select one provider when both ring and aws-lc-rs are present in the
+    // transitive dependency graph.
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
@@ -1354,36 +1565,121 @@ async fn run_media_worker(state: Arc<AppState>) -> Result<()> {
         "rend-api media worker listening for queued jobs",
     );
 
-    let mut shutdown = Box::pin(shutdown_signal());
+    let (shutdown_sender, mut shutdown) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_sender.send(true);
+    });
+    let mut last_upload_expiry_sweep = Instant::now() - Duration::from_secs(60);
+    let mut last_lease_recovery_sweep = Instant::now() - Duration::from_secs(30);
+    let mut last_attempt_cleanup_sweep = Instant::now() - Duration::from_secs(10 * 60);
+    let mut last_queue_metric = Instant::now() - Duration::from_secs(30);
     loop {
-        tokio::select! {
-            _ = &mut shutdown => {
-                tracing::info!(
-                    worker_id = %state.config.media_worker.worker_id,
-                    "rend-api media worker shutting down",
-                );
-                break;
+        if *shutdown.borrow() {
+            tracing::info!(
+                worker_id = %state.config.media_worker.worker_id,
+                "rend-api media worker shutting down",
+            );
+            break;
+        }
+        if last_upload_expiry_sweep.elapsed() >= Duration::from_secs(60) {
+            match uploads::expire_upload_sessions(
+                &state.db,
+                &state.source_s3,
+                &state.config.source_bucket,
+                100,
+            )
+            .await
+            {
+                Ok(expired) if expired > 0 => {
+                    tracing::info!(expired, "expired abandoned multipart upload sessions");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to expire multipart upload sessions");
+                }
             }
-            result = process_next_media_job(state.clone()) => {
-                match result {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tokio::select! {
-                            _ = &mut shutdown => break,
-                            _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
+            last_upload_expiry_sweep = Instant::now();
+        }
+        if last_lease_recovery_sweep.elapsed() >= Duration::from_secs(30) {
+            match recover_expired_media_jobs(&state.db, 100).await {
+                Ok(recovered) => {
+                    for (asset_id, lease_token) in &recovered {
+                        if let Err(error) = media::cleanup_attempt_prefix(
+                            &state.db,
+                            &state.s3,
+                            &state.config.s3_bucket,
+                            asset_id,
+                            lease_token,
+                        )
+                        .await
+                        {
+                            tracing::warn!(asset_id, lease_token, error = %error, "failed to clean expired media attempt objects");
                         }
                     }
-                    Err(error) => {
-                        tracing::error!(
-                            worker_id = %state.config.media_worker.worker_id,
-                            error = %error,
-                            "media worker loop failed",
+                    if !recovered.is_empty() {
+                        tracing::warn!(
+                            count = recovered.len(),
+                            "recovered expired media job leases"
                         );
-                        tokio::select! {
-                            _ = &mut shutdown => break,
-                            _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to recover expired media job leases")
+                }
+            }
+            last_lease_recovery_sweep = Instant::now();
+        }
+        if last_attempt_cleanup_sweep.elapsed() >= Duration::from_secs(10 * 60) {
+            match recent_terminal_media_attempts(&state.db, 100).await {
+                Ok(attempts) => {
+                    for (asset_id, lease_token) in attempts {
+                        if let Err(error) = media::cleanup_attempt_prefix(
+                            &state.db,
+                            &state.s3,
+                            &state.config.s3_bucket,
+                            &asset_id,
+                            &lease_token,
+                        )
+                        .await
+                        {
+                            tracing::warn!(asset_id, lease_token, error = %error, "failed to sweep unreferenced terminal media attempt objects");
                         }
                     }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to list terminal media attempts for object cleanup")
+                }
+            }
+            last_attempt_cleanup_sweep = Instant::now();
+        }
+        if last_queue_metric.elapsed() >= Duration::from_secs(30) {
+            if let Err(error) = publish_media_queue_metrics(&state).await {
+                tracing::warn!(error = %error, "failed to publish media queue metrics");
+            }
+            last_queue_metric = Instant::now();
+        }
+        match process_next_media_job(state.clone(), shutdown.clone()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        let _ = changed;
+                    }
+                    _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    worker_id = %state.config.media_worker.worker_id,
+                    error = %error,
+                    "media worker loop failed",
+                );
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        let _ = changed;
+                    }
+                    _ = tokio::time::sleep(state.config.media_worker.poll_interval) => {}
                 }
             }
         }
@@ -1392,9 +1688,287 @@ async fn run_media_worker(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+async fn publish_media_queue_metrics(state: &AppState) -> Result<()> {
+    let (queued, oldest_age_seconds, active_workers): (i64, f64, i64) = sqlx::query_as(
+        "
+        SELECT
+          count(*) FILTER (
+            WHERE (attempts < max_attempts AND status IN ('queued', 'deferred_budget') AND run_after <= now())
+               OR (status = 'running' AND lease_expires_at <= now())
+          ),
+          COALESCE(max(EXTRACT(EPOCH FROM (now() - created_at))) FILTER (
+            WHERE (attempts < max_attempts AND status IN ('queued', 'deferred_budget') AND run_after <= now())
+               OR (status = 'running' AND lease_expires_at <= now())
+          ), 0)::double precision,
+          GREATEST(count(DISTINCT locked_by) FILTER (
+            WHERE status = 'running' AND lease_expires_at > now()
+          ), 1)
+        FROM rend.media_jobs
+        WHERE job_type = 'process_media'
+        ",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    let queued_per_worker = queued.max(0) as f64 / active_workers.max(1) as f64;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let metric = serde_json::json!({
+        "_aws": {
+            "Timestamp": timestamp,
+            "CloudWatchMetrics": [{
+                "Namespace": "Rend/Media",
+                "Dimensions": [["Environment"]],
+                "Metrics": [
+                    {"Name": "QueuedJobsPerWorker", "Unit": "Count"},
+                    {"Name": "OldestQueuedJobAgeSeconds", "Unit": "Seconds"}
+                ]
+            }]
+        },
+        "Environment": state.config.edge_registry.rend_env.as_str(),
+        "QueuedJobsPerWorker": queued_per_worker,
+        "OldestQueuedJobAgeSeconds": oldest_age_seconds.max(0.0)
+    });
+    println!("{metric}");
+    Ok(())
+}
+
+async fn recover_expired_media_jobs(db: &PgPool, limit: i64) -> Result<Vec<(String, String)>> {
+    let candidates: Vec<(String, String)> = sqlx::query_as(
+        "
+        SELECT id::text, asset_id::text
+        FROM rend.media_jobs
+        WHERE status = 'running' AND lease_expires_at <= now()
+        ORDER BY lease_expires_at, id
+        LIMIT $1
+        ",
+    )
+    .bind(limit.clamp(1, 1_000))
+    .fetch_all(db)
+    .await?;
+    let mut recovered = Vec::with_capacity(candidates.len());
+    for (job_id, asset_id) in candidates {
+        let mut tx = db.begin().await?;
+        let asset: Option<(String, String, bool, bool, bool)> = sqlx::query_as(
+            "
+            SELECT asset.organization_id::text, asset.playable_state,
+                   asset.deleted_at IS NOT NULL, asset.suspended_at IS NOT NULL,
+                   org.suspended_at IS NOT NULL
+            FROM rend.assets asset
+            INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+            WHERE asset.id = $1::uuid
+            FOR UPDATE OF asset
+            ",
+        )
+        .bind(&asset_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&job_id)
+            .execute(&mut *tx)
+            .await?;
+        let job: Option<(String, i32, i32, i64, i64, Option<String>)> = sqlx::query_as(
+            "
+            SELECT lease_token::text, attempts, max_attempts,
+                   reserved_output_bytes, reserved_microusd,
+                   reservation_month::text
+            FROM rend.media_jobs
+            WHERE id = $1::uuid AND asset_id = $2::uuid
+              AND status = 'running' AND lease_expires_at <= now()
+            FOR UPDATE
+            ",
+        )
+        .bind(&job_id)
+        .bind(&asset_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            lease_token,
+            attempts,
+            max_attempts,
+            reserved_output,
+            reserved_compute,
+            reservation_month,
+        )) = job
+        else {
+            tx.commit().await?;
+            continue;
+        };
+        let terminal = jobs::is_final_attempt(attempts, max_attempts);
+        let reason = "media worker lease expired";
+
+        if reserved_compute > 0 {
+            let reservation_month = reservation_month.as_deref().ok_or_else(|| {
+                sqlx::Error::Protocol(
+                    "expired media job has a compute reservation without an accounting month"
+                        .into(),
+                )
+            })?;
+            let released = sqlx::query(
+                "
+                UPDATE rend.media_compute_months
+                SET reserved_microusd = GREATEST(reserved_microusd - $1, 0),
+                    spent_microusd = spent_microusd + $1
+                WHERE month = $2::date
+                ",
+            )
+            .bind(reserved_compute)
+            .bind(reservation_month)
+            .execute(&mut *tx)
+            .await?;
+            if released.rows_affected() != 1 {
+                return Err(sqlx::Error::Protocol(
+                    "expired media job reservation month has no accounting row".into(),
+                )
+                .into());
+            }
+        }
+
+        if terminal
+            && let Some((organization_id, _, _, _, _)) = asset.as_ref()
+            && reserved_output > 0
+        {
+            sqlx::query(
+                "UPDATE rend.organization_storage_usage SET reserved_bytes = GREATEST(reserved_bytes - $2, 0) WHERE organization_id = $1::uuid",
+            )
+            .bind(organization_id)
+            .bind(reserved_output)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE rend.global_storage_usage SET reserved_bytes = GREATEST(reserved_bytes - $1, 0) WHERE singleton",
+            )
+            .bind(reserved_output)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "
+                INSERT INTO rend.storage_ledger_entries (
+                  organization_id, asset_id, reference_key, reason, reserved_bytes_delta
+                ) VALUES ($1::uuid, $2::uuid, $3, 'media_output_released_expired_lease', $4)
+                ON CONFLICT (organization_id, reference_key) DO NOTHING
+                ",
+            )
+            .bind(organization_id)
+            .bind(&asset_id)
+            .bind(format!("media:{lease_token}:expired"))
+            .bind(-reserved_output)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if let Some((_, playable_state, deleted, asset_suspended, org_suspended)) = asset
+            && !deleted
+            && !asset_suspended
+            && !org_suspended
+        {
+            events::insert_asset_event(
+                &mut tx,
+                &asset_id,
+                events::EVENT_MEDIA_PROCESSING_FAILED,
+                events::media_processing_failed_metadata(attempts, max_attempts, terminal, reason),
+            )
+            .await?;
+            if terminal && !matches!(playable_state.as_str(), "opener_ready" | "hls_ready") {
+                sqlx::query(
+                    "UPDATE rend.assets SET source_state = 'uploaded', playable_state = 'failed', current_opener_artifact_id = NULL WHERE id = $1::uuid",
+                )
+                .bind(&asset_id)
+                .execute(&mut *tx)
+                .await?;
+                if playable_state != "failed" {
+                    events::insert_asset_event(
+                        &mut tx,
+                        &asset_id,
+                        events::EVENT_PLAYABLE_STATE_CHANGED,
+                        events::playable_state_changed_metadata(&playable_state, "failed"),
+                    )
+                    .await?;
+                }
+            } else {
+                sqlx::query("UPDATE rend.assets SET source_state = 'uploaded' WHERE id = $1::uuid")
+                    .bind(&asset_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        let status = if terminal {
+            jobs::STATUS_FAILED
+        } else {
+            jobs::STATUS_QUEUED
+        };
+        sqlx::query(
+            "
+            UPDATE rend.media_jobs
+            SET status = $2, last_error = $3,
+                locked_at = NULL, locked_by = NULL, lease_token = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL,
+                reserved_output_bytes = CASE WHEN $4 THEN 0 ELSE reserved_output_bytes END,
+                reserved_microusd = 0, reservation_month = NULL,
+                actual_microusd = COALESCE(actual_microusd, 0) + $5,
+                completed_at = CASE WHEN $4 THEN now() ELSE NULL END,
+                run_after = now()
+            WHERE id = $1::uuid
+            ",
+        )
+        .bind(&job_id)
+        .bind(status)
+        .bind(reason)
+        .bind(terminal)
+        .bind(reserved_compute)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "
+            UPDATE rend.media_job_attempts
+            SET status = $3, finished_at = now(), error = $4,
+                actual_microusd = COALESCE(actual_microusd, 0) + $5
+            WHERE job_id = $1::uuid AND lease_token = $2::uuid AND status = 'running'
+            ",
+        )
+        .bind(&job_id)
+        .bind(&lease_token)
+        .bind(if terminal { "failed" } else { "lease_lost" })
+        .bind(reason)
+        .bind(reserved_compute)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        recovered.push((asset_id, lease_token));
+    }
+    Ok(recovered)
+}
+
+async fn recent_terminal_media_attempts(db: &PgPool, limit: i64) -> Result<Vec<(String, String)>> {
+    sqlx::query_as(
+        "
+        SELECT asset_id::text, lease_token::text
+        FROM rend.media_job_attempts
+        WHERE status <> 'running'
+          AND finished_at <= now() - interval '5 minutes'
+          AND finished_at >= now() - interval '24 hours'
+        ORDER BY finished_at DESC
+        LIMIT $1
+        ",
+    )
+    .bind(limit.clamp(1, 1_000))
+    .fetch_all(db)
+    .await
+    .context("failed to load recent terminal media attempts")
+}
+
 fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/videos", post(create_video))
+        .route("/v1/uploads", post(create_upload))
+        .route(
+            "/v1/uploads/{upload_id}",
+            get(get_upload).delete(abort_upload),
+        )
+        .route("/v1/uploads/{upload_id}/parts", post(sign_upload_parts))
+        .route("/v1/uploads/{upload_id}/complete", post(complete_upload))
         .route("/v1/events", get(get_event_stream))
         .route(
             "/v1/analytics/overview",
@@ -1447,6 +2021,11 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
     let edge_routes = Router::new()
         .route("/register", post(register_edge))
         .route("/heartbeat", post(heartbeat_edge))
+        .route("/playback/artifact", get(resolve_edge_playback_artifact))
+        .route(
+            "/playback/availability",
+            get(resolve_edge_playback_availability),
+        )
         .route_layer(DefaultBodyLimit::max(
             INTERNAL_EDGE_REQUEST_BODY_LIMIT_BYTES,
         ))
@@ -1529,6 +2108,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
 }
 
 fn build_s3_client(config: &ApiConfig) -> S3Client {
+    build_s3_client_for_endpoint(config, &config.s3_endpoint)
+}
+
+fn build_s3_client_for_endpoint(config: &ApiConfig, endpoint: &str) -> S3Client {
     let credentials = Credentials::new(
         config.aws_access_key_id.clone(),
         config.aws_secret_access_key.clone(),
@@ -1540,7 +2123,7 @@ fn build_s3_client(config: &ApiConfig) -> S3Client {
         .behavior_version(BehaviorVersion::latest())
         .region(Region::new(config.s3_region.clone()))
         .credentials_provider(credentials)
-        .endpoint_url(config.s3_endpoint.clone())
+        .endpoint_url(endpoint)
         .force_path_style(true)
         .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
         .build();
@@ -1738,7 +2321,13 @@ fn media_worker_id() -> String {
     let configured = env_string("REND_MEDIA_WORKER_ID", "");
     let configured = configured.trim();
     if configured.is_empty() {
-        format!("rend-api-media-worker-{}", std::process::id())
+        let hostname = env_string("HOSTNAME", "unknown-task")
+            .trim()
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            .take(80)
+            .collect::<String>();
+        format!("rend-media-worker-{hostname}-{}", std::process::id())
     } else {
         configured.to_owned()
     }
@@ -1818,7 +2407,6 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     let checks = vec![
         check_postgres(&state).await,
-        check_redis(&state).await,
         check_object_store(&state).await,
     ];
     let ready = checks.iter().all(|check| check.status == "ok");
@@ -1865,6 +2453,193 @@ async fn create_video(
     match create_video_inner(state, auth, headers, body).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
+    }
+}
+
+async fn create_upload(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    headers: HeaderMap,
+    Json(request): Json<CreateUploadRequest>,
+) -> Response {
+    match create_upload_inner(state, auth, headers, request).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_upload_inner(
+    state: Arc<AppState>,
+    auth: RequestAuth,
+    headers: HeaderMap,
+    request: CreateUploadRequest,
+) -> Result<uploads::UploadSession, AppError> {
+    require_scope(&auth, ApiScope::Upload)?;
+    ensure_dashboard_upload_metadata(&auth, &request)?;
+    ensure_org_not_suspended(&state.db, &auth.organization_id).await?;
+    let idempotency_key = header_string(&headers, "idempotency-key")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("Idempotency-Key is required"))?;
+    uploads::create_upload_session(
+        &state.db,
+        &state.source_s3,
+        &state.config.source_bucket,
+        &state.config.upload_limits,
+        uploads::CreateUploadInput {
+            organization_id: auth.organization_id,
+            idempotency_key: idempotency_key.to_owned(),
+            content_type: request.content_type,
+            content_length: request.content_length,
+            filename: request.filename,
+        },
+    )
+    .await
+    .map_err(upload_app_error)
+}
+
+async fn sign_upload_parts(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(upload_id): AxumPath<String>,
+    Json(request): Json<SignUploadPartsRequest>,
+) -> Response {
+    if let Err(error) = require_scope(&auth, ApiScope::Upload) {
+        return error.into_response();
+    }
+    match uploads::sign_upload_parts(
+        &state.db,
+        &state.upload_s3,
+        &state.config.source_bucket,
+        &auth.organization_id,
+        &upload_id,
+        &request.parts,
+        state.config.upload_limits.signed_url_ttl,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => upload_app_error(error).into_response(),
+    }
+}
+
+async fn get_upload(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(upload_id): AxumPath<String>,
+) -> Response {
+    if let Err(error) = require_scope(&auth, ApiScope::Upload) {
+        return error.into_response();
+    }
+    match uploads::get_upload_session(
+        &state.db,
+        &state.source_s3,
+        &state.config.source_bucket,
+        &auth.organization_id,
+        &upload_id,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => upload_app_error(error).into_response(),
+    }
+}
+
+async fn complete_upload(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(upload_id): AxumPath<String>,
+    Json(request): Json<CompleteUploadRequest>,
+) -> Response {
+    if let Err(error) = require_scope(&auth, ApiScope::Upload) {
+        return error.into_response();
+    }
+    match uploads::complete_upload_session(
+        &state.db,
+        &state.source_s3,
+        &state.config.source_bucket,
+        &auth.organization_id,
+        &upload_id,
+        &request.parts,
+        state.config.upload_limits.media_job_max_attempts,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => upload_app_error(error).into_response(),
+    }
+}
+
+async fn abort_upload(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(upload_id): AxumPath<String>,
+) -> Response {
+    if let Err(error) = require_scope(&auth, ApiScope::Upload) {
+        return error.into_response();
+    }
+    match uploads::abort_upload_session(
+        &state.db,
+        &state.source_s3,
+        &state.config.source_bucket,
+        &auth.organization_id,
+        &upload_id,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => upload_app_error(error).into_response(),
+    }
+}
+
+fn ensure_dashboard_upload_metadata(
+    auth: &RequestAuth,
+    request: &CreateUploadRequest,
+) -> Result<(), AppError> {
+    if auth.credential != RequestCredential::DashboardUploadToken {
+        return Ok(());
+    }
+    let claims = auth
+        .upload_claims
+        .as_ref()
+        .ok_or_else(|| AppError::forbidden("upload token is missing multipart claims"))?;
+    if claims.v != 2 || claims.purpose.as_deref() != Some("multipart_upload") {
+        return Err(AppError::forbidden(
+            "upload token is not valid for multipart uploads",
+        ));
+    }
+    if claims.content_type != request.content_type
+        || claims
+            .content_length
+            .and_then(|value| i64::try_from(value).ok())
+            != Some(request.content_length)
+    {
+        return Err(AppError::forbidden(
+            "upload token does not match declared file metadata",
+        ));
+    }
+    Ok(())
+}
+
+fn upload_app_error(error: uploads::UploadError) -> AppError {
+    match error {
+        uploads::UploadError::Invalid(message) => AppError::bad_request(message),
+        uploads::UploadError::NotFound => AppError::not_found("upload session not found"),
+        uploads::UploadError::Conflict(message) => AppError {
+            status: StatusCode::CONFLICT,
+            message,
+        },
+        uploads::UploadError::Quota(message) => AppError {
+            status: StatusCode::FORBIDDEN,
+            message,
+        },
+        uploads::UploadError::TooLarge(message) => AppError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message,
+        },
+        uploads::UploadError::Unavailable(message) => AppError::forbidden(message),
+        uploads::UploadError::Storage(message) => AppError::bad_gateway(message),
+        uploads::UploadError::Database(error) => AppError::internal(error),
     }
 }
 
@@ -2063,20 +2838,31 @@ async fn delete_asset_inner(
 ) -> Result<DeleteAssetResponse, AppError> {
     require_scope(&auth, ApiScope::Delete)?;
     let asset_id = normalize_asset_id(&asset_id)?;
-    ensure_asset_not_suspended(&state.db, &auth.organization_id, &asset_id).await?;
-    let already_deleted = mark_asset_deleted(&state.db, &auth.organization_id, &asset_id).await?;
+    ensure_asset_deletable(&state.db, &auth.organization_id, &asset_id).await?;
+    uploads::abort_active_asset_upload(
+        &state.db,
+        &state.source_s3,
+        &state.config.source_bucket,
+        &auth.organization_id,
+        &asset_id,
+    )
+    .await
+    .map_err(upload_app_error)?;
+    let (already_deleted, cloudfront_invalidation_queued) = mark_asset_deleted(
+        &state.db,
+        &auth.organization_id,
+        &asset_id,
+        state.config.cloudfront_distribution_id.as_deref(),
+        state.config.source_bucket == state.config.s3_bucket,
+    )
+    .await?;
     if !already_deleted {
         billing::track_asset_delete(&state, &auth.organization_id, &asset_id).await;
     }
-    let origin_object_keys =
-        list_asset_origin_object_keys(&state.s3, &state.config.s3_bucket, &asset_id).await?;
-    let origin_objects_deleted = delete_asset_origin_objects(
-        &state.s3,
-        &state.config.s3_bucket,
-        &asset_id,
-        &origin_object_keys,
+    let origin_objects_deleted = usize::try_from(
+        origin_cleanup::wait_for_asset(&state.db, &asset_id, Duration::from_secs(5)).await,
     )
-    .await;
+    .unwrap_or(usize::MAX);
     let purge_attempted = maybe_purge_edge(
         &state.db,
         &state.http,
@@ -2086,14 +2872,14 @@ async fn delete_asset_inner(
         None,
     )
     .await;
-    let origin_objects_deleted = origin_objects_deleted?;
-
     Ok(DeleteAssetResponse {
         asset_id,
         deleted: true,
         already_deleted,
+        // A zero count can mean cleanup is still queued after the bounded
+        // response wait; the durable worker continues until it succeeds.
         origin_objects_deleted,
-        purge_attempted,
+        purge_attempted: purge_attempted || cloudfront_invalidation_queued,
     })
 }
 
@@ -2136,10 +2922,32 @@ async fn suspend_organization_inner(
         suspension_state_json(&after),
     )
     .await?;
+    let asset_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM rend.assets WHERE organization_id = $1::uuid AND deleted_at IS NULL ORDER BY id",
+    )
+    .bind(&organization_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    let invalidation_paths = organization_invalidation_paths(&asset_ids);
+    let mut cloudfront_invalidation_queued = false;
+    for (chunk_index, paths) in invalidation_paths
+        .chunks(CLOUDFRONT_INVALIDATION_PATH_LIMIT)
+        .enumerate()
+    {
+        cloudfront_invalidation_queued |= cloudfront_invalidations::enqueue(
+            &mut tx,
+            state.config.cloudfront_distribution_id.as_deref(),
+            &format!("suspend-org:{audit_id}:{chunk_index}"),
+            &format!("rend-suspend-org-{audit_id}-{chunk_index}"),
+            paths,
+        )
+        .await
+        .map_err(AppError::internal)?;
+    }
     tx.commit().await.map_err(AppError::internal)?;
 
-    let asset_ids = fetch_active_asset_ids_for_org(&state.db, &organization_id).await?;
-    let mut purge_attempted = false;
+    let mut purge_attempted = cloudfront_invalidation_queued;
     for asset_id in asset_ids {
         purge_attempted |= maybe_purge_edge(
             &state.db,
@@ -2161,6 +2969,13 @@ async fn suspend_organization_inner(
         purge_attempted,
         suspended_at: after.suspended_at,
     })
+}
+
+fn organization_invalidation_paths(asset_ids: &[String]) -> Vec<String> {
+    asset_ids
+        .iter()
+        .map(|asset_id| format!("/v/{asset_id}/*"))
+        .collect()
 }
 
 async fn restore_organization_inner(
@@ -2253,9 +3068,19 @@ async fn suspend_asset_inner(
         suspension_state_json(&after),
     )
     .await?;
+    let cloudfront_invalidation_queued = cloudfront_invalidations::enqueue(
+        &mut tx,
+        state.config.cloudfront_distribution_id.as_deref(),
+        &format!("suspend-asset:{audit_id}"),
+        &format!("rend-suspend-asset-{audit_id}"),
+        &[format!("/v/{asset_id}/*")],
+    )
+    .await
+    .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
 
-    let purge_attempted = maybe_purge_edge(
+    let mut purge_attempted = cloudfront_invalidation_queued;
+    purge_attempted |= maybe_purge_edge(
         &state.db,
         &state.http,
         &state.config.edge_registry,
@@ -2264,7 +3089,6 @@ async fn suspend_asset_inner(
         None,
     )
     .await;
-
     Ok(OperatorActionResponse {
         status: "ok",
         action: "suspend",
@@ -2401,15 +3225,18 @@ async fn get_asset_playback(
     match get_asset_playback_inner(state.clone(), auth, asset_id).await {
         Ok(response) => {
             let mut headers = HeaderMap::new();
-            if let Ok(cookie) = playback_cookie_header(
+            for cookie in playback_cookie_headers(
                 &response.playback_token,
                 response.ttl_seconds,
+                response.playback_token_expires_at,
                 &state.config.playback_base_url,
+                &response.asset_id,
                 state.config.playback_cookie_domain.as_deref(),
-            )
-            .parse()
-            {
-                headers.insert(header::SET_COOKIE, cookie);
+                state.config.cloudfront_cookie_signer.as_ref(),
+            ) {
+                if let Ok(cookie) = cookie.parse() {
+                    headers.append(header::SET_COOKIE, cookie);
+                }
             }
             (StatusCode::OK, headers, Json(response)).into_response()
         }
@@ -2494,15 +3321,18 @@ async fn api_fast_embed_inner(
     let headers = rendered.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert("x-rend-fast-embed", HeaderValue::from_static("api"));
-    if let Ok(cookie) = playback_cookie_header(
+    for cookie in playback_cookie_headers(
         &response.playback_token,
         response.ttl_seconds,
+        response.playback_token_expires_at,
         &playback_base_url,
+        &response.asset_id,
         state.config.playback_cookie_domain.as_deref(),
-    )
-    .parse()
-    {
-        headers.insert(header::SET_COOKIE, cookie);
+        state.config.cloudfront_cookie_signer.as_ref(),
+    ) {
+        if let Ok(cookie) = cookie.parse() {
+            headers.append(header::SET_COOKIE, cookie);
+        }
     }
     Ok(rendered)
 }
@@ -2540,6 +3370,47 @@ async fn playback_origin_artifact(
         Ok(response) => response,
         Err(error) => error.into_response(),
     }
+}
+
+async fn resolve_edge_playback_artifact(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<InternalArtifactResolutionQuery>,
+) -> Result<Json<InternalArtifactResolutionResponse>, AppError> {
+    let artifact = origin_playback_artifact(&query.asset_id, &query.artifact_path)?;
+    let storage_object_key = origin_playback_storage_object_key(state.as_ref(), &artifact).await?;
+    Ok(Json(InternalArtifactResolutionResponse {
+        storage_object_key,
+        content_type: artifact.content_type,
+    }))
+}
+
+async fn resolve_edge_playback_availability(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<InternalAssetAvailabilityQuery>,
+) -> Result<Json<InternalAssetAvailabilityResponse>, AppError> {
+    let asset_id = normalize_asset_id(&query.asset_id)?;
+    let available: bool = sqlx::query_scalar(
+        "
+        SELECT EXISTS (
+          SELECT 1
+          FROM rend.assets asset
+          INNER JOIN rend_auth.organization organization
+            ON organization.id = asset.organization_id
+          WHERE asset.id = $1::uuid
+            AND asset.deleted_at IS NULL
+            AND asset.suspended_at IS NULL
+            AND organization.suspended_at IS NULL
+        )
+        ",
+    )
+    .bind(&asset_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(AppError::internal)?;
+    if !available {
+        return Err(AppError::not_found("asset not available"));
+    }
+    Ok(Json(InternalAssetAvailabilityResponse { available }))
 }
 
 async fn playback_origin_artifact_inner(
@@ -2602,11 +3473,12 @@ async fn playback_origin_artifact_inner(
         ));
     }
 
+    let storage_object_key = origin_playback_storage_object_key(state.as_ref(), &artifact).await?;
     let mut get_object = state
         .s3
         .get_object()
         .bucket(&state.config.s3_bucket)
-        .key(&artifact.object_key);
+        .key(&storage_object_key);
     if let Some(range_header) = range_header {
         get_object = get_object.range(range_header);
     }
@@ -2615,7 +3487,11 @@ async fn playback_origin_artifact_inner(
         .send()
         .await
         .map_err(|error| origin_playback_artifact_error(&artifact, error))?;
-    Ok(origin_playback_artifact_response(artifact, object))
+    Ok(origin_playback_artifact_response(
+        artifact,
+        object,
+        storage_object_key,
+    ))
 }
 
 async fn fetch_asset_state_record(
@@ -2654,7 +3530,7 @@ async fn fetch_asset_state_record(
         ",
     )
     .bind(asset_id)
-    .bind(organization_id)
+    .bind(&organization_id)
     .fetch_optional(db)
     .await
     .map_err(AppError::internal)?;
@@ -2821,7 +3697,7 @@ async fn fetch_asset_thumbnail_record(
     let organization_id = normalize_org_id(organization_id)?;
     let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
         "
-        SELECT artifact.object_key, artifact.content_type, artifact.byte_size
+        SELECT artifact.storage_object_key, artifact.content_type, artifact.byte_size
         FROM rend.artifacts artifact
         INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
         INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
@@ -2865,7 +3741,9 @@ async fn mark_asset_deleted(
     db: &PgPool,
     organization_id: &str,
     asset_id: &str,
-) -> Result<bool, AppError> {
+    cloudfront_distribution_id: Option<&str>,
+    source_is_media_bucket: bool,
+) -> Result<(bool, bool), AppError> {
     let organization_id = normalize_org_id(organization_id)?;
     let mut tx = db.begin().await.map_err(AppError::internal)?;
     let row: Option<(String, String, bool)> = sqlx::query_as(
@@ -2878,18 +3756,31 @@ async fn mark_asset_deleted(
         ",
     )
     .bind(asset_id)
-    .bind(organization_id)
+    .bind(&organization_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+    origin_cleanup::enqueue(&mut tx, asset_id, source_is_media_bucket)
+        .await
+        .map_err(AppError::internal)?;
 
     let Some((source_state, playable_state, already_deleted)) = row else {
         return Err(AppError::not_found("asset not found"));
     };
+    let invalidation_configured = cloudfront_distribution_id.is_some();
+    cloudfront_invalidations::enqueue(
+        &mut tx,
+        cloudfront_distribution_id,
+        &format!("delete:{asset_id}"),
+        &format!("rend-delete-{asset_id}"),
+        &[format!("/v/{asset_id}/*")],
+    )
+    .await
+    .map_err(AppError::internal)?;
 
-    if already_deleted {
+    if already_deleted && source_state == "deleted" && playable_state == "deleted" {
         tx.commit().await.map_err(AppError::internal)?;
-        return Ok(true);
+        return Ok((true, invalidation_configured));
     }
 
     events::insert_asset_event(
@@ -2905,6 +3796,126 @@ async fn mark_asset_deleted(
         .await
         .map_err(AppError::internal)?;
 
+    let _: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM rend.media_jobs WHERE asset_id = $1::uuid AND status IN ('queued', 'running', 'deferred_budget') FOR UPDATE",
+    )
+    .bind(asset_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+
+    let used_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(byte_size), 0)::bigint FROM rend.artifacts WHERE asset_id = $1::uuid",
+    )
+    .bind(asset_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    let reserved_output_bytes: i64 = sqlx::query_scalar(
+        "
+        SELECT COALESCE(sum(reserved_output_bytes), 0)::bigint
+        FROM rend.media_jobs
+        WHERE asset_id = $1::uuid AND status IN ('queued', 'running', 'deferred_budget')
+        ",
+    )
+    .bind(asset_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "
+        WITH reservations AS (
+          SELECT reservation_month, sum(reserved_microusd)::bigint AS reserved_microusd
+          FROM rend.media_jobs
+          WHERE asset_id = $1::uuid
+            AND status IN ('queued', 'running', 'deferred_budget')
+            AND reservation_month IS NOT NULL
+            AND reserved_microusd > 0
+          GROUP BY reservation_month
+        )
+        UPDATE rend.media_compute_months month
+        SET reserved_microusd = GREATEST(month.reserved_microusd - reservations.reserved_microusd, 0)
+        FROM reservations
+        WHERE month.month = reservations.reservation_month
+        ",
+    )
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "
+        UPDATE rend.media_jobs
+        SET status = 'cancelled', lease_token = NULL, lease_expires_at = NULL,
+            heartbeat_at = NULL, locked_at = NULL, locked_by = NULL,
+            reserved_output_bytes = 0, reserved_microusd = 0,
+            reservation_month = NULL,
+            completed_at = now(), last_error = 'asset deleted'
+        WHERE asset_id = $1::uuid AND status IN ('queued', 'running', 'deferred_budget')
+        ",
+    )
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "
+        UPDATE rend.media_job_attempts
+        SET status = 'cancelled', finished_at = now(), error = 'asset deleted'
+        WHERE asset_id = $1::uuid AND status = 'running'
+        ",
+    )
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "
+        UPDATE rend.organization_storage_usage
+        SET used_bytes = GREATEST(used_bytes - $2, 0),
+            reserved_bytes = GREATEST(reserved_bytes - $3, 0)
+        WHERE organization_id = $1::uuid
+        ",
+    )
+    .bind(&organization_id)
+    .bind(used_bytes)
+    .bind(reserved_output_bytes)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "
+        UPDATE rend.global_storage_usage
+        SET used_bytes = GREATEST(used_bytes - $1, 0),
+            reserved_bytes = GREATEST(reserved_bytes - $2, 0)
+        WHERE singleton
+        ",
+    )
+    .bind(used_bytes)
+    .bind(reserved_output_bytes)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    if used_bytes > 0 || reserved_output_bytes > 0 {
+        sqlx::query(
+            "
+            INSERT INTO rend.storage_ledger_entries (
+              organization_id, asset_id, reference_key, reason,
+              reserved_bytes_delta, used_bytes_delta
+            )
+            VALUES ($1::uuid, $2::uuid, $3, 'asset_deleted', $4, $5)
+            ON CONFLICT (organization_id, reference_key) DO NOTHING
+            ",
+        )
+        .bind(&organization_id)
+        .bind(asset_id)
+        .bind(format!("asset:{asset_id}:delete"))
+        .bind(-reserved_output_bytes)
+        .bind(-used_bytes)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+    }
     sqlx::query(
         "
         UPDATE rend.assets
@@ -2930,80 +3941,7 @@ async fn mark_asset_deleted(
     .map_err(AppError::internal)?;
 
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(false)
-}
-
-async fn list_asset_origin_object_keys(
-    s3: &S3Client,
-    bucket: &str,
-    asset_id: &str,
-) -> Result<Vec<String>, AppError> {
-    let prefix = format!("videos/{asset_id}/");
-    let mut continuation_token = None;
-    let mut object_keys = BTreeSet::new();
-
-    loop {
-        let mut request = s3.list_objects_v2().bucket(bucket).prefix(&prefix);
-        if let Some(token) = continuation_token.as_deref() {
-            request = request.continuation_token(token);
-        }
-
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("failed to list origin objects with prefix {prefix}"))
-            .map_err(AppError::internal)?;
-
-        for object in response.contents() {
-            if let Some(object_key) = object.key()
-                && is_rend_owned_asset_object_key(asset_id, object_key)
-            {
-                object_keys.insert(object_key.to_owned());
-            }
-        }
-
-        if response.is_truncated().unwrap_or(false) {
-            continuation_token = response.next_continuation_token().map(str::to_owned);
-            if continuation_token.is_none() {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    Ok(object_keys.into_iter().collect())
-}
-
-fn is_rend_owned_asset_object_key(asset_id: &str, object_key: &str) -> bool {
-    object_key.starts_with(&format!("videos/{asset_id}/"))
-        && !object_key.contains("/../")
-        && !object_key.contains("/./")
-}
-
-async fn delete_asset_origin_objects(
-    s3: &S3Client,
-    bucket: &str,
-    asset_id: &str,
-    object_keys: &[String],
-) -> Result<usize, AppError> {
-    let mut deleted = 0;
-    for object_key in object_keys {
-        s3.delete_object()
-            .bucket(bucket)
-            .key(object_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to delete origin object {object_key}"))
-            .map_err(AppError::internal)?;
-        deleted += 1;
-    }
-    tracing::info!(
-        asset_id,
-        origin_objects_deleted = deleted,
-        "deleted Rend-owned asset origin objects",
-    );
-    Ok(deleted)
+    Ok((false, invalidation_configured))
 }
 
 async fn asset_row_exists(
@@ -3085,6 +4023,36 @@ pub(crate) async fn ensure_asset_not_suspended(
         Some((true, _, _)) | None => Err(AppError::not_found("asset not found")),
         Some((_, _, true)) => Err(AppError::forbidden("organization is suspended")),
         Some((_, true, _)) => Err(AppError::forbidden("asset is suspended")),
+    }
+}
+
+async fn ensure_asset_deletable(
+    db: &PgPool,
+    organization_id: &str,
+    asset_id: &str,
+) -> Result<(), AppError> {
+    let asset_id = normalize_asset_id(asset_id)?;
+    let organization_id = normalize_org_id(organization_id)?;
+    let row: Option<(bool, bool, bool)> = sqlx::query_as(
+        "
+        SELECT asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid AND asset.organization_id = $2::uuid
+        ",
+    )
+    .bind(asset_id)
+    .bind(organization_id)
+    .fetch_optional(db)
+    .await
+    .map_err(AppError::internal)?;
+    match row {
+        Some((true, _, _)) | Some((false, false, false)) => Ok(()),
+        None => Err(AppError::not_found("asset not found")),
+        Some((false, _, true)) => Err(AppError::forbidden("organization is suspended")),
+        Some((false, true, _)) => Err(AppError::forbidden("asset is suspended")),
     }
 }
 
@@ -4523,6 +5491,117 @@ fn playback_cookie_header(
     parts.join("; ")
 }
 
+fn playback_cookie_headers(
+    token: &str,
+    ttl_seconds: u64,
+    expires_at: u64,
+    playback_base_url: &str,
+    asset_id: &str,
+    cookie_domain: Option<&str>,
+    cloudfront_signer: Option<&CloudFrontCookieSigner>,
+) -> Vec<String> {
+    let mut cookies = vec![playback_cookie_header(
+        token,
+        ttl_seconds,
+        playback_base_url,
+        cookie_domain,
+    )];
+    let Some(signer) = cloudfront_signer else {
+        return cookies;
+    };
+    let resource = format!("{}/v/{asset_id}/*", playback_base_url.trim_end_matches('/'));
+    let policy = serde_json::json!({
+        "Statement": [{
+            "Resource": resource,
+            "Condition": {"DateLessThan": {"AWS:EpochTime": expires_at}}
+        }]
+    })
+    .to_string();
+    let signature = RsaSigningKey::<Sha1>::new(signer.private_key.clone()).sign(policy.as_bytes());
+    cookies.push(playback_authorization_cookie(
+        "CloudFront-Policy",
+        &cloudfront_cookie_value(policy.as_bytes()),
+        ttl_seconds,
+        playback_base_url,
+        cookie_domain,
+    ));
+    cookies.push(playback_authorization_cookie(
+        "CloudFront-Signature",
+        &cloudfront_cookie_value(&signature.to_bytes()),
+        ttl_seconds,
+        playback_base_url,
+        cookie_domain,
+    ));
+    cookies.push(playback_authorization_cookie(
+        "CloudFront-Key-Pair-Id",
+        &signer.key_pair_id,
+        ttl_seconds,
+        playback_base_url,
+        cookie_domain,
+    ));
+    cookies
+}
+
+fn playback_authorization_cookie(
+    name: &str,
+    value: &str,
+    ttl_seconds: u64,
+    playback_base_url: &str,
+    cookie_domain: Option<&str>,
+) -> String {
+    let secure = playback_base_url.starts_with("https://");
+    let mut parts = vec![
+        format!("{name}={value}"),
+        "Path=/v/".to_owned(),
+        format!("Max-Age={ttl_seconds}"),
+        "HttpOnly".to_owned(),
+        if secure {
+            "SameSite=None".to_owned()
+        } else {
+            "SameSite=Lax".to_owned()
+        },
+    ];
+    if let Some(domain) = cookie_domain {
+        parts.push(format!("Domain={domain}"));
+    }
+    if secure {
+        parts.push("Secure".to_owned());
+    }
+    parts.join("; ")
+}
+
+fn cloudfront_cookie_value(value: &[u8]) -> String {
+    BASE64_STANDARD
+        .encode(value)
+        .replace('+', "-")
+        .replace('=', "_")
+        .replace('/', "~")
+}
+
+fn cloudfront_cookie_signer_from_env() -> Result<Option<CloudFrontCookieSigner>> {
+    let key_pair_id = env_string("REND_CLOUDFRONT_KEY_PAIR_ID", "");
+    let private_key_pem = env_string("REND_CLOUDFRONT_PRIVATE_KEY", "");
+    if key_pair_id.trim().is_empty() && private_key_pem.trim().is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        !key_pair_id.trim().is_empty() && !private_key_pem.trim().is_empty(),
+        "REND_CLOUDFRONT_KEY_PAIR_ID and REND_CLOUDFRONT_PRIVATE_KEY must be configured together"
+    );
+    let private_key_pem = if private_key_pem.contains("\\n") && !private_key_pem.contains('\n') {
+        private_key_pem.replace("\\n", "\n")
+    } else {
+        private_key_pem
+    };
+    let private_key = RsaPrivateKey::from_pkcs8_pem(&private_key_pem)
+        .or_else(|_| RsaPrivateKey::from_pkcs1_pem(&private_key_pem))
+        .context("REND_CLOUDFRONT_PRIVATE_KEY must be a PKCS#8 or PKCS#1 PEM RSA private key")?;
+    Ok(Some(CloudFrontCookieSigner {
+        key_pair_id: key_pair_id.trim().to_owned(),
+        private_key,
+    }))
+}
+
 fn optional_cookie_domain(key: &str) -> Result<Option<String>> {
     let value = env_string(key, "");
     let value = value.trim().trim_start_matches('.').to_owned();
@@ -4559,6 +5638,10 @@ async fn create_video_inner(
         .map(u64::try_from)
         .transpose()
         .map_err(AppError::internal)?;
+    let legacy_reserved_bytes = content_length.unwrap_or(
+        i64::try_from(state.config.max_upload_bytes)
+            .map_err(|_| AppError::internal("legacy upload limit is too large"))?,
+    );
     ensure_org_not_suspended(&state.db, &auth.organization_id).await?;
     let asset_id: String = sqlx::query_scalar("SELECT gen_random_uuid()::text")
         .fetch_one(&state.db)
@@ -4587,6 +5670,15 @@ async fn create_video_inner(
             tracing::error!(error = %error, "failed to insert uploading asset");
             AppError::internal("failed to insert uploading asset")
         })?;
+        uploads::reserve_legacy_source(
+            &mut tx,
+            &auth.organization_id,
+            &asset_id,
+            legacy_reserved_bytes,
+            &state.config.upload_limits,
+        )
+        .await
+        .map_err(upload_app_error)?;
         events::insert_asset_event(
             &mut tx,
             &asset_id,
@@ -4616,9 +5708,9 @@ async fn create_video_inner(
     let byte_count = Arc::new(AtomicU64::new(0));
     let upload_body = counted_body_stream(body, byte_count.clone(), state.config.max_upload_bytes);
     let mut put_object = state
-        .s3
+        .source_s3
         .put_object()
-        .bucket(&state.config.s3_bucket)
+        .bucket(&state.config.source_bucket)
         .key(&source_object_key)
         .content_type(content_type.clone())
         .body(upload_body);
@@ -4628,7 +5720,16 @@ async fn create_video_inner(
     }
 
     if let Err(error) = put_object.send().await {
-        mark_asset_failed(&state, &asset_id).await;
+        if let Err(release_error) = uploads::release_legacy_source(
+            &state.db,
+            &auth.organization_id,
+            &asset_id,
+            legacy_reserved_bytes,
+        )
+        .await
+        {
+            tracing::error!(asset_id, error = %release_error, "failed to release legacy source reservation");
+        }
         billing::refund_upload_reservation(&state, &billing_reservation).await;
         if byte_count.load(Ordering::Relaxed) > state.config.max_upload_bytes
             || upload_error_is_payload_too_large(&error)
@@ -4650,8 +5751,10 @@ async fn create_video_inner(
         let mut tx = state.db.begin().await.map_err(AppError::internal)?;
         let source_artifact_id: String = sqlx::query_scalar(
             "
-            INSERT INTO rend.artifacts (asset_id, kind, object_key, content_type, byte_size)
-            VALUES ($1::uuid, 'source', $2, $3, $4)
+            INSERT INTO rend.artifacts (
+              asset_id, kind, object_key, storage_object_key, content_type, byte_size
+            )
+            VALUES ($1::uuid, 'source', $2, $2, $3, $4)
             RETURNING id::text
             ",
         )
@@ -4683,6 +5786,16 @@ async fn create_video_inner(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+
+        uploads::finalize_legacy_source(
+            &mut tx,
+            &auth.organization_id,
+            &asset_id,
+            legacy_reserved_bytes,
+            byte_size,
+        )
+        .await
+        .map_err(upload_app_error)?;
 
         if !state.config.inline_media_processing {
             let media_job_id = jobs::enqueue_media_processing_job(
@@ -4720,7 +5833,26 @@ async fn create_video_inner(
     let (source_artifact_id, queued_for_async_processing) = match persist_upload_result {
         Ok(value) => value,
         Err(error) => {
-            mark_asset_failed(&state, &asset_id).await;
+            if let Err(delete_error) = state
+                .source_s3
+                .delete_object()
+                .bucket(&state.config.source_bucket)
+                .key(&source_object_key)
+                .send()
+                .await
+            {
+                tracing::warn!(asset_id, error = %delete_error, "failed to delete uncommitted legacy source object");
+            }
+            if let Err(release_error) = uploads::release_legacy_source(
+                &state.db,
+                &auth.organization_id,
+                &asset_id,
+                legacy_reserved_bytes,
+            )
+            .await
+            {
+                tracing::error!(asset_id, error = %release_error, "failed to release uncommitted legacy source reservation");
+            }
             billing::refund_upload_reservation(&state, &billing_reservation).await;
             return Err(error);
         }
@@ -4751,11 +5883,14 @@ async fn create_video_inner(
     let media_outcome = media::process_uploaded_source(media::ProcessMediaRequest {
         asset_id: asset_id.clone(),
         source_object_key: source_object_key.clone(),
+        source_bucket: state.config.source_bucket.clone(),
+        source_s3: state.source_s3.clone(),
         s3_bucket: state.config.s3_bucket.clone(),
         s3: state.s3.clone(),
         db: state.db.clone(),
         config: state.config.media_processing.clone(),
         public_playback_alias: state.config.public_playback_alias.clone(),
+        fence: None,
     })
     .await
     .map_err(AppError::internal)?;
@@ -4825,23 +5960,84 @@ async fn create_video_inner(
     })
 }
 
-async fn process_next_media_job(state: Arc<AppState>) -> Result<bool> {
-    let Some(job) = jobs::claim_next_media_job(
+async fn process_next_media_job(
+    state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<bool> {
+    set_ecs_task_scale_in_protection(&state, true)
+        .await
+        .context("failed to acquire ECS task scale-in protection")?;
+    if *shutdown.borrow() {
+        set_ecs_task_scale_in_protection(&state, false)
+            .await
+            .context("failed to release ECS task scale-in protection")?;
+        return Ok(false);
+    }
+    let claimed = jobs::claim_next_media_job(
         &state.db,
         &state.config.media_worker.worker_id,
-        state.config.media_worker.lock_timeout,
+        state.config.media_worker.lease_duration,
+        state.config.media_worker.max_active_jobs_per_organization,
     )
-    .await
-    .context("failed to claim media job")?
-    else {
-        return Ok(false);
+    .await;
+    let job = match claimed {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            set_ecs_task_scale_in_protection(&state, false)
+                .await
+                .context("failed to release ECS task scale-in protection")?;
+            return Ok(false);
+        }
+        Err(error) => {
+            if let Err(release_error) = set_ecs_task_scale_in_protection(&state, false).await {
+                tracing::error!(error = %release_error, "failed to release ECS task scale-in protection after claim error");
+            }
+            return Err(error).context("failed to claim media job");
+        }
     };
 
-    process_media_job(&state, job).await;
+    process_media_job(&state, job, shutdown).await;
+    if let Err(error) = set_ecs_task_scale_in_protection(&state, false).await {
+        tracing::error!(error = %error, "failed to release ECS task scale-in protection");
+    }
     Ok(true)
 }
 
-async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
+async fn set_ecs_task_scale_in_protection(state: &AppState, enabled: bool) -> Result<()> {
+    let Ok(agent_uri) = std::env::var("ECS_AGENT_URI") else {
+        return Ok(());
+    };
+    let agent_uri = agent_uri.trim().trim_end_matches('/');
+    if agent_uri.is_empty() {
+        return Ok(());
+    }
+    let mut body = serde_json::json!({ "ProtectionEnabled": enabled });
+    if enabled {
+        body["ExpiresInMinutes"] = serde_json::json!(1500);
+    }
+    state
+        .http
+        .put(format!("{agent_uri}/task-protection/v1/state"))
+        .json(&body)
+        .send()
+        .await
+        .context("failed to call the ECS task protection endpoint")?
+        .error_for_status()
+        .context("ECS task protection endpoint rejected the update")?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum MediaCancellation {
+    LeaseLost,
+    Shutdown,
+}
+
+async fn process_media_job(
+    state: &AppState,
+    job: jobs::MediaJob,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tracing::info!(
         job_id = %job.id,
         asset_id = %job.asset_id,
@@ -4851,15 +6047,144 @@ async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
         "media worker claimed job",
     );
 
-    match process_media_job_inner(state, &job).await {
-        Ok(()) => {
-            if let Err(error) = jobs::mark_media_job_succeeded(&state.db, &job.id).await {
-                tracing::error!(
+    let started = Instant::now();
+    let mut heartbeat = tokio::time::interval(state.config.media_worker.heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut processing = Box::pin(process_media_job_inner(state, &job));
+    let mut shutdown_deadline: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    let processing_result = loop {
+        tokio::select! {
+            result = &mut processing => break Some(result),
+            changed = shutdown.changed(), if shutdown_deadline.is_none() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    tracing::info!(
+                        job_id = %job.id,
+                        grace_seconds = state.config.media_worker.shutdown_grace.as_secs(),
+                        "media worker draining active job after shutdown signal",
+                    );
+                    shutdown_deadline = Some(Box::pin(tokio::time::sleep(
+                        state.config.media_worker.shutdown_grace,
+                    )));
+                }
+            }
+            _ = async {
+                match shutdown_deadline.as_mut() {
+                    Some(deadline) => deadline.as_mut().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tracing::warn!(job_id = %job.id, "media worker shutdown grace expired; terminating processing");
+                break None;
+            }
+            _ = heartbeat.tick() => {
+                match jobs::heartbeat_media_job(
+                    &state.db,
+                    &job,
+                    state.config.media_worker.lease_duration,
+                ).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            asset_id = %job.asset_id,
+                            lease_token = %job.lease_token,
+                            "media worker lost its lease; cancelling local processing",
+                        );
+                        break None;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            job_id = %job.id,
+                            asset_id = %job.asset_id,
+                            error = %error,
+                            "media worker heartbeat failed; cancelling local processing",
+                        );
+                        break None;
+                    }
+                }
+            }
+        }
+    };
+    let Some(processing_result) = processing_result else {
+        drop(processing);
+        let cancellation = if *shutdown.borrow() {
+            MediaCancellation::Shutdown
+        } else {
+            MediaCancellation::LeaseLost
+        };
+        cleanup_cancelled_media_attempt(state, &job, cancellation).await;
+        return;
+    };
+    let output_bytes = match &processing_result {
+        Ok(MediaJobDisposition::Completed(output_bytes)) => *output_bytes,
+        _ => 0,
+    };
+    let actual_microusd = i64::try_from(started.elapsed().as_secs().max(1))
+        .unwrap_or(i64::MAX)
+        .saturating_mul(state.config.compute_budget.task_microusd_per_second)
+        .saturating_add(budget::output_transfer_microusd(
+            &state.config.compute_budget,
+            output_bytes,
+        ));
+    if !matches!(processing_result, Ok(MediaJobDisposition::Deferred)) {
+        match budget::reconcile_compute(&state.db, &job, actual_microusd).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(job_id = %job.id, "media compute settlement lost its lease; terminalization skipped");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(job_id = %job.id, error = %error, "failed to reconcile media compute reservation; terminalization skipped");
+                return;
+            }
+        }
+    }
+
+    match processing_result {
+        Ok(MediaJobDisposition::Completed(output_bytes)) => {
+            match jobs::mark_media_job_succeeded(&state.db, &job, actual_microusd, output_bytes)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    job_id = %job.id,
+                    lease_token = %job.lease_token,
+                    "stale media worker could not publish successful terminal state",
+                ),
+                Err(error) => tracing::error!(
                     job_id = %job.id,
                     asset_id = %job.asset_id,
                     error = %error,
                     "failed to mark media job succeeded",
-                );
+                ),
+            }
+        }
+        Ok(MediaJobDisposition::Deferred) => {}
+        Ok(MediaJobDisposition::DeferredUnavailable) => {
+            match jobs::defer_media_job_for_budget(
+                &state.db,
+                &job,
+                Duration::from_secs(60),
+                "asset or organization became unavailable during processing",
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::info!(
+                    job_id = %job.id,
+                    "unavailable media job was already cancelled or fenced"
+                ),
+                Err(error) => tracing::error!(
+                    job_id = %job.id,
+                    error = %error,
+                    "failed to defer unavailable media job"
+                ),
+            }
+        }
+        Ok(MediaJobDisposition::Rejected(reason)) => {
+            if let Err(error) = finalize_failed_media_attempt(&state.db, &job, &reason, true).await
+            {
+                tracing::error!(job_id = %job.id, error = %error, "failed to record over-budget media job rejection");
             }
         }
         Err(error) => {
@@ -4868,14 +6193,64 @@ async fn process_media_job(state: &AppState, job: jobs::MediaJob) {
     }
 }
 
-async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Result<()> {
+async fn cleanup_cancelled_media_attempt(
+    state: &AppState,
+    job: &jobs::MediaJob,
+    cancellation: MediaCancellation,
+) {
+    let reason = match cancellation {
+        MediaCancellation::LeaseLost => "media worker lost its lease",
+        MediaCancellation::Shutdown => "media worker shutdown grace expired",
+    };
+    if let Err(error) = media::cleanup_attempt_prefix(
+        &state.db,
+        &state.s3,
+        &state.config.s3_bucket,
+        &job.asset_id,
+        &job.lease_token,
+    )
+    .await
+    {
+        tracing::warn!(job_id = %job.id, error = %error, "failed to clean cancelled media attempt objects");
+    }
+    if let Err(error) = uploads::release_media_output_reservation(
+        &state.db,
+        job,
+        "media_output_released_worker_cancellation",
+    )
+    .await
+    {
+        tracing::warn!(job_id = %job.id, error = %error, "failed to release cancelled media output reservation");
+        return;
+    }
+    match budget::reconcile_compute(&state.db, job, 0).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(job_id = %job.id, error = %error, "failed to release cancelled media compute reservation");
+            return;
+        }
+    }
+    match jobs::mark_media_job_retryable(&state.db, job, reason, Duration::ZERO).await {
+        Ok(true) => {}
+        Ok(false) => tracing::info!(job_id = %job.id, "cancelled media lease was already fenced"),
+        Err(error) => {
+            tracing::warn!(job_id = %job.id, error = %error, "failed to release cancelled media lease")
+        }
+    }
+}
+
+async fn process_media_job_inner(
+    state: &AppState,
+    job: &jobs::MediaJob,
+) -> Result<MediaJobDisposition> {
     if asset_is_unavailable_for_media_processing(&state.db, &job.asset_id).await? {
         tracing::info!(
             job_id = %job.id,
             asset_id = %job.asset_id,
             "media job asset is deleted, suspended, or missing",
         );
-        return Ok(());
+        return Ok(MediaJobDisposition::DeferredUnavailable);
     }
 
     if asset_is_already_playable(&state.db, &job.asset_id).await? {
@@ -4884,7 +6259,7 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
             asset_id = %job.asset_id,
             "media job asset is already playable",
         );
-        return Ok(());
+        return Ok(MediaJobDisposition::Completed(0));
     }
 
     if !mark_asset_media_processing_started(&state.db, &job.asset_id)
@@ -4896,22 +6271,115 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
             asset_id = %job.asset_id,
             "media job skipped because asset was deleted or suspended before processing started",
         );
-        return Ok(());
+        return Ok(MediaJobDisposition::Completed(0));
     }
 
-    let source_object_key = fetch_source_object_key(&state.db, &job.asset_id)
-        .await
-        .context("failed to fetch source artifact for media job")?;
-    let outcome = media::try_process_uploaded_source(&media::ProcessMediaRequest {
+    let (source_object_key, source_bytes) =
+        fetch_source_artifact(&state.db, &job.asset_id)
+            .await
+            .context("failed to fetch source artifact for media job")?;
+    let mut media_request = media::ProcessMediaRequest {
         asset_id: job.asset_id.clone(),
         source_object_key,
+        source_bucket: state.config.source_bucket.clone(),
+        source_s3: state.source_s3.clone(),
         s3_bucket: state.config.s3_bucket.clone(),
         s3: state.s3.clone(),
         db: state.db.clone(),
         config: state.config.media_processing.clone(),
         public_playback_alias: state.config.public_playback_alias.clone(),
-    })
-    .await?;
+        fence: Some(media::MediaJobFence {
+            job_id: job.id.clone(),
+            lease_token: job.lease_token.clone(),
+            worker_id: job.worker_id.clone(),
+        }),
+    };
+    let source = media::probe_uploaded_source(&media_request)
+        .await
+        .context("failed to probe streamed source before compute admission")?;
+    let estimated_output_bytes = uploads::estimate_processed_bytes(
+        source.duration_ms,
+        source.width,
+        source.height,
+        source_bytes,
+    );
+    if !uploads::reserve_media_output(&state.db, job, estimated_output_bytes).await? {
+        jobs::defer_media_job_for_budget(
+            &state.db,
+            job,
+            Duration::from_secs(60 * 60),
+            "processed artifact storage budget is unavailable",
+        )
+        .await?;
+        return Ok(MediaJobDisposition::Deferred);
+    }
+    let estimate = budget::estimate_compute(
+        &state.config.compute_budget,
+        source.duration_ms,
+        source.width,
+        source.height,
+        estimated_output_bytes,
+    );
+    let estimate =
+        match budget::reserve_compute(&state.db, job, &state.config.compute_budget, estimate)
+            .await?
+        {
+            budget::Admission::Reserved(estimate) => estimate,
+            budget::Admission::DeferredBudget => {
+                uploads::release_media_output_reservation(
+                    &state.db,
+                    job,
+                    "media_output_released_compute_budget",
+                )
+                .await?;
+                jobs::defer_media_job_for_budget(
+                    &state.db,
+                    job,
+                    Duration::from_secs(60 * 60),
+                    "monthly media processing budget is fully reserved",
+                )
+                .await?;
+                return Ok(MediaJobDisposition::Deferred);
+            }
+            budget::Admission::ExceedsJobCeiling => {
+                uploads::release_media_output_reservation(
+                    &state.db,
+                    job,
+                    "media_output_released_job_ceiling",
+                )
+                .await?;
+                return Ok(MediaJobDisposition::Rejected(
+                    "estimated processing cost exceeds the configured per-job ceiling".to_owned(),
+                ));
+            }
+            budget::Admission::LeaseLost => return Ok(MediaJobDisposition::Deferred),
+        };
+    media_request.config.process_timeout = estimate.task_deadline;
+    let outcome = tokio::time::timeout(
+        estimate.task_deadline,
+        media::try_process_uploaded_source(&media_request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("media processing exceeded its reserved compute deadline"))??;
+
+    if outcome.unavailable {
+        media::cleanup_attempt_prefix(
+            &state.db,
+            &state.s3,
+            &state.config.s3_bucket,
+            &job.asset_id,
+            &job.lease_token,
+        )
+        .await
+        .context("failed to clean unavailable media attempt objects")?;
+        uploads::release_media_output_reservation(
+            &state.db,
+            job,
+            "media_output_released_asset_unavailable",
+        )
+        .await?;
+        return Ok(MediaJobDisposition::DeferredUnavailable);
+    }
 
     maybe_warm_edge(
         Some(&state.db),
@@ -4925,63 +6393,57 @@ async fn process_media_job_inner(state: &AppState, job: &jobs::MediaJob) -> Resu
     .await;
     billing::schedule_delivery_usage_sync(Arc::new(state.clone()));
 
-    Ok(())
+    Ok(MediaJobDisposition::Completed(outcome.output_bytes))
 }
 
 async fn handle_media_job_failure(state: &AppState, job: &jobs::MediaJob, error: anyhow::Error) {
     let last_error = bounded_error_message(&error);
-    let final_attempt = jobs::is_final_attempt(job.attempts, job.max_attempts);
-    record_media_processing_failed_event(
+    tracing::warn!(
+        job_id = %job.id,
+        asset_id = %job.asset_id,
+        attempt = job.attempts,
+        max_attempts = job.max_attempts,
+        error = %last_error,
+        "media job processing failed",
+    );
+    if let Err(cleanup_error) = media::cleanup_attempt_prefix(
         &state.db,
+        &state.s3,
+        &state.config.s3_bucket,
         &job.asset_id,
-        job.attempts,
-        job.max_attempts,
-        final_attempt,
-        &last_error,
+        &job.lease_token,
     )
-    .await;
-
-    if final_attempt {
-        if let Err(error) = media::set_asset_media_failed(&state.db, &job.asset_id).await {
-            tracing::error!(
-                job_id = %job.id,
-                asset_id = %job.asset_id,
-                error = %error,
-                "failed to mark asset media processing failed",
-            );
-        }
-        if let Err(error) = jobs::mark_media_job_failed(&state.db, &job.id, &last_error).await {
-            tracing::error!(
-                job_id = %job.id,
-                asset_id = %job.asset_id,
-                error = %error,
-                "failed to mark media job failed",
-            );
-        }
-        return;
-    }
-
-    if let Err(error) = mark_asset_media_processing_retryable(&state.db, &job.asset_id).await {
+    .await
+    {
         tracing::warn!(
             job_id = %job.id,
-            asset_id = %job.asset_id,
-            error = %error,
-            "failed to reset asset state before media retry",
+            error = %cleanup_error,
+            "failed to clean failed media attempt objects",
         );
     }
-    if let Err(error) = jobs::mark_media_job_retryable(
+    if let Err(release_error) = uploads::release_media_output_reservation(
         &state.db,
-        &job.id,
-        &last_error,
-        jobs::retry_backoff(job.attempts),
+        job,
+        "media_output_released_processing_failure",
     )
     .await
     {
         tracing::error!(
             job_id = %job.id,
+            error = %release_error,
+            "failed to release media output storage reservation",
+        );
+        return;
+    }
+    let final_attempt = jobs::is_final_attempt(job.attempts, job.max_attempts);
+    if let Err(error) =
+        finalize_failed_media_attempt(&state.db, job, &last_error, final_attempt).await
+    {
+        tracing::error!(
+            job_id = %job.id,
             asset_id = %job.asset_id,
             error = %error,
-            "failed to requeue media job",
+            "failed to fence and finalize media job failure",
         );
     }
 }
@@ -4999,10 +6461,7 @@ async fn asset_is_already_playable(db: &PgPool, asset_id: &str) -> Result<bool> 
     .fetch_optional(db)
     .await?;
 
-    Ok(matches!(
-        playable_state.as_deref(),
-        Some("opener_ready" | "hls_ready")
-    ))
+    Ok(playable_state.as_deref() == Some("hls_ready"))
 }
 
 async fn asset_is_unavailable_for_media_processing(db: &PgPool, asset_id: &str) -> Result<bool> {
@@ -5023,10 +6482,10 @@ async fn asset_is_unavailable_for_media_processing(db: &PgPool, asset_id: &str) 
     Ok(unavailable.unwrap_or(true))
 }
 
-async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> {
-    let object_key: Option<String> = sqlx::query_scalar(
+async fn fetch_source_artifact(db: &PgPool, asset_id: &str) -> Result<(String, i64)> {
+    let artifact: Option<(String, i64)> = sqlx::query_as(
         "
-        SELECT object_key
+        SELECT storage_object_key, byte_size
         FROM rend.artifacts
         WHERE asset_id = $1::uuid
           AND kind = 'source'
@@ -5038,7 +6497,7 @@ async fn fetch_source_object_key(db: &PgPool, asset_id: &str) -> Result<String> 
     .fetch_optional(db)
     .await?;
 
-    object_key.ok_or_else(|| anyhow::anyhow!("source artifact is missing"))
+    artifact.ok_or_else(|| anyhow::anyhow!("source artifact is missing"))
 }
 
 async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Result<bool> {
@@ -5052,7 +6511,7 @@ async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Res
         FROM rend.assets asset
         INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
         WHERE asset.id = $1::uuid
-        FOR UPDATE
+        FOR UPDATE OF asset
         ",
     )
     .bind(asset_id)
@@ -5094,52 +6553,148 @@ async fn mark_asset_media_processing_started(db: &PgPool, asset_id: &str) -> Res
     Ok(true)
 }
 
-async fn mark_asset_media_processing_retryable(db: &PgPool, asset_id: &str) -> Result<()> {
-    sqlx::query(
+async fn finalize_failed_media_attempt(
+    db: &PgPool,
+    job: &jobs::MediaJob,
+    reason: &str,
+    terminal: bool,
+) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let asset: Option<(String, bool, bool, bool)> = sqlx::query_as(
         "
-        UPDATE rend.assets
-        SET source_state = 'uploaded',
-            playable_state = 'not_playable'
-        WHERE id = $1::uuid
-          AND playable_state = 'not_playable'
-          AND deleted_at IS NULL
-          AND suspended_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM rend_auth.organization org
-            WHERE org.id = rend.assets.organization_id
-              AND org.suspended_at IS NOT NULL
-          )
+        SELECT asset.playable_state,
+               asset.deleted_at IS NOT NULL,
+               asset.suspended_at IS NOT NULL,
+               org.suspended_at IS NOT NULL
+        FROM rend.assets asset
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE asset.id = $1::uuid
+        FOR UPDATE OF asset
         ",
     )
-    .bind(asset_id)
-    .execute(db)
+    .bind(&job.asset_id)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(())
-}
-
-async fn record_media_processing_failed_event(
-    db: &PgPool,
-    asset_id: &str,
-    attempt: i32,
-    max_attempts: i32,
-    final_attempt: bool,
-    reason: &str,
-) {
-    if let Err(error) = events::insert_asset_event_pool(
-        db,
-        asset_id,
-        events::EVENT_MEDIA_PROCESSING_FAILED,
-        events::media_processing_failed_metadata(attempt, max_attempts, final_attempt, reason),
+    let active: Option<String> = sqlx::query_scalar(
+        "
+        SELECT id::text
+        FROM rend.media_jobs
+        WHERE id = $1::uuid AND lease_token = $2::uuid AND locked_by = $3
+          AND status = 'running' AND lease_expires_at > now()
+        FOR UPDATE
+        ",
     )
-    .await
-    {
-        tracing::warn!(
-            asset_id,
-            error = %error,
-            "failed to record media processing failure event",
-        );
+    .bind(&job.id)
+    .bind(&job.lease_token)
+    .bind(&job.worker_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active.is_none() {
+        tx.commit().await?;
+        return Ok(false);
     }
+
+    if let Some((playable_state, deleted, asset_suspended, org_suspended)) = asset
+        && !deleted
+        && !asset_suspended
+        && !org_suspended
+    {
+        events::insert_asset_event(
+            &mut tx,
+            &job.asset_id,
+            events::EVENT_MEDIA_PROCESSING_FAILED,
+            events::media_processing_failed_metadata(
+                job.attempts,
+                job.max_attempts,
+                terminal,
+                reason,
+            ),
+        )
+        .await?;
+        if terminal {
+            if matches!(playable_state.as_str(), "opener_ready" | "hls_ready") {
+                sqlx::query("UPDATE rend.assets SET source_state = 'uploaded' WHERE id = $1::uuid")
+                    .bind(&job.asset_id)
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                sqlx::query(
+                    "
+                    UPDATE rend.assets
+                    SET source_state = 'uploaded', playable_state = 'failed',
+                        current_opener_artifact_id = NULL
+                    WHERE id = $1::uuid
+                    ",
+                )
+                .bind(&job.asset_id)
+                .execute(&mut *tx)
+                .await?;
+                if playable_state != "failed" {
+                    events::insert_asset_event(
+                        &mut tx,
+                        &job.asset_id,
+                        events::EVENT_PLAYABLE_STATE_CHANGED,
+                        events::playable_state_changed_metadata(&playable_state, "failed"),
+                    )
+                    .await?;
+                }
+            }
+        } else {
+            sqlx::query("UPDATE rend.assets SET source_state = 'uploaded' WHERE id = $1::uuid")
+                .bind(&job.asset_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    let delay_seconds =
+        i64::try_from(jobs::retry_backoff(job.attempts).as_secs()).unwrap_or(i64::MAX);
+    let job_status = if terminal {
+        jobs::STATUS_FAILED
+    } else {
+        jobs::STATUS_QUEUED
+    };
+    let attempt_status = if terminal { "failed" } else { "retryable" };
+    let updated = sqlx::query(
+        "
+        UPDATE rend.media_jobs
+        SET status = $4, last_error = $5,
+            locked_at = NULL, locked_by = NULL, lease_token = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            completed_at = CASE WHEN $6 THEN now() ELSE NULL END,
+            run_after = CASE WHEN $6 THEN now() ELSE now() + ($7::bigint * interval '1 second') END
+        WHERE id = $1::uuid AND lease_token = $2::uuid AND locked_by = $3
+          AND status = 'running'
+        ",
+    )
+    .bind(&job.id)
+    .bind(&job.lease_token)
+    .bind(&job.worker_id)
+    .bind(job_status)
+    .bind(reason)
+    .bind(terminal)
+    .bind(delay_seconds)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "
+        UPDATE rend.media_job_attempts
+        SET status = $3, finished_at = now(), error = $4
+        WHERE job_id = $1::uuid AND lease_token = $2::uuid AND status = 'running'
+        ",
+    )
+    .bind(&job.id)
+    .bind(&job.lease_token)
+    .bind(attempt_status)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 fn counted_body_stream(body: Body, byte_count: Arc<AtomicU64>, max_bytes: u64) -> ByteStream {
@@ -5377,9 +6932,10 @@ async fn origin_playback_artifact_full_bytes(
     state: &AppState,
     artifact: &OriginPlaybackArtifact,
 ) -> Result<(Bytes, &'static str, &'static str), AppError> {
+    let storage_object_key = origin_playback_storage_object_key(state, artifact).await?;
     let cache_ttl = origin_playback_cache_ttl(artifact);
     if let Some(ttl) = cache_ttl
-        && let Some(entry) = state.origin_playback_cache.get(&artifact.object_key, ttl)
+        && let Some(entry) = state.origin_playback_cache.get(&storage_object_key, ttl)
     {
         return Ok((entry.bytes, entry.content_type, "HIT"));
     }
@@ -5388,7 +6944,7 @@ async fn origin_playback_artifact_full_bytes(
         .s3
         .get_object()
         .bucket(&state.config.s3_bucket)
-        .key(&artifact.object_key)
+        .key(&storage_object_key)
         .send()
         .await
         .map_err(|error| origin_playback_artifact_error(artifact, error))?;
@@ -5401,7 +6957,7 @@ async fn origin_playback_artifact_full_bytes(
 
     if cache_ttl.is_some() {
         state.origin_playback_cache.insert(
-            artifact.object_key.clone(),
+            storage_object_key,
             bytes.clone(),
             artifact.content_type,
         );
@@ -5409,6 +6965,33 @@ async fn origin_playback_artifact_full_bytes(
     }
 
     Ok((bytes, artifact.content_type, "BYPASS"))
+}
+
+async fn origin_playback_storage_object_key(
+    state: &AppState,
+    artifact: &OriginPlaybackArtifact,
+) -> Result<String, AppError> {
+    let storage_object_key: Option<String> = sqlx::query_scalar(
+        "
+        SELECT stored.storage_object_key
+        FROM rend.artifacts stored
+        INNER JOIN rend.assets asset ON asset.id = stored.asset_id
+        INNER JOIN rend_auth.organization organization
+          ON organization.id = asset.organization_id
+        WHERE stored.asset_id = $1::uuid
+          AND stored.object_key = $2
+          AND asset.deleted_at IS NULL
+          AND asset.suspended_at IS NULL
+          AND organization.suspended_at IS NULL
+        ",
+    )
+    .bind(&artifact.asset_id)
+    .bind(&artifact.object_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::internal)?;
+
+    storage_object_key.ok_or_else(|| AppError::not_found("artifact not found"))
 }
 
 async fn origin_playback_progressive_fmp4_response(
@@ -5642,6 +7225,7 @@ fn origin_playback_artifact_response_builder(
 fn origin_playback_artifact_response(
     artifact: OriginPlaybackArtifact,
     object: aws_sdk_s3::operation::get_object::GetObjectOutput,
+    storage_object_key: String,
 ) -> Response {
     let content_length = object
         .content_length()
@@ -5668,7 +7252,7 @@ fn origin_playback_artifact_response(
     builder
         .body(Body::from_stream(byte_stream_body(
             object.body,
-            artifact.object_key,
+            storage_object_key,
         )))
         .expect("origin artifact response headers are valid")
 }
@@ -5844,21 +7428,16 @@ async fn edge_warm_fanout_targets(
     registry: &EdgeRegistryConfig,
     config: &EdgeWarmConfig,
 ) -> Vec<EdgeFanoutTarget> {
-    let mut targets = registered_edge_fanout_targets(db, registry, "warm").await;
-    if !targets.is_empty() {
-        return targets;
-    }
-
     if let Some(url) = config.url.as_deref() {
-        targets.push(EdgeFanoutTarget {
+        return vec![EdgeFanoutTarget {
             edge_id: "single-edge-env-fallback".to_owned(),
             region: None,
             action_url: url.to_owned(),
             source: "env_fallback",
-        });
+        }];
     }
 
-    targets
+    registered_edge_fanout_targets(db, registry, "warm").await
 }
 
 async fn registered_edge_fanout_targets(
@@ -6306,21 +7885,16 @@ async fn edge_purge_fanout_targets(
     registry: &EdgeRegistryConfig,
     config: &EdgePurgeConfig,
 ) -> Vec<EdgeFanoutTarget> {
-    let mut targets = registered_edge_fanout_targets(Some(db), registry, "purge").await;
-    if !targets.is_empty() {
-        return targets;
-    }
-
     if let Some(url) = config.url.as_deref() {
-        targets.push(EdgeFanoutTarget {
+        return vec![EdgeFanoutTarget {
             edge_id: "single-edge-env-fallback".to_owned(),
             region: None,
             action_url: url.to_owned(),
             source: "env_fallback",
-        });
+        }];
     }
 
-    targets
+    registered_edge_fanout_targets(Some(db), registry, "purge").await
 }
 
 async fn record_edge_purge_event(db: &PgPool, asset_id: &str, event_type: &str, metadata: Value) {
@@ -6394,30 +7968,6 @@ fn bounded_error_message(error: &anyhow::Error) -> String {
     }
 }
 
-async fn mark_asset_failed(state: &AppState, asset_id: &str) {
-    if let Err(error) = sqlx::query(
-        "
-        UPDATE rend.assets
-        SET source_state = 'failed', playable_state = 'not_playable'
-        WHERE id = $1::uuid
-          AND deleted_at IS NULL
-          AND suspended_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM rend_auth.organization org
-            WHERE org.id = rend.assets.organization_id
-              AND org.suspended_at IS NOT NULL
-          )
-        ",
-    )
-    .bind(asset_id)
-    .execute(&state.db)
-    .await
-    {
-        tracing::warn!(asset_id, error = %error, "failed to mark asset upload as failed");
-    }
-}
-
 async fn require_api_auth(
     State(state): State<Arc<AppState>>,
     mut request: Request<Body>,
@@ -6485,36 +8035,45 @@ fn dashboard_upload_token_auth(
         return Ok(None);
     };
 
-    if claims.v != 1 {
-        return Ok(None);
-    }
     if claims.exp < current_unix_timestamp().map_err(AppError::internal)? {
         return Ok(None);
     }
 
     let organization_id = normalize_org_id(&claims.org_id)?;
-    let content_type = request_content_type(headers);
-    if content_type != claims.content_type {
-        return Err(AppError::forbidden(
-            "upload token does not match content-type",
-        ));
-    }
-
-    let content_length = request_content_length(headers, state.config.max_upload_bytes)?;
-    match (claims.content_length, content_length) {
-        (Some(expected), Some(actual)) if i64::try_from(expected).ok() == Some(actual) => {}
-        (Some(_), _) => {
+    match claims.v {
+        1 => {
+            let content_type = request_content_type(headers);
+            if content_type != claims.content_type {
+                return Err(AppError::forbidden(
+                    "upload token does not match content-type",
+                ));
+            }
+            let content_length = request_content_length(headers, state.config.max_upload_bytes)?;
+            match (claims.content_length, content_length) {
+                (Some(expected), Some(actual)) if i64::try_from(expected).ok() == Some(actual) => {}
+                (Some(_), _) => {
+                    return Err(AppError::forbidden(
+                        "upload token does not match content-length",
+                    ));
+                }
+                (None, _) => {}
+            }
+        }
+        2 if claims.purpose.as_deref() == Some("multipart_upload")
+            && claims.content_length.is_some()
+            && !claims.content_type.trim().is_empty() => {}
+        _ => {
             return Err(AppError::forbidden(
-                "upload token does not match content-length",
+                "upload token has an unsupported purpose or version",
             ));
         }
-        (None, _) => {}
     }
 
     Ok(Some(RequestAuth {
         organization_id,
         scopes: [ApiScope::Upload].into_iter().collect(),
         credential: RequestCredential::DashboardUploadToken,
+        upload_claims: Some(claims),
     }))
 }
 
@@ -6585,6 +8144,7 @@ async fn lookup_api_key_auth(db: &PgPool, token: &str) -> Result<Option<RequestA
         organization_id,
         scopes: parse_api_scopes(scope_values)?,
         credential: RequestCredential::ApiKey,
+        upload_claims: None,
     }))
 }
 
@@ -6947,28 +8507,6 @@ async fn insert_operator_audit_record(
     .map_err(AppError::internal)
 }
 
-async fn fetch_active_asset_ids_for_org(
-    db: &PgPool,
-    organization_id: &str,
-) -> Result<Vec<String>, AppError> {
-    let organization_id = normalize_org_id(organization_id)?;
-    let rows: Vec<String> = sqlx::query_scalar(
-        "
-        SELECT id::text
-        FROM rend.assets
-        WHERE organization_id = $1::uuid
-          AND deleted_at IS NULL
-        ORDER BY created_at DESC, id DESC
-        ",
-    )
-    .bind(organization_id)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::internal)?;
-
-    Ok(rows)
-}
-
 fn secret_matches(provided: &str, expected: &str) -> bool {
     if expected.is_empty() || provided.is_empty() {
         return false;
@@ -6995,23 +8533,6 @@ async fn check_postgres(state: &AppState) -> DependencyCheck {
     match sqlx::query("select 1").execute(&state.db).await {
         Ok(_) => ok_check("postgres", started),
         Err(error) => failed_check("postgres", started, error),
-    }
-}
-
-async fn check_redis(state: &AppState) -> DependencyCheck {
-    let started = Instant::now();
-    let result = async {
-        let client = redis::Client::open(state.config.redis_url.as_str())?;
-        let mut connection = client.get_multiplexed_async_connection().await?;
-        let pong: String = redis::cmd("PING").query_async(&mut connection).await?;
-        anyhow::ensure!(pong == "PONG", "unexpected Redis response: {pong}");
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-
-    match result {
-        Ok(()) => ok_check("redis", started),
-        Err(error) => failed_check("redis", started, error),
     }
 }
 

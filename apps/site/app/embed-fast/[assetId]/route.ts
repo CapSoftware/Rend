@@ -44,6 +44,11 @@ const BOOTSTRAP_TIMEOUT_MS = 1500;
 const INLINE_STARTUP_TIMEOUT_MS = 900;
 const INLINE_STARTUP_MAX_BYTES = 512 * 1024;
 const PLAYBACK_COOKIE_NAME = "__rend_playback";
+const CLOUDFRONT_COOKIE_NAMES = [
+  "CloudFront-Policy",
+  "CloudFront-Signature",
+  "CloudFront-Key-Pair-Id",
+] as const;
 
 function normalizeAssetId(value: string) {
   const assetId = value.trim().toLowerCase();
@@ -126,15 +131,28 @@ function safeCookieValue(value: string | undefined) {
   return /^[a-zA-Z0-9._~-]+$/.test(value) ? value : undefined;
 }
 
-function playbackCookieFromSetCookieHeaders(headers: Headers) {
-  for (const value of setCookieHeaders(headers)) {
-    const match = value.match(
-      new RegExp(`(?:^|,\\s*)${PLAYBACK_COOKIE_NAME}=([^;,\\s]+)`),
-    );
-    const cookie = safeCookieValue(match?.[1]);
-    if (cookie) return cookie;
+function playbackAuthorizationCookieHeader(headers: Headers) {
+  const allowedNames = [PLAYBACK_COOKIE_NAME, ...CLOUDFRONT_COOKIE_NAMES];
+  const cookies = new Map<string, string>();
+  for (const header of setCookieHeaders(headers)) {
+    for (const name of allowedNames) {
+      const match = header.match(new RegExp(`(?:^|,\\s*)${name}=([^;,\\s]+)`));
+      const value = safeCookieValue(match?.[1]);
+      if (value) cookies.set(name, value);
+    }
   }
-  return undefined;
+  const playbackCookie = cookies.get(PLAYBACK_COOKIE_NAME);
+  if (!playbackCookie) return undefined;
+  const cloudFrontCount = CLOUDFRONT_COOKIE_NAMES.filter((name) => cookies.has(name)).length;
+  if (cloudFrontCount !== 0 && cloudFrontCount !== CLOUDFRONT_COOKIE_NAMES.length) {
+    return undefined;
+  }
+  return allowedNames
+    .flatMap((name) => {
+      const value = cookies.get(name);
+      return value ? [`${name}=${value}`] : [];
+    })
+    .join("; ");
 }
 
 function html(value: unknown) {
@@ -330,12 +348,12 @@ function absoluteSegmentUrls(playlistUrl: string, segmentNames: string[]) {
   });
 }
 
-async function fetchText(url: string, cookie: string | undefined) {
+async function fetchText(url: string, cookieHeader: string | undefined) {
   const response = await fetch(url, {
     cache: "no-store",
     headers: {
       accept: "application/vnd.apple.mpegurl,text/plain,*/*",
-      ...(cookie ? { cookie: `${PLAYBACK_COOKIE_NAME}=${cookie}` } : {}),
+      ...(cookieHeader ? { cookie: cookieHeader } : {}),
     },
     signal: AbortSignal.timeout(INLINE_STARTUP_TIMEOUT_MS),
   });
@@ -343,12 +361,12 @@ async function fetchText(url: string, cookie: string | undefined) {
   return response.text();
 }
 
-async function fetchBytes(url: string, cookie: string | undefined) {
+async function fetchBytes(url: string, cookieHeader: string | undefined) {
   const response = await fetch(url, {
     cache: "no-store",
     headers: {
       accept: "video/mp4,*/*",
-      ...(cookie ? { cookie: `${PLAYBACK_COOKIE_NAME}=${cookie}` } : {}),
+      ...(cookieHeader ? { cookie: cookieHeader } : {}),
     },
     signal: AbortSignal.timeout(INLINE_STARTUP_TIMEOUT_MS),
   });
@@ -375,17 +393,17 @@ async function inlineStartupForSelection(
   const playlistUrl = playlistUrlForRendition(bootstrap, rendition);
   const initUrl = playbackHint(bootstrap, `hls/${rendition}/init_${rendition}.mp4`)?.url;
   const firstSegmentUrl = playbackHint(bootstrap, `hls/${rendition}/segment_00000.m4s`)?.url;
-  const cookie = bootstrapResponse
-    ? playbackCookieFromSetCookieHeaders(bootstrapResponse.headers)
+  const cookieHeader = bootstrapResponse
+    ? playbackAuthorizationCookieHeader(bootstrapResponse.headers)
     : undefined;
-  if (!playlistUrl || !initUrl || !firstSegmentUrl || !cookie) return null;
+  if (!playlistUrl || !initUrl || !firstSegmentUrl || !cookieHeader) return null;
 
   try {
     const [master, playlist, initBytes, firstSegmentBytes] = await Promise.all([
-      fetchText(bootstrap.manifest_url, cookie),
-      fetchText(playlistUrl, cookie),
-      fetchBytes(initUrl, cookie),
-      fetchBytes(firstSegmentUrl, cookie),
+      fetchText(bootstrap.manifest_url, cookieHeader),
+      fetchText(playlistUrl, cookieHeader),
+      fetchBytes(initUrl, cookieHeader),
+      fetchBytes(firstSegmentUrl, cookieHeader),
     ]);
     const startupBytes = initBytes.byteLength + firstSegmentBytes.byteLength;
     if (startupBytes <= 0 || startupBytes > INLINE_STARTUP_MAX_BYTES) {

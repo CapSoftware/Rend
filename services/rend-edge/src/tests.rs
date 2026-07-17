@@ -246,20 +246,25 @@ async fn fake_fast_embed(
         .lock()
         .unwrap()
         .push(format!("{asset_id}|{playback_base_url}"));
-    (
+    let mut response = (
         StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (
-                header::SET_COOKIE,
-                "__rend_playback=test-token; Path=/v/; HttpOnly; SameSite=Lax",
-            ),
-        ],
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         format!(
             r#"<!doctype html><video data-rend-player-selected="mse_inline"></video><script>const u="{playback_base_url}/v/{asset_id}/hls/360p/segment_00001.m4s";</script>"#
         ),
     )
-        .into_response()
+        .into_response();
+    for cookie in [
+        "__rend_playback=test-token; Path=/v/; HttpOnly; SameSite=Lax",
+        "CloudFront-Policy=test-policy; Path=/v/; HttpOnly; SameSite=Lax",
+        "CloudFront-Signature=test-signature; Path=/v/; HttpOnly; SameSite=Lax",
+        "CloudFront-Key-Pair-Id=test-key; Path=/v/; HttpOnly; SameSite=Lax",
+    ] {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, cookie.parse().unwrap());
+    }
+    response
 }
 
 async fn spawn_fake_fast_embed_api() -> (String, Arc<Mutex<Vec<String>>>) {
@@ -327,6 +332,35 @@ fn test_cache_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("rend-edge-{name}-{}", temp_file_suffix()))
 }
 
+#[test]
+fn artifact_resolution_cache_reuses_and_purges_asset_mappings() {
+    let cache = ArtifactResolutionCache::new(10);
+    let logical_key = "videos/asset-1/hls/master.m3u8";
+    let physical_key = "videos/asset-1/attempts/lease-1/hls/master.m3u8";
+    cache.insert(logical_key.to_owned(), physical_key.to_owned());
+
+    assert_eq!(
+        cache.get(logical_key, Duration::from_secs(300)),
+        Some(physical_key.to_owned())
+    );
+
+    cache.remove_asset("asset-1");
+    assert_eq!(cache.get(logical_key, Duration::from_secs(300)), None);
+}
+
+#[test]
+fn artifact_resolution_cache_enforces_entry_bound() {
+    let cache = ArtifactResolutionCache::new(3);
+    for index in 0..5 {
+        cache.insert(
+            format!("videos/asset-{index}/hls/master.m3u8"),
+            format!("videos/asset-{index}/attempts/lease/hls/master.m3u8"),
+        );
+    }
+
+    assert_eq!(cache.len(), 3);
+}
+
 fn test_state(cache_dir: PathBuf, origin_endpoint: String) -> Arc<AppState> {
     test_state_with_max_in_flight(cache_dir, origin_endpoint, DEFAULT_MAX_IN_FLIGHT_FILLS)
 }
@@ -369,9 +403,17 @@ fn test_state_with_max_in_flight_and_telemetry(
         warm_max_artifacts: 4,
         max_in_flight_fills,
         cache_max_bytes: None,
+        validate_cache_origin: false,
         max_origin_artifact_bytes: DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
         cache_min_free_bytes: 0,
         control_plane: None,
+        artifact_resolution_cache_ttl: Duration::from_secs(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_TTL_SECS,
+        ),
+        artifact_resolution_cache_max_entries: DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        asset_availability_cache_ttl: Duration::from_secs(
+            DEFAULT_ASSET_AVAILABILITY_CACHE_TTL_SECS,
+        ),
         fast_embed_control_plane_url: None,
         fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
         request_timeout: Duration::from_secs(10),
@@ -389,6 +431,13 @@ fn test_state_with_max_in_flight_and_telemetry(
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        asset_cache_fences: Arc::new(AssetCacheFenceRegistry::default()),
+        artifact_resolution_cache: Arc::new(ArtifactResolutionCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
+        asset_availability_cache: Arc::new(AssetAvailabilityCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
         fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry,
@@ -420,9 +469,17 @@ fn test_state_with_resource_limits(
         warm_max_artifacts: 4,
         max_in_flight_fills: DEFAULT_MAX_IN_FLIGHT_FILLS,
         cache_max_bytes,
+        validate_cache_origin: false,
         max_origin_artifact_bytes,
         cache_min_free_bytes,
         control_plane: None,
+        artifact_resolution_cache_ttl: Duration::from_secs(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_TTL_SECS,
+        ),
+        artifact_resolution_cache_max_entries: DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        asset_availability_cache_ttl: Duration::from_secs(
+            DEFAULT_ASSET_AVAILABILITY_CACHE_TTL_SECS,
+        ),
         fast_embed_control_plane_url: None,
         fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
         request_timeout: Duration::from_secs(10),
@@ -440,6 +497,13 @@ fn test_state_with_resource_limits(
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        asset_cache_fences: Arc::new(AssetCacheFenceRegistry::default()),
+        artifact_resolution_cache: Arc::new(ArtifactResolutionCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
+        asset_availability_cache: Arc::new(AssetAvailabilityCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
         fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry: telemetry::TelemetryHandle::disabled(),
@@ -470,6 +534,7 @@ fn test_state_with_fast_embed(
         warm_max_artifacts: 4,
         max_in_flight_fills: DEFAULT_MAX_IN_FLIGHT_FILLS,
         cache_max_bytes: None,
+        validate_cache_origin: false,
         max_origin_artifact_bytes: DEFAULT_MAX_ORIGIN_ARTIFACT_BYTES,
         cache_min_free_bytes: 0,
         control_plane: Some(ControlPlaneConfig {
@@ -478,6 +543,13 @@ fn test_state_with_fast_embed(
             cache_max_bytes: None,
             heartbeat_interval: Duration::from_secs(30),
         }),
+        artifact_resolution_cache_ttl: Duration::from_secs(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_TTL_SECS,
+        ),
+        artifact_resolution_cache_max_entries: DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        asset_availability_cache_ttl: Duration::from_secs(
+            DEFAULT_ASSET_AVAILABILITY_CACHE_TTL_SECS,
+        ),
         fast_embed_control_plane_url: Some(fast_embed_control_plane_url),
         fast_embed_cache_ttl: Duration::from_secs(DEFAULT_FAST_EMBED_CACHE_TTL_SECS),
         request_timeout: Duration::from_secs(10),
@@ -495,6 +567,13 @@ fn test_state_with_fast_embed(
         in_flight_fills: Arc::new(FillRegistry::default()),
         active_streams: Arc::new(ActiveStreamRegistry::default()),
         cache_maintenance: Arc::new(tokio::sync::Mutex::new(())),
+        asset_cache_fences: Arc::new(AssetCacheFenceRegistry::default()),
+        artifact_resolution_cache: Arc::new(ArtifactResolutionCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
+        asset_availability_cache: Arc::new(AssetAvailabilityCache::new(
+            DEFAULT_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES,
+        )),
         fast_embed_cache: Arc::new(FastEmbedCache::default()),
         metrics: Arc::new(EdgeMetrics::default()),
         telemetry: telemetry::TelemetryHandle::disabled(),
@@ -589,7 +668,7 @@ fn tamper_last_char(value: &str) -> String {
 
 struct PlaybackTestResponse {
     status: StatusCode,
-    set_cookie: Option<String>,
+    set_cookies: Vec<String>,
     cache_control: Option<String>,
     cache_status: Option<String>,
     content_type: Option<String>,
@@ -682,10 +761,11 @@ async fn playback_test_response(response: Response) -> PlaybackTestResponse {
 
     PlaybackTestResponse {
         status,
-        set_cookie: headers
-            .get(header::SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned),
+        set_cookies: headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect(),
         cache_control: headers
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok())
@@ -962,13 +1042,11 @@ async fn edge_fast_embed_proxies_api_html_with_edge_playback_base_and_caches() {
             .unwrap()
             .starts_with("text/html")
     );
-    assert!(
-        first
-            .set_cookie
-            .as_deref()
-            .unwrap()
-            .starts_with("__rend_playback=")
-    );
+    assert_eq!(first.set_cookies.len(), 4);
+    assert!(first.set_cookies[0].starts_with("__rend_playback="));
+    assert!(first.set_cookies[1].starts_with("CloudFront-Policy="));
+    assert!(first.set_cookies[2].starts_with("CloudFront-Signature="));
+    assert!(first.set_cookies[3].starts_with("CloudFront-Key-Pair-Id="));
     let first_body = String::from_utf8(first.body).unwrap();
     assert!(first_body.contains(
         "https://ams-1.play.rend.so/v/00000000-0000-0000-0000-000000000001/hls/360p/segment_00001.m4s"
@@ -981,10 +1059,7 @@ async fn edge_fast_embed_proxies_api_html_with_edge_playback_base_and_caches() {
     assert_eq!(second.status, StatusCode::OK);
     assert_eq!(second.fast_embed.as_deref(), Some("edge"));
     assert_eq!(second.cache_status.as_deref(), Some("HIT"));
-    assert_eq!(
-        second.set_cookie.as_deref(),
-        Some("__rend_playback=test-token; Path=/v/; HttpOnly; SameSite=Lax")
-    );
+    assert_eq!(second.set_cookies, first.set_cookies);
     let second_body = String::from_utf8(second.body).unwrap();
     assert_eq!(second_body, first_body);
     assert_eq!(
@@ -1240,6 +1315,89 @@ async fn purge_explicit_paths_remove_cache_and_report_missing_and_rejected() {
 }
 
 #[tokio::test]
+async fn purge_fences_an_active_cache_fill_before_commit() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("purge-fences-fill");
+    let cache_key = "videos/asset-123/opener.mp4";
+    let cache_path = cache_dir.join(cache_key);
+    let state = test_state(cache_dir, origin_endpoint);
+    let asset_cache_fence = state.asset_cache_fences.acquire("asset-123");
+    let generation = asset_cache_fence.generation.load(Ordering::Acquire);
+    let mut prepared = prepare_cache_write(
+        &state,
+        cache_key,
+        cache_path.clone(),
+        6,
+        6,
+        generation,
+        asset_cache_fence,
+        None,
+    )
+    .await
+    .unwrap();
+    prepared.file.write_all(b"cached").await.unwrap();
+
+    purge_inner(
+        state.clone(),
+        PurgeRequest {
+            asset_id: "asset-123".to_owned(),
+            artifact_paths: Some(vec!["opener.mp4".to_owned()]),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = commit_prepared_cache_write(&state, cache_key, prepared, 6)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PlaybackError::OriginNotFound(_)));
+    assert!(!cache_path.exists());
+}
+
+#[tokio::test]
+async fn purge_does_not_abort_an_unrelated_asset_fill() {
+    let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("purge-keeps-unrelated-fill");
+    let cache_key = "videos/asset-b/opener.mp4";
+    let cache_path = cache_dir.join(cache_key);
+    let state = test_state(cache_dir, origin_endpoint);
+    let asset_cache_fence = state.asset_cache_fences.acquire("asset-b");
+    let generation = asset_cache_fence.generation.load(Ordering::Acquire);
+    let mut prepared = prepare_cache_write(
+        &state,
+        cache_key,
+        cache_path.clone(),
+        6,
+        6,
+        generation,
+        asset_cache_fence,
+        None,
+    )
+    .await
+    .unwrap();
+    prepared.file.write_all(b"cached").await.unwrap();
+
+    purge_inner(
+        state.clone(),
+        PurgeRequest {
+            asset_id: "asset-a".to_owned(),
+            artifact_paths: Some(vec!["opener.mp4".to_owned()]),
+        },
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        commit_prepared_cache_write(&state, cache_key, prepared, 6),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(fs::read(cache_path).await.unwrap(), b"cached");
+}
+
+#[tokio::test]
 async fn purge_omitted_paths_remove_supported_cached_playback_files_only() {
     let (origin_endpoint, _requests) = spawn_fake_origin(HashMap::new()).await;
     let cache_dir = test_cache_dir("purge-all");
@@ -1441,6 +1599,314 @@ async fn playback_serves_existing_cache_hit_without_origin() {
     assert_eq!(response.region.as_deref(), Some("test"));
     assert_eq!(response.body, b"cached-opener");
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_cache_hit_reauthorizes_with_asset_availability() {
+    let resolver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resolver_url = format!("http://{}", resolver_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            resolver_listener,
+            Router::new().route(
+                "/internal/edges/playback/availability",
+                get(|| async { StatusCode::NOT_FOUND }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-hit-fresh-resolver");
+    let cache_key = "videos/asset-123/opener.mp4";
+    let cache_path = cache_dir.join(cache_key);
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"stale-opener").await.unwrap();
+    let mut state = test_state(cache_dir, origin_endpoint);
+    Arc::get_mut(&mut state).unwrap().config.control_plane = Some(ControlPlaneConfig {
+        url: resolver_url,
+        edge_base_url: "http://edge.invalid".to_owned(),
+        cache_max_bytes: None,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    state.artifact_resolution_cache.insert(
+        cache_key.to_owned(),
+        "videos/asset-123/attempts/stale/opener.mp4".to_owned(),
+    );
+    let app = build_app(state.clone(), Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert!(!cache_path.exists());
+    assert_eq!(
+        state
+            .artifact_resolution_cache
+            .get(cache_key, Duration::from_secs(300)),
+        None
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_cache_miss_reauthorizes_before_origin_fetch() {
+    let resolver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resolver_url = format!("http://{}", resolver_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            resolver_listener,
+            Router::new().route(
+                "/internal/edges/playback/availability",
+                get(|| async { StatusCode::NOT_FOUND }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut objects = HashMap::new();
+    objects.insert(
+        "rend-local/videos/asset-123/opener.mp4".to_owned(),
+        FakeOriginObject::Body(b"origin-opener".to_vec()),
+    );
+    let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
+    let cache_dir = test_cache_dir("playback-miss-fresh-resolver");
+    let mut state = test_state(cache_dir, origin_endpoint);
+    Arc::get_mut(&mut state).unwrap().config.control_plane = Some(ControlPlaneConfig {
+        url: resolver_url,
+        edge_base_url: "http://edge.invalid".to_owned(),
+        cache_max_bytes: None,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_purge_fences_in_flight_availability_cache_insert() {
+    let request_started = Arc::new(Notify::new());
+    let release_response = Arc::new(Notify::new());
+    let started_for_route = request_started.clone();
+    let release_for_route = release_response.clone();
+    let resolver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resolver_url = format!("http://{}", resolver_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            resolver_listener,
+            Router::new().route(
+                "/internal/edges/playback/availability",
+                get(move || {
+                    let started = started_for_route.clone();
+                    let release = release_for_route.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Json(serde_json::json!({ "available": true }))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (origin_endpoint, _) = spawn_fake_origin(HashMap::new()).await;
+    let mut state = test_state(test_cache_dir("availability-purge-race"), origin_endpoint);
+    Arc::get_mut(&mut state).unwrap().config.control_plane = Some(ControlPlaneConfig {
+        url: resolver_url,
+        edge_base_url: "http://edge.invalid".to_owned(),
+        cache_max_bytes: None,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    let fence = state.asset_cache_fences.acquire("asset-123");
+    let check_state = state.clone();
+    let check_fence = fence.clone();
+    let check = tokio::spawn(async move {
+        validate_asset_availability(&check_state, &check_fence, "asset-123").await
+    });
+    request_started.notified().await;
+    {
+        let _barrier = fence.commit_barrier.lock().await;
+        fence.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    state.asset_availability_cache.remove("asset-123");
+    release_response.notify_one();
+
+    assert!(matches!(
+        check.await.unwrap(),
+        Err(PlaybackError::Origin(_))
+    ));
+    assert!(
+        !state
+            .asset_availability_cache
+            .is_available("asset-123", Duration::from_secs(300))
+    );
+}
+
+#[tokio::test]
+async fn concurrent_purge_fences_in_flight_artifact_mapping_insert() {
+    let request_started = Arc::new(Notify::new());
+    let release_response = Arc::new(Notify::new());
+    let started_for_route = request_started.clone();
+    let release_for_route = release_response.clone();
+    let resolver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resolver_url = format!("http://{}", resolver_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            resolver_listener,
+            Router::new().route(
+                "/internal/edges/playback/artifact",
+                get(move || {
+                    let started = started_for_route.clone();
+                    let release = release_for_route.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Json(serde_json::json!({
+                            "storage_object_key": "videos/asset-123/attempts/lease/opener.mp4",
+                            "content_type": "video/mp4"
+                        }))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (origin_endpoint, _) = spawn_fake_origin(HashMap::new()).await;
+    let mut state = test_state(test_cache_dir("resolver-purge-race"), origin_endpoint);
+    Arc::get_mut(&mut state).unwrap().config.control_plane = Some(ControlPlaneConfig {
+        url: resolver_url,
+        edge_base_url: "http://edge.invalid".to_owned(),
+        cache_max_bytes: None,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    let fence = state.asset_cache_fences.acquire("asset-123");
+    let resolve_state = state.clone();
+    let resolve = tokio::spawn(async move {
+        resolve_playback_artifact(
+            &resolve_state,
+            "asset-123",
+            "opener.mp4",
+            map_playback_artifact("asset-123", "opener.mp4").unwrap(),
+        )
+        .await
+    });
+    request_started.notified().await;
+    {
+        let _barrier = fence.commit_barrier.lock().await;
+        fence.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    state.artifact_resolution_cache.remove_asset("asset-123");
+    release_response.notify_one();
+
+    assert!(matches!(
+        resolve.await.unwrap(),
+        Err(PlaybackError::Origin(_))
+    ));
+    assert_eq!(
+        state
+            .artifact_resolution_cache
+            .get("videos/asset-123/opener.mp4", Duration::from_secs(300)),
+        None
+    );
+}
+
+#[tokio::test]
+async fn concurrent_cached_segments_share_one_asset_availability_check() {
+    let availability_requests = Arc::new(Mutex::new(0usize));
+    let availability_requests_for_route = availability_requests.clone();
+    let resolver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resolver_url = format!("http://{}", resolver_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            resolver_listener,
+            Router::new().route(
+                "/internal/edges/playback/availability",
+                get(move || {
+                    let availability_requests = availability_requests_for_route.clone();
+                    async move {
+                        *availability_requests.lock().unwrap() += 1;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Json(serde_json::json!({ "available": true }))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (origin_endpoint, origin_requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-shared-availability");
+    for (segment, bytes) in [
+        ("segment_00001.m4s", b"segment-one".as_slice()),
+        ("segment_00002.m4s", b"segment-two".as_slice()),
+    ] {
+        let cache_path = cache_dir.join(format!("videos/asset-123/hls/360p/{segment}"));
+        fs::create_dir_all(cache_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(cache_path, bytes).await.unwrap();
+    }
+    let mut state = test_state(cache_dir, origin_endpoint);
+    Arc::get_mut(&mut state).unwrap().config.control_plane = Some(ControlPlaneConfig {
+        url: resolver_url,
+        edge_base_url: "http://edge.invalid".to_owned(),
+        cache_max_bytes: None,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    let app = build_app(state, Duration::from_secs(10));
+
+    let (first, second) = tokio::join!(
+        get_playback(
+            app.clone(),
+            signed_playback_uri("asset-123", "hls/360p/segment_00001.m4s")
+        ),
+        get_playback(
+            app,
+            signed_playback_uri("asset-123", "hls/360p/segment_00002.m4s")
+        ),
+    );
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(*availability_requests.lock().unwrap(), 1);
+    assert!(origin_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn playback_rejects_cached_artifact_deleted_from_origin() {
+    let (origin_endpoint, requests) = spawn_fake_origin(HashMap::new()).await;
+    let cache_dir = test_cache_dir("playback-deleted-origin");
+    let cache_path = cache_dir.join("videos/asset-123/opener.mp4");
+    fs::create_dir_all(cache_path.parent().unwrap())
+        .await
+        .unwrap();
+    fs::write(&cache_path, b"stale-opener").await.unwrap();
+    let mut state = test_state(cache_dir, origin_endpoint);
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .config
+        .validate_cache_origin = true;
+    let app = build_app(state, Duration::from_secs(10));
+
+    let response = get_playback(app, signed_playback_uri("asset-123", "opener.mp4")).await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert!(!cache_path.exists());
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["rend-local/videos/asset-123/opener.mp4"]
+    );
 }
 
 #[tokio::test]
@@ -1814,7 +2280,11 @@ async fn playback_synthesizes_progressive_fmp4_from_hls_parts_then_caches() {
     let (origin_endpoint, requests) = spawn_fake_origin(objects).await;
     let cache_dir = test_cache_dir("playback-progressive");
     let cache_path = cache_dir.join("videos/asset-123/hls/360p/progressive.mp4");
-    let state = test_state(cache_dir, origin_endpoint);
+    let mut state = test_state(cache_dir, origin_endpoint);
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .config
+        .validate_cache_origin = true;
     let app = build_app(state, Duration::from_secs(10));
     let uri = signed_playback_uri("asset-123", "hls/360p/progressive.mp4");
 
@@ -1838,6 +2308,7 @@ async fn playback_synthesizes_progressive_fmp4_from_hls_parts_then_caches() {
             "rend-local/videos/asset-123/hls/360p/init_360p.mp4",
             "rend-local/videos/asset-123/hls/360p/segment_00000.m4s",
             "rend-local/videos/asset-123/hls/360p/segment_00001.m4s",
+            "rend-local/videos/asset-123/hls/360p/index.m3u8",
         ]
     );
 }

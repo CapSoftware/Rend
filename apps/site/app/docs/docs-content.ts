@@ -41,6 +41,11 @@ export const docsNavItems: DocsNavItem[] = [
     description: "Use the public API with bearer auth and documented paths.",
   },
   {
+    href: "#resumable-uploads",
+    title: "Resumable uploads",
+    description: "Upload parts directly to storage with checksums, retries, and resume support.",
+  },
+  {
     href: "#auth-api-keys",
     title: "Auth and API keys",
     description: "Scopes, headers, and key handling.",
@@ -230,6 +235,7 @@ export REND_API_BASE_URL="https://api.rend.so"
 export REND_SITE_BASE_URL="https://rend.so"
 
 # First: sign in at https://rend.so/login, choose a plan, and create an API key.
+# Compatibility: one-shot raw uploads remain supported at /v1/videos.
 
 curl -fsS -X POST "$REND_API_BASE_URL/v1/videos" \\
   -H "authorization: Bearer $REND_API_KEY" \\
@@ -251,6 +257,40 @@ curl -fsS "$REND_API_BASE_URL/v1/assets/$ASSET_ID/analytics/playback?window_seco
 
 curl -fsS -X DELETE "$REND_API_BASE_URL/v1/assets/$ASSET_ID" \\
   -H "authorization: Bearer $REND_API_KEY"`;
+
+export const RESUMABLE_UPLOAD_FLOW_CODE = `POST /v1/uploads
+Authorization: Bearer $REND_API_KEY
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+
+{
+  "content_type": "video/mp4",
+  "content_length": 42881500,
+  "filename": "video.mp4"
+}
+
+# Split the file into the returned 16 MiB part_size.
+# For batches of at most 10 parts, compute each base64 SHA-256 digest:
+POST /v1/uploads/{uploadId}/parts
+{
+  "parts": [{ "part_number": 1, "checksum_sha256": "base64-sha256=" }]
+}
+
+# PUT each part directly to its returned URL with the returned headers.
+# Keep the ETag, then resume safely by reading provider-confirmed parts:
+GET /v1/uploads/{uploadId}
+
+POST /v1/uploads/{uploadId}/complete
+{
+  "parts": [{
+    "part_number": 1,
+    "etag": "returned-etag",
+    "checksum_sha256": "base64-sha256="
+  }]
+}
+
+# Cancel an unfinished session and release its reserved storage:
+DELETE /v1/uploads/{uploadId}`;
 
 export const AUTH_HEADER_CODE = `Authorization: Bearer $REND_API_KEY`;
 

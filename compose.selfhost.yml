@@ -1,0 +1,104 @@
+name: rend-selfhost
+
+services:
+  rend-api:
+    environment:
+      REND_MAX_UPLOAD_BYTES: "268435456000"
+      S3_PRESIGN_ENDPOINT: ${REND_SELFHOST_UPLOADS_URL:-http://uploads.localhost:8080}
+      REND_API_CORS_ALLOWED_ORIGINS: ${REND_SELFHOST_SITE_URL:-http://localhost:8080}
+      REND_PLAYBACK_MODE: edge
+      REND_PLAYBACK_BASE_URL: ${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_PLAYER_PLAYBACK_BASE_URL: ${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_EXPECTED_EDGES: local-edge-001=local=${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_EDGE_WARM_URL: http://rend-edge:4100/internal/warm
+      REND_EDGE_PURGE_URL: http://rend-edge:4100/internal/purge
+
+  rend-media-worker:
+    environment:
+      S3_PRESIGN_ENDPOINT: ${REND_SELFHOST_UPLOADS_URL:-http://uploads.localhost:8080}
+      REND_PLAYBACK_MODE: edge
+      REND_PLAYBACK_BASE_URL: ${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_EXPECTED_EDGES: local-edge-001=local=${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+
+  rend-edge:
+    environment:
+      S3_PRESIGN_ENDPOINT: ${REND_SELFHOST_UPLOADS_URL:-http://uploads.localhost:8080}
+      REND_EDGE_BASE_URL: ${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_EDGE_CORS_ALLOWED_ORIGINS: ${REND_SELFHOST_SITE_URL:-http://localhost:8080}
+      REND_EXPECTED_EDGES: local-edge-001=local=${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+
+  rend-site:
+    image: ${REND_SITE_IMAGE:-rend-site:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rend-site-standalone
+    restart: unless-stopped
+    depends_on:
+      rend-api:
+        condition: service_healthy
+      rend-edge:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgres://rend:rend@postgres:5432/rend}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-local-better-auth-secret-only-for-rend-selfhost}
+      BETTER_AUTH_URL: ${REND_SELFHOST_SITE_URL:-http://localhost:8080}
+      REND_ENV: production
+      REND_API_BASE_URL: http://rend-api:4000
+      REND_PUBLIC_API_BASE_URL: ${REND_SELFHOST_API_URL:-http://localhost:8080}
+      REND_PUBLIC_SITE_BASE_URL: ${REND_SELFHOST_SITE_URL:-http://localhost:8080}
+      REND_SITE_INTERNAL_TOKEN: ${REND_SITE_INTERNAL_TOKEN:-local-site-internal-token}
+      REND_PLAYBACK_MODE: edge
+      REND_PLAYER_PLAYBACK_BASE_URL: http://rend-edge:4100
+      REND_PLAYER_EDGE_BASE_URLS: DEFAULT=${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_PLAYER_EDGE_BASE_URLS_MODE: override
+      REND_TIGRIS_PLAYBACK_BASE_URL: ${REND_SELFHOST_PLAYBACK_URL:-http://localhost:8080}
+      REND_AUTH_TRUSTED_ORIGINS: ${REND_SELFHOST_SITE_URL:-http://localhost:8080}
+      REND_SELF_SERVE_SIGNUP_ENABLED: "true"
+      REND_AUTH_EMAIL_DISABLED: "true"
+      REND_SITE_MAX_UPLOAD_BYTES: "268435456000"
+      NEXT_PUBLIC_REND_APP_VERSION: selfhost
+    ports:
+      - "127.0.0.1:${REND_SELFHOST_SITE_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  caddy:
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    depends_on:
+      rend-api:
+        condition: service_healthy
+      rend-edge:
+        condition: service_healthy
+      rend-site:
+        condition: service_healthy
+    ports:
+      - "${REND_SELFHOST_PORT:-8080}:8080"
+    environment:
+      REND_SELFHOST_UPLOADS_HOST: ${REND_SELFHOST_UPLOADS_HOST:-uploads.localhost}
+    volumes:
+      - ./Caddyfile.selfhost:/etc/caddy/Caddyfile:ro
+      - rend-caddy-data:/data
+      - rend-caddy-config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  rend-caddy-data:
+  rend-caddy-config:

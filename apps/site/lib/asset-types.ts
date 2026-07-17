@@ -34,6 +34,51 @@ export type AssetUploadResponse = {
   asset: AssetSummary;
 };
 
+export type MultipartUploadStatus =
+  | "uploading"
+  | "completing"
+  | "completed"
+  | "aborted"
+  | "expired"
+  | "failed";
+
+export type MultipartUploadSession = {
+  asset_id: string;
+  upload_id: string;
+  part_size: number;
+  part_count: number;
+  max_parallel_parts: number;
+  expires_at: string;
+  status: MultipartUploadStatus;
+  uploaded_parts: Array<{
+    part_number: number;
+    etag: string;
+    checksum_sha256?: string | null;
+    size: number;
+  }>;
+};
+
+export type MultipartUploadPartRequest = {
+  part_number: number;
+  checksum_sha256: string;
+};
+
+export type MultipartUploadPartIntent = {
+  part_number: number;
+  url: string;
+  method: "PUT";
+  headers: Record<string, string>;
+};
+
+export type MultipartUploadPartsResponse = {
+  upload_id: string;
+  parts: MultipartUploadPartIntent[];
+};
+
+export type MultipartUploadCompletedPart = MultipartUploadPartRequest & {
+  etag: string;
+};
+
 export type AssetDeleteResponse = {
   status: "ok";
   asset_id: string;

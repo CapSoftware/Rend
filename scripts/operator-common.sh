@@ -187,7 +187,7 @@ operator_value_is_dev_default() {
       [[ "$key" == "CLICKHOUSE_PASSWORD" ]] && return 0
       return 1
       ;;
-    *localhost* | *127.0.0.1* | *"//postgres:"* | *"@postgres:"* | *"//redis:"* | *"//minio:"* | *"//clickhouse:"* | *"//rend-api:"* | *"//rend-edge:"*)
+    *localhost* | *127.0.0.1* | *"//postgres:"* | *"@postgres:"* | *"//minio:"* | *"//clickhouse:"* | *"//rend-api:"* | *"//rend-edge:"*)
       return 0
       ;;
     *)
@@ -375,32 +375,6 @@ PY
   fi
 }
 
-operator_check_redis_url() {
-  local file="$1"
-  local key="$2"
-  local value
-  value="$(operator_env_value "$file" "$key" 2>/dev/null || true)"
-  [[ -n "$value" ]] || return 0
-  if python3 - "$key" "$value" <<'PY'
-import sys
-from urllib.parse import urlparse
-
-key, value = sys.argv[1], sys.argv[2]
-parsed = urlparse(value)
-if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
-    print(f"{key} must be a redis:// or rediss:// URL with a host", file=sys.stderr)
-    raise SystemExit(1)
-if parsed.port is not None and not (1 <= parsed.port <= 65535):
-    print(f"{key} port must be 1-65535", file=sys.stderr)
-    raise SystemExit(1)
-PY
-  then
-    operator_ok "$key has a valid Redis URL"
-  else
-    operator_fail "$key is not a valid Redis URL"
-  fi
-}
-
 operator_check_bind_addr() {
   local file="$1"
   local key="$2"
@@ -577,7 +551,7 @@ if not value.strip():
 
 seen = set()
 local_hosts = {
-    "localhost", "0.0.0.0", "::", "::1", "postgres", "redis", "minio",
+    "localhost", "0.0.0.0", "::", "::1", "postgres", "minio",
     "clickhouse", "rend-api", "rend-edge", "rend-edge-us-east", "rend-edge-london",
 }
 for raw in value.split(","):
@@ -678,7 +652,7 @@ operator_validate_api_env() {
 
   required=(
     REND_ENV
-    DATABASE_URL REND_REDIS_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
+    DATABASE_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
     CLICKHOUSE_PASSWORD OBJECT_STORE_HEALTH_URL S3_ENDPOINT S3_REGION S3_BUCKET
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY REND_API_BIND_ADDR REND_API_AUTO_MIGRATE
     REND_API_INLINE_MEDIA_PROCESSING REND_SITE_INTERNAL_TOKEN REND_PLAYBACK_BASE_URL
@@ -691,7 +665,8 @@ operator_validate_api_env() {
     REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS REND_FFMPEG_PATH
     REND_FFPROBE_PATH REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
-    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LEASE_SECS
+    REND_MEDIA_JOB_HEARTBEAT_SECS REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION
     REND_BILLING_MODE
     REND_BILLING_FEATURE_DELIVERY_720P REND_BILLING_FEATURE_DELIVERY_1080P
     REND_BILLING_FEATURE_DELIVERY_2K REND_BILLING_FEATURE_DELIVERY_4K
@@ -711,7 +686,8 @@ operator_validate_api_env() {
     REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
     REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
-    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LEASE_SECS
+    REND_MEDIA_JOB_HEARTBEAT_SECS REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION
     REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
     REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
@@ -728,7 +704,6 @@ operator_validate_api_env() {
   operator_check_billing_failure_policy "$file"
   operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
-  operator_check_redis_url "$file" REND_REDIS_URL
   operator_check_http_url "$file" CLICKHOUSE_URL
   operator_check_http_url "$file" OBJECT_STORE_HEALTH_URL
   operator_check_http_url "$file" S3_ENDPOINT
@@ -763,7 +738,7 @@ operator_validate_worker_env() {
 
   required=(
     REND_ENV
-    DATABASE_URL REND_REDIS_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
+    DATABASE_URL CLICKHOUSE_URL CLICKHOUSE_DATABASE CLICKHOUSE_USER
     CLICKHOUSE_PASSWORD OBJECT_STORE_HEALTH_URL S3_ENDPOINT S3_REGION S3_BUCKET
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY REND_API_AUTO_MIGRATE
     REND_API_INLINE_MEDIA_PROCESSING REND_SITE_INTERNAL_TOKEN REND_PLAYBACK_BASE_URL
@@ -777,7 +752,8 @@ operator_validate_worker_env() {
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS REND_FFMPEG_PATH
     REND_FFPROBE_PATH REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
     REND_MEDIA_WORKER_ID REND_MEDIA_WORKER_POLL_INTERVAL_SECS
-    REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_MEDIA_JOB_LEASE_SECS REND_MEDIA_JOB_HEARTBEAT_SECS
+    REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION
     REND_BILLING_MODE
     REND_BILLING_FEATURE_DELIVERY_720P REND_BILLING_FEATURE_DELIVERY_1080P
     REND_BILLING_FEATURE_DELIVERY_2K REND_BILLING_FEATURE_DELIVERY_4K
@@ -797,7 +773,8 @@ operator_validate_worker_env() {
     REND_PLAYBACK_ANALYTICS_DEFAULT_WINDOW_SECS REND_PLAYBACK_ANALYTICS_MAX_WINDOW_SECS
     REND_EDGE_WARM_MAX_ARTIFACTS REND_HTTP_TIMEOUT_SECS
     REND_MEDIA_PROCESS_TIMEOUT_SECS REND_MEDIA_JOB_MAX_ATTEMPTS
-    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LOCK_TIMEOUT_SECS
+    REND_MEDIA_WORKER_POLL_INTERVAL_SECS REND_MEDIA_JOB_LEASE_SECS
+    REND_MEDIA_JOB_HEARTBEAT_SECS REND_ACTIVE_MEDIA_JOBS_PER_ORGANIZATION
     REND_BILLING_DELIVERY_SYNC_LAG_SECS REND_BILLING_DELIVERY_SYNC_MAX_WINDOW_SECS
     REND_BILLING_STORAGE_SYNC_LAG_SECS REND_BILLING_STORAGE_SYNC_MAX_WINDOW_SECS
   )
@@ -814,7 +791,6 @@ operator_validate_worker_env() {
   operator_check_billing_failure_policy "$file"
   operator_check_expected_edges "$file" "$allow_dev_defaults"
   operator_check_database_url "$file" DATABASE_URL
-  operator_check_redis_url "$file" REND_REDIS_URL
   operator_check_http_url "$file" CLICKHOUSE_URL
   operator_check_http_url "$file" OBJECT_STORE_HEALTH_URL
   operator_check_http_url "$file" S3_ENDPOINT
@@ -854,6 +830,9 @@ operator_validate_edge_env() {
     REND_EDGE_BIND_ADDR REND_EDGE_ID REND_EDGE_REGION REND_EDGE_BASE_URL
     REND_EXPECTED_EDGES REND_ALLOW_INSECURE_EDGE_URLS REND_CONTROL_PLANE_URL
     REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_CORS_ALLOWED_ORIGINS REND_EDGE_CACHE_DIR
+    REND_EDGE_VALIDATE_CACHE_ORIGIN REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS
+    REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES
+    REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS
     REND_EDGE_ORIGIN_HEALTH_URL REND_EDGE_INTERNAL_TOKEN REND_EDGE_WARM_MAX_ARTIFACTS
     REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
     REND_EDGE_CACHE_MIN_FREE_BYTES REND_EDGE_TELEMETRY_ENABLED
@@ -868,6 +847,9 @@ operator_validate_edge_env() {
   policy_keys=("${required[@]}" "${optional[@]}")
   numeric_keys=(
     REND_EDGE_HEARTBEAT_INTERVAL_SECS REND_EDGE_WARM_MAX_ARTIFACTS
+    REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS
+    REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES
+    REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS
     REND_EDGE_MAX_IN_FLIGHT_FILLS REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES
     REND_EDGE_TELEMETRY_QUEUE_CAPACITY
     REND_EDGE_TELEMETRY_BATCH_SIZE REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS
@@ -895,6 +877,7 @@ operator_validate_edge_env() {
   operator_check_http_origin_list "$file" REND_EDGE_CORS_ALLOWED_ORIGINS
   operator_check_bind_addr "$file" REND_EDGE_BIND_ADDR 4100
   operator_check_bool "$file" REND_EDGE_TELEMETRY_ENABLED
+  operator_check_bool "$file" REND_EDGE_VALIDATE_CACHE_ORIGIN
   operator_check_bool "$file" REND_ALLOW_INSECURE_EDGE_URLS
   operator_check_absolute_path "$file" REND_EDGE_CACHE_DIR
   operator_check_absolute_path "$file" REND_EDGE_TELEMETRY_SPOOL_DIR

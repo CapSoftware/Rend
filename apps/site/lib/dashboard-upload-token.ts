@@ -12,11 +12,12 @@ const DASHBOARD_UPLOAD_TOKEN_PREFIX = "rend_upload_";
 const DASHBOARD_UPLOAD_TOKEN_TTL_SECONDS = 10 * 60;
 
 type UploadTokenClaims = {
-  v: 1;
+  v: 2;
+  purpose: "multipart_upload";
   org_id: string;
   exp: number;
   content_type: string;
-  content_length?: number;
+  content_length: number;
 };
 
 export type DashboardUploadIntentResponse = {
@@ -63,11 +64,11 @@ export function createDashboardUploadIntent(
   }
 
   const contentLength = normalizedContentLength(input.contentLength);
-  if (contentLength !== undefined && (!Number.isInteger(contentLength) || contentLength < 0)) {
+  if (contentLength === undefined || !Number.isInteger(contentLength) || contentLength <= 0) {
     throw new AssetApiError(400, {
       status: "error",
       error: "invalid_content_length",
-      message: "Invalid content-length",
+      message: "Upload content length must be a positive integer",
     });
   }
 
@@ -91,16 +92,17 @@ export function createDashboardUploadIntent(
 
   const expiresAtSeconds = Math.floor(Date.now() / 1000) + DASHBOARD_UPLOAD_TOKEN_TTL_SECONDS;
   const claims: UploadTokenClaims = {
-    v: 1,
+    v: 2,
+    purpose: "multipart_upload",
     org_id: context.organizationId,
     exp: expiresAtSeconds,
     content_type: contentType,
-    ...(contentLength !== undefined ? { content_length: contentLength } : {}),
+    content_length: contentLength,
   };
 
   return {
     status: "ok",
-    upload_url: `${publicAssetApiBaseUrl()}/v1/videos`,
+    upload_url: `${publicAssetApiBaseUrl()}/v1/uploads`,
     token: signUploadClaims(claims, secret),
     expires_at: new Date(expiresAtSeconds * 1000).toISOString(),
     content_type: contentType,

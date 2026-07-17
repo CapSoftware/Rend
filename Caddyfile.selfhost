@@ -1,0 +1,26 @@
+{
+	auto_https off
+}
+
+:8080 {
+	encode zstd gzip
+
+	@uploads host {$REND_SELFHOST_UPLOADS_HOST:uploads.localhost}
+	handle @uploads {
+		reverse_proxy minio:9000
+	}
+
+	@api path /v1/* /assets/* /healthz /readyz
+	handle @api {
+		reverse_proxy rend-api:4000
+	}
+
+	@media path /v/* /embed-fast/*
+	handle @media {
+		reverse_proxy rend-edge:4100
+	}
+
+	handle {
+		reverse_proxy rend-site:3000
+	}
+}

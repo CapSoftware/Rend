@@ -112,3 +112,78 @@ test("generated client uploads, polls playable state, fetches bootstrap, and del
   assert.equal(calls[0].contentType, "video/mp4");
   assert.equal(calls[3].authorization, null);
 });
+
+test("generated client manages resumable multipart upload sessions", async () => {
+  const uploadId = "00000000-0000-0000-0000-000000000002";
+  const checksum = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  const uploading = {
+    asset_id: ASSET_ID,
+    upload_id: uploadId,
+    part_size: 16 * 1024 * 1024,
+    part_count: 1,
+    max_parallel_parts: 6,
+    expires_at: "2026-07-18T10:00:00.000Z",
+    status: "uploading",
+    uploaded_parts: [],
+  };
+  const calls: Array<{ url: string; method: string; idempotencyKey: string | null; body: unknown }> = [];
+  const responses = [
+    jsonResponse(uploading, 201),
+    jsonResponse(uploading),
+    jsonResponse({
+      upload_id: uploadId,
+      parts: [
+        {
+          part_number: 1,
+          url: "https://objects.example.test/source?signature=redacted",
+          method: "PUT",
+          headers: { "x-amz-checksum-sha256": checksum },
+        },
+      ],
+    }),
+    jsonResponse({ ...uploading, status: "completed" }),
+    new Response(null, { status: 204 }),
+  ];
+  const client = new RendClient({
+    apiKey: "rend_test_local",
+    apiBaseUrl: "http://api.rend.test",
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        idempotencyKey: headers.get("idempotency-key"),
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      });
+      const response = responses.shift();
+      if (!response) throw new Error(`unexpected fetch call to ${String(input)}`);
+      return response;
+    }) as typeof fetch,
+  });
+
+  await client.createMultipartUpload(
+    { content_type: "video/mp4", content_length: 7, filename: "fixture.mp4" },
+    { idempotencyKey: "sdk-upload-1" }
+  );
+  await client.getMultipartUpload(uploadId);
+  await client.signMultipartUploadParts(uploadId, {
+    parts: [{ part_number: 1, checksum_sha256: checksum }],
+  });
+  await client.completeMultipartUpload(uploadId, {
+    parts: [{ part_number: 1, etag: "etag-1", checksum_sha256: checksum }],
+  });
+  await client.abortMultipartUpload(uploadId);
+
+  assert.deepEqual(calls.map((call) => `${call.method} ${new URL(call.url).pathname}`), [
+    "POST /v1/uploads",
+    `GET /v1/uploads/${uploadId}`,
+    `POST /v1/uploads/${uploadId}/parts`,
+    `POST /v1/uploads/${uploadId}/complete`,
+    `DELETE /v1/uploads/${uploadId}`,
+  ]);
+  assert.equal(calls[0].idempotencyKey, "sdk-upload-1");
+  assert.deepEqual(calls[2].body, {
+    parts: [{ part_number: 1, checksum_sha256: checksum }],
+  });
+  assert.equal(responses.length, 0);
+});

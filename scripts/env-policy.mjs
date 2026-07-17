@@ -17,7 +17,6 @@ const LOCAL_HOSTS = new Set([
   "::",
   "::1",
   "postgres",
-  "redis",
   "minio",
   "clickhouse",
   "rend-api",
@@ -544,8 +543,6 @@ function isKnownDevDefault(key, value) {
   return [
     "postgres://rend:rend@localhost:5432/rend",
     "postgres://rend:rend@postgres:5432/rend",
-    "redis://localhost:6379",
-    "redis://redis:6379",
     "http://localhost:8123",
     "http://clickhouse:8123",
     "http://localhost:9100",

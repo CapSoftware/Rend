@@ -26,6 +26,7 @@ import {
   MCP_SMOKE_CODE,
   PLAYBACK_BOOTSTRAP_CODE,
   QUICKSTART_SDK_CODE,
+  RESUMABLE_UPLOAD_FLOW_CODE,
   SDK_GUIDE_CODE,
   docsCommandItems,
   docsNavItems,
@@ -127,7 +128,7 @@ const quickstartSteps = [
   <>Sign in at <code>/login</code> with an email code. Rend creates your workspace automatically.</>,
   <>Choose a plan from the Billing page. Billable uploads and API-key creation stay disabled until billing is ready.</>,
   <>Create an API key from the Rend dashboard with <code>upload</code>, <code>read</code>, <code>delete</code>, and <code>analytics</code> scopes.</>,
-  <>Upload a video with <code>POST /v1/videos</code> or <code>client.uploadAsset</code>.</>,
+  <>Upload a video with resumable <code>POST /v1/uploads</code>, legacy <code>POST /v1/videos</code>, or <code>client.uploadAsset</code>.</>,
   <>Poll the asset until <code>playable_state</code> is <code>opener_ready</code> or <code>hls_ready</code>.</>,
   <>Fetch <code>/api/player/{"{assetId}"}</code> from the site and embed the returned same-origin source.</>,
   <>Delete the asset with <code>DELETE /v1/assets/{"{assetId}"}</code> when it is no longer needed.</>,
@@ -151,7 +152,7 @@ const errorStates: { state: string; where: ReactNode; meaning: string }[] = [
   },
   {
     state: "limit_exceeded",
-    where: <><code>POST /v1/videos</code> returns 403</>,
+    where: <><code>POST /v1/uploads</code> or <code>POST /v1/videos</code> returns 403</>,
     meaning: "Billing is missing, inactive, or out of plan balance before the upload body is accepted.",
   },
   {
@@ -171,7 +172,7 @@ const errorStates: { state: string; where: ReactNode; meaning: string }[] = [
   },
   {
     state: "upload too large",
-    where: <><code>POST /v1/videos</code> returns 413</>,
+    where: <><code>POST /v1/uploads</code> or <code>POST /v1/videos</code> returns 413</>,
     meaning: "The upload exceeds the configured maximum size.",
   },
   {
@@ -406,12 +407,32 @@ export default function DocsPage() {
 
               <DocSection id="curl-guide" label="curl" title="Use the public API directly">
                 <p>
-                  The public control-plane shape is <code>/v1/videos</code>, <code>/v1/assets</code>,
+                  The public control-plane shape is <code>/v1/uploads</code>, <code>/v1/videos</code>, <code>/v1/assets</code>,
                   {" "}<code>/v1/assets/{"{assetId}"}/events</code>, and{" "}
                   <code>/v1/assets/{"{assetId}"}/analytics/playback</code>. Browser playback uses the
                   site route <code>/api/player/{"{assetId}"}</code>.
                 </p>
+                <p>
+                  The curl example uses the legacy raw route for scripts and stream-only callers. New
+                  browser and large-file integrations should use the resumable flow below.
+                </p>
                 <CodeBlock code={CURL_UPLOAD_CODE} language="sh" title="curl-flow.sh" />
+              </DocSection>
+
+              <DocSection id="resumable-uploads" label="Uploads" title="Direct, resumable multipart uploads">
+                <p>
+                  Create a session through the Rend API, then upload its 16 MiB parts directly to the
+                  returned storage URLs. Source bytes do not pass through the Rend API. A session allows
+                  at most six concurrent part uploads, and each signing request accepts at most 10 parts.
+                </p>
+                <ul>
+                  <li>Send a stable <code>Idempotency-Key</code> when creating a session so uncertain requests are safe to retry.</li>
+                  <li>Send the base64-encoded SHA-256 checksum for every part when signing and completing it.</li>
+                  <li>Use <code>GET /v1/uploads/{"{uploadId}"}</code> to recover provider-confirmed parts after an interruption.</li>
+                  <li>Use <code>DELETE /v1/uploads/{"{uploadId}"}</code> to abort an unfinished upload and release reserved storage.</li>
+                  <li>Keep API keys on a trusted server. Browser dashboards should use a short-lived, upload-scoped token.</li>
+                </ul>
+                <CodeBlock code={RESUMABLE_UPLOAD_FLOW_CODE} language="http" title="resumable-upload.http" />
               </DocSection>
 
               <DocSection id="auth-api-keys" label="Auth" title="API keys and scopes">
