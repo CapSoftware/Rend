@@ -11,6 +11,7 @@ import type {
   AssetPlayerTelemetryEvent,
   AssetPlayerTelemetryResponse,
 } from "../lib/asset-types.ts";
+import { isAssetPlayable, isAssetProcessingComplete } from "../lib/asset-lifecycle.ts";
 import EmbedCustomizer from "./EmbedCustomizer";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
@@ -34,15 +35,7 @@ type AssetTab = "overview" | "artifacts" | "analytics" | "embed";
 type DetailResponse = { status: "ok"; asset: AssetDetail };
 type AnalyticsResponse = { status: "ok"; analytics: AssetPlaybackAnalytics };
 
-const MAX_PLAYABLE_POLLS = 30;
-
-function playable(state: string) {
-  return state === "opener_ready" || state === "hls_ready";
-}
-
-function terminal(state: string) {
-  return playable(state) || state === "failed" || state === "deleted";
-}
+const MAX_PROCESSING_POLLS = 30;
 
 function pollDelay(attempt: number) {
   return Math.min(2_000 * Math.pow(1.35, attempt), 10_000);
@@ -178,8 +171,14 @@ export default function AssetDetailClient({
   );
 
   useEffect(() => {
-    if (terminal(asset.playable_state) || pollExhausted || deleteState === "deleted") return;
-    if (pollAttempt.current >= MAX_PLAYABLE_POLLS) {
+    if (
+      isAssetProcessingComplete(asset.playable_state) ||
+      pollExhausted ||
+      deleteState === "deleted"
+    ) {
+      return;
+    }
+    if (pollAttempt.current >= MAX_PROCESSING_POLLS) {
       setPollExhausted(true);
       return;
     }
@@ -248,7 +247,7 @@ export default function AssetDetailClient({
     [asset.artifacts]
   );
 
-  const showPreview = playable(asset.playable_state) && deleteState !== "deleted" && !readOnly;
+  const showPreview = isAssetPlayable(asset.playable_state) && deleteState !== "deleted" && !readOnly;
 
   const artifactCount = artifactRows.length;
   const tabs = [
@@ -333,9 +332,10 @@ export default function AssetDetailClient({
           <Callout tone={deleteState === "error" ? "danger" : "success"}>{deleteMessage}</Callout>
         ) : null}
         {pollError ? <Callout tone="danger">{pollError}</Callout> : null}
-        {pollExhausted && !terminal(asset.playable_state) ? (
+        {pollExhausted && !isAssetProcessingComplete(asset.playable_state) ? (
           <Callout tone="warn">
-            Playable polling stopped. Refresh the asset when the worker finishes.
+            Processing is taking longer than expected. The opener remains playable; refresh to check
+            for the final adaptive stream.
           </Callout>
         ) : null}
       </div>

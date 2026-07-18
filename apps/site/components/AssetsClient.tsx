@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssetListResponse,
   AssetSummary,
@@ -29,6 +29,7 @@ import type {
 } from "../lib/asset-types.ts";
 import type { DashboardUploadIntentResponse } from "../lib/dashboard-upload-token.ts";
 import type { DashboardState } from "../lib/dashboard-state.ts";
+import { shouldRefreshAssetLifecycle } from "../lib/asset-lifecycle.ts";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
 import {
@@ -730,6 +731,7 @@ export default function AssetsClient({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadControllersRef = useRef(new Map<string, AbortController>());
   const uploadLimiterRef = useRef(new ConcurrencyLimiter(MAX_PARALLEL_PARTS));
+  const autoRefreshInFlightRef = useRef(false);
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -748,6 +750,7 @@ export default function AssetsClient({
   const pageCount = Math.max(1, Math.ceil(sortedAssets.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const pageAssets = sortedAssets.slice(currentPage * PAGE_SIZE, currentPage * PAGE_SIZE + PAGE_SIZE);
+  const hasProcessingAssets = assets.some(shouldRefreshAssetLifecycle);
 
   const uploadDisabledReason =
     readOnlyReason ?? (dashboardState.blocksUpload ? dashboardState.message : undefined);
@@ -757,8 +760,8 @@ export default function AssetsClient({
       ? "danger"
       : "warn";
 
-  async function refreshAssets() {
-    setRefreshing(true);
+  const refreshAssets = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) setRefreshing(true);
     try {
       const response = await fetch("/api/assets", { cache: "no-store" });
       const body = (await response.json()) as AssetListResponse | AssetErrorResponse;
@@ -768,11 +771,25 @@ export default function AssetsClient({
       setAssets(body.assets);
       setListError("");
     } catch (error) {
-      setListError(error instanceof Error ? error.message : "Refresh failed");
+      if (!silent) setListError(error instanceof Error ? error.message : "Refresh failed");
     } finally {
-      setRefreshing(false);
+      if (!silent) setRefreshing(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    if (!hasProcessingAssets) return;
+
+    const interval = window.setInterval(() => {
+      if (autoRefreshInFlightRef.current) return;
+      autoRefreshInFlightRef.current = true;
+      refreshAssets({ silent: true }).finally(() => {
+        autoRefreshInFlightRef.current = false;
+      });
+    }, 2_000);
+
+    return () => window.clearInterval(interval);
+  }, [hasProcessingAssets, refreshAssets]);
 
   function updateUpload(id: string, update: Partial<UploadItem>) {
     setUploads((current) =>
@@ -877,7 +894,7 @@ export default function AssetsClient({
               variant="secondary"
               size="sm"
               className="rounded-md"
-              onClick={refreshAssets}
+              onClick={() => void refreshAssets()}
               disabled={refreshing}
             >
               <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />

@@ -15,7 +15,7 @@ const stateToTone: Record<string, StatusTone> = {
   ready: "success",
   pass: "success",
   hls_ready: "success",
-  opener_ready: "success",
+  opener_ready: "progress",
   uploaded: "success",
   active: "success",
   ok: "success",
@@ -43,7 +43,7 @@ export function toneForState(state: string): StatusTone {
 const stateLabels: Record<string, string> = {
   ready: "Ready",
   hls_ready: "Ready",
-  opener_ready: "Ready",
+  opener_ready: "Optimizing",
   uploaded: "Uploaded",
   uploading: "Uploading",
   processing: "Processing",
