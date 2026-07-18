@@ -325,7 +325,7 @@ resource "aws_ecs_task_definition" "edge" {
       { name = "REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS", value = "2" },
       { name = "REND_EDGE_TELEMETRY_REQUEST_TIMEOUT_SECS", value = "2" },
       { name = "REND_EDGE_TELEMETRY_SPOOL_DIR", value = "/var/spool/rend/edge-telemetry" },
-      { name = "REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES", value = "10737418240" },
+      { name = "REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES", value = "1073741824" },
     ])
     secrets = local.edge_container_secrets
     healthCheck = {
