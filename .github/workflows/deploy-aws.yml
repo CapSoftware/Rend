@@ -91,6 +91,8 @@ jobs:
               docker buildx build \
                 --platform linux/amd64 \
                 --target "$service" \
+                --cache-from "type=gha,scope=$service" \
+                --cache-to "type=gha,mode=max,scope=$service" \
                 --build-arg REND_GIT_SHA="$GITHUB_SHA" \
                 --build-arg REND_BUILD_TIME="$build_time" \
                 --build-arg REND_IMAGE_VERSION="aws-${GITHUB_SHA::12}" \
