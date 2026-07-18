@@ -35,6 +35,7 @@ const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 const HLS_X264_PRESET: &str = "superfast";
 const HLS_AUDIO_BITRATE: &str = "96k";
 const HLS_TARGET_SEGMENT_SECONDS: u32 = 1;
+const HLS_FFMPEG_INIT_FILENAME: &str = "init.mp4";
 const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 30;
 const HLS_MIN_KEYFRAME_INTERVAL_FRAMES: u32 = 12;
 const HLS_MAX_KEYFRAME_INTERVAL_FRAMES: u32 = 240;
@@ -1019,7 +1020,7 @@ async fn generate_and_upload_hls(
         os("-hls_flags"),
         os("independent_segments"),
         os("-hls_fmp4_init_filename"),
-        os("init_%v.mp4"),
+        os(HLS_FFMPEG_INIT_FILENAME),
         os("-hls_segment_filename"),
         segment_pattern.as_os_str().to_owned(),
         os("-master_pl_name"),
@@ -1108,8 +1109,68 @@ async fn run_hls_command_with_streaming_uploads(
             }
         }
     }
+    normalize_hls_init_fragments(hls_dir, renditions).await?;
     upload_finalized_hls_fragments(request, hls_dir, renditions, true, &mut artifacts).await?;
     Ok(artifacts)
+}
+
+async fn normalize_hls_init_fragments(hls_dir: &Path, renditions: &[HlsRendition]) -> Result<()> {
+    for rendition in renditions {
+        let variant_dir = hls_dir.join(rendition.name);
+        let ffmpeg_init_path = variant_dir.join(HLS_FFMPEG_INIT_FILENAME);
+        let normalized_init_name = format!("init_{}.mp4", rendition.name);
+        let normalized_init_path = variant_dir.join(&normalized_init_name);
+        let ffmpeg_init_exists = fs::try_exists(&ffmpeg_init_path).await?;
+        let normalized_init_exists = fs::try_exists(&normalized_init_path).await?;
+        anyhow::ensure!(
+            ffmpeg_init_exists ^ normalized_init_exists,
+            "ffmpeg created an invalid {} HLS init file set",
+            rendition.name
+        );
+        if ffmpeg_init_exists {
+            fs::rename(&ffmpeg_init_path, &normalized_init_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to normalize {} HLS init file {}",
+                        rendition.name,
+                        ffmpeg_init_path.display()
+                    )
+                })?;
+        }
+
+        let playlist_path = variant_dir.join("index.m3u8");
+        let playlist = fs::read_to_string(&playlist_path)
+            .await
+            .with_context(|| format!("failed to read {} HLS playlist", rendition.name))?;
+        let normalized = normalize_hls_variant_playlist_init(&playlist, rendition.name)?;
+        if normalized != playlist {
+            fs::write(&playlist_path, normalized)
+                .await
+                .with_context(|| format!("failed to normalize {} HLS playlist", rendition.name))?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_hls_variant_playlist_init(playlist: &str, rendition: &str) -> Result<String> {
+    let ffmpeg_reference = format!("URI=\"{HLS_FFMPEG_INIT_FILENAME}\"");
+    let normalized_reference = format!("URI=\"init_{rendition}.mp4\"");
+    let init_maps = playlist
+        .lines()
+        .filter(|line| line.trim().starts_with("#EXT-X-MAP:"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !init_maps.is_empty(),
+        "{rendition} HLS playlist omitted its init map"
+    );
+    anyhow::ensure!(
+        init_maps.iter().all(|line| {
+            line.contains(&ffmpeg_reference) || line.contains(&normalized_reference)
+        }),
+        "{rendition} HLS playlist referenced an unexpected init file"
+    );
+    Ok(playlist.replace(&ffmpeg_reference, &normalized_reference))
 }
 
 async fn upload_finalized_hls_fragments(
@@ -2695,5 +2756,78 @@ hls/segment_00001.ts
 
         assert_eq!(durations["720p/segment_00000.m4s"], 2_000);
         assert_eq!(durations["hls/segment_00001.ts"], 1_234);
+    }
+
+    #[test]
+    fn hls_variant_playlist_normalizes_ffmpeg_init_name_for_rendition() {
+        let playlist = r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:1.000000,
+segment_00000.m4s
+#EXT-X-ENDLIST
+"#;
+
+        let normalized = normalize_hls_variant_playlist_init(playlist, "360p").unwrap();
+
+        assert!(normalized.contains("#EXT-X-MAP:URI=\"init_360p.mp4\""));
+        assert!(!normalized.contains("URI=\"init.mp4\""));
+    }
+
+    #[test]
+    fn hls_variant_playlist_rejects_literal_ffmpeg_variant_placeholder() {
+        let playlist = r#"#EXTM3U
+#EXT-X-MAP:URI="init_%v.mp4"
+#EXTINF:1.000000,
+segment_00000.m4s
+"#;
+
+        let error = normalize_hls_variant_playlist_init(playlist, "360p").unwrap_err();
+
+        assert!(error.to_string().contains("unexpected init file"));
+    }
+
+    #[tokio::test]
+    async fn hls_init_fragment_normalization_renames_file_and_playlist_reference() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rend-hls-init-normalization-{}-{unique}",
+            std::process::id()
+        ));
+        let variant_dir = root.join("360p");
+        fs::create_dir_all(&variant_dir).await.unwrap();
+        fs::write(variant_dir.join(HLS_FFMPEG_INIT_FILENAME), b"init")
+            .await
+            .unwrap();
+        fs::write(
+            variant_dir.join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\nsegment_00000.m4s\n",
+        )
+        .await
+        .unwrap();
+
+        normalize_hls_init_fragments(&root, &[HLS_RENDITIONS[0]])
+            .await
+            .unwrap();
+
+        assert!(
+            !fs::try_exists(variant_dir.join(HLS_FFMPEG_INIT_FILENAME))
+                .await
+                .unwrap()
+        );
+        assert!(
+            fs::try_exists(variant_dir.join("init_360p.mp4"))
+                .await
+                .unwrap()
+        );
+        let playlist = fs::read_to_string(variant_dir.join("index.m3u8"))
+            .await
+            .unwrap();
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init_360p.mp4\""));
+
+        fs::remove_dir_all(root).await.unwrap();
     }
 }
