@@ -17,6 +17,7 @@ resource "terraform_data" "tigris_buckets" {
     var.tigris_source_location,
     var.tigris_media_location,
     sha256(jsonencode(local.site_origins)),
+    filesha256("${path.module}/../scripts/provision-tigris.sh"),
   ]
 
   lifecycle {

@@ -182,8 +182,11 @@ verification true before the next apply.
 The source and media buckets remain external to AWS but their full contract is
 owned by Terraform. During apply, an idempotent reconciler reads Tigris
 credentials directly from SSM, creates the buckets when absent, and enforces
-private ACLs, deny-insecure policies, CORS, and one-day incomplete-multipart
-lifecycle rules. It keeps sources global for fast uploads and generated media
+private native access settings and ACLs plus CORS. Tigris object endpoints
+accept HTTPS only, and its S3-compatible bucket-policy and
+incomplete-multipart lifecycle operations are not implemented. Rend's
+24-hour upload-session sweeper aborts each abandoned multipart upload and
+releases its reservation. It keeps sources global for fast uploads and generated media
 in `iad` beside the Fargate workers. Credential values never enter Terraform
 state. CloudFront never connects directly to Tigris.
 

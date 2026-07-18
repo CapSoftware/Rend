@@ -48,15 +48,18 @@ AWS log and backup traffic.
 
 - Tigris source and media buckets remain external to AWS, but Terraform owns
   their creation and security contract. Its apply-time reconciler reads the
-  credentials directly from SSM, then enforces private ACLs, deny-insecure
-  policies, CORS, and one-day incomplete-multipart lifecycle rules. Credential
-  values never enter Terraform variables, plans, state, arguments, or logs.
+  credentials directly from SSM, then enforces private native access settings
+  and ACLs plus CORS. Tigris object endpoints accept HTTPS only; its
+  S3-compatible bucket-policy operations and incomplete-multipart lifecycle
+  rules are not implemented. Rend's 24-hour upload-session sweeper aborts each
+  abandoned multipart upload and releases its reservation. Credential values never enter Terraform
+  variables, plans, state, arguments, or logs.
 - PlanetScale must be PostgreSQL because Rend uses PostgreSQL-specific SQL. Put
   its TLS connection URL in the referenced SSM SecureString parameter.
 - Terraform creates the ECS, CloudFront, WAF, ALB, ECR, ClickHouse, monitoring,
   DNS, and backup resources.
 - AWS Budgets sends alerts; it is not a hard spending stop. Upload quotas,
-  multipart expiry, WAF limits, bucket lifecycle rules, and ECS maximum task
+  multipart expiry, WAF limits, private bucket controls, and ECS maximum task
   counts are the actual financial guardrails.
 - CloudFront verifies its standard signed cookies with a trusted key group on
   every `/v/*` request. Authorization cookie values are forwarded when needed

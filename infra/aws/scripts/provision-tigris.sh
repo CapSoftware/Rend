@@ -63,6 +63,20 @@ tigris_s3api() {
     aws --endpoint-url "$TIGRIS_ENDPOINT" s3api "$@" --no-cli-pager
 }
 
+# Recent AWS CLI releases add optional S3 request checksums by default. Tigris
+# accepts those writes but currently persists an empty CORS/lifecycle document.
+# Restrict compatibility mode to the two affected configuration APIs; its
+# bucket-policy API expects the normal AWS CLI headers.
+tigris_s3api_bucket_config() {
+  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+    AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
+    AWS_DEFAULT_REGION="$TIGRIS_REGION" \
+    AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
+    AWS_RESPONSE_CHECKSUM_VALIDATION=when_required \
+    AWS_EC2_METADATA_DISABLED=true \
+    aws --endpoint-url "$TIGRIS_ENDPOINT" s3api "$@" --no-cli-pager
+}
+
 tigris_cli() {
   AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
@@ -97,24 +111,13 @@ jq -n --argjson origins "$TIGRIS_ALLOWED_ORIGINS_JSON" '{
   }]
 }' >"$work_dir/media-cors.json"
 
-jq -n '{
-  Rules: [{
-    ID: "rend-abort-incomplete-multipart-uploads",
-    Status: "Enabled",
-    Filter: {Prefix: ""},
-    AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
-  }]
-}' >"$work_dir/lifecycle.json"
-
 ensure_bucket() {
   local bucket="$1"
   local location="$2"
   local cors_file="$3"
-  local policy_file="$work_dir/${bucket}-policy.json"
   local bucket_info
   local expected_location
   local actual_location
-  local lifecycle_days
   local public_policy
 
   if ! tigris_cli buckets get "$bucket" --json --yes >/dev/null 2>&1; then
@@ -134,46 +137,21 @@ ensure_bucket() {
       --yes >/dev/null
   fi
 
-  jq -n --arg bucket "$bucket" '{
-    Version: "2012-10-17",
-    Statement: [{
-      Sid: "DenyInsecureTransport",
-      Effect: "Deny",
-      Principal: "*",
-      Action: "s3:*",
-      Resource: ["arn:aws:s3:::" + $bucket, "arn:aws:s3:::" + $bucket + "/*"],
-      Condition: {Bool: {"aws:SecureTransport": "false"}}
-    }]
-  }' >"$policy_file"
-
   tigris_s3api put-bucket-acl --bucket "$bucket" --acl private >/dev/null
-  tigris_s3api put-bucket-policy --bucket "$bucket" --policy "file://$policy_file" >/dev/null
-  tigris_s3api put-bucket-cors --bucket "$bucket" --cors-configuration "file://$cors_file" >/dev/null
-  tigris_s3api put-bucket-lifecycle-configuration \
-    --bucket "$bucket" \
-    --lifecycle-configuration "file://$work_dir/lifecycle.json" >/dev/null
+  tigris_s3api_bucket_config put-bucket-cors --bucket "$bucket" --cors-configuration "file://$cors_file" >/dev/null
 
-  tigris_s3api get-bucket-cors --bucket "$bucket" >/dev/null
-  # shellcheck disable=SC2016 # JMESPath backticks must remain literal.
-  lifecycle_days="$(tigris_s3api get-bucket-lifecycle-configuration \
-    --bucket "$bucket" \
-    --query 'Rules[?ID==`rend-abort-incomplete-multipart-uploads`].AbortIncompleteMultipartUpload.DaysAfterInitiation | [0]' \
-    --output text)"
-  if [[ "$lifecycle_days" != "1" ]]; then
-    echo "Tigris lifecycle verification failed for bucket $bucket" >&2
-    exit 1
-  fi
+  tigris_s3api_bucket_config get-bucket-cors --bucket "$bucket" >/dev/null
 
   public_policy="$(tigris_s3api get-bucket-policy-status \
     --bucket "$bucket" \
     --query 'PolicyStatus.IsPublic' \
     --output text)"
-  if [[ "${public_policy,,}" != "false" ]]; then
+  if [[ "$public_policy" != "False" && "$public_policy" != "false" ]]; then
     echo "Tigris policy is public for bucket $bucket" >&2
     exit 1
   fi
   if tigris_s3api get-bucket-acl --bucket "$bucket" --output json \
-    | jq -e '.Grants[]? | select(.Grantee.URI? | test("/(AllUsers|AuthenticatedUsers)$"))' >/dev/null; then
+    | jq -e '.Grants[]? | select((.Grantee.URI? // "") | test("/(AllUsers|AuthenticatedUsers)$"))' >/dev/null; then
     echo "Tigris ACL contains a public grant for bucket $bucket" >&2
     exit 1
   fi
@@ -192,4 +170,4 @@ ensure_bucket() {
 
 ensure_bucket "$TIGRIS_SOURCE_BUCKET" "$TIGRIS_SOURCE_LOCATION" "$work_dir/source-cors.json"
 ensure_bucket "$TIGRIS_MEDIA_BUCKET" "$TIGRIS_MEDIA_LOCATION" "$work_dir/media-cors.json"
-echo "Tigris source and media bucket contracts are reconciled and private."
+echo "Tigris source and media bucket contracts are reconciled and private; Rend owns abandoned multipart expiry."
