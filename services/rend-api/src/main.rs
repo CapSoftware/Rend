@@ -1696,7 +1696,7 @@ async fn publish_media_queue_metrics(state: &AppState) -> Result<()> {
             WHERE (attempts < max_attempts AND status IN ('queued', 'deferred_budget') AND run_after <= now())
                OR (status = 'running' AND lease_expires_at <= now())
           ),
-          COALESCE(max(EXTRACT(EPOCH FROM (now() - created_at))) FILTER (
+          COALESCE(max(EXTRACT(EPOCH FROM (now() - job.created_at))) FILTER (
             WHERE (attempts < max_attempts AND status IN ('queued', 'deferred_budget') AND run_after <= now())
                OR (status = 'running' AND lease_expires_at <= now())
           ), 0)::double precision,
