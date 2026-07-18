@@ -148,7 +148,6 @@ ensure_bucket() {
       --yes >/dev/null
   fi
 
-  tigris_s3api put-bucket-acl --bucket "$bucket" --acl private >/dev/null
   tigris_s3api_bucket_config put-bucket-cors --bucket "$bucket" --cors-configuration "file://$cors_file" >/dev/null
 
   tigris_s3api_bucket_config get-bucket-cors --bucket "$bucket" >/dev/null
