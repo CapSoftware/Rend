@@ -13,6 +13,12 @@ use crate::AppState;
 
 const INVALIDATION_LEASE_SECS: i32 = 60;
 const INVALIDATION_POLL_SECS: i32 = 5;
+// CloudFront must not evict an asset while an edge task can still authorize it
+// from its task-local availability cache. Otherwise CloudFront can refill the
+// deleted object from that stale task and cache it again after the invalidation.
+// Production and the documented defaults use a five-second edge availability
+// TTL, so this leaves another full TTL as scheduling and clock-skew margin.
+const INVALIDATION_INITIAL_DELAY_SECS: i32 = 10;
 const MAX_RETRY_BACKOFF_SECS: i32 = 300;
 
 #[derive(sqlx::FromRow)]
@@ -40,9 +46,9 @@ pub async fn enqueue(
     let inserted = sqlx::query(
         "
         INSERT INTO rend.cloudfront_invalidations (
-          distribution_id, dedupe_key, caller_reference, paths
+          distribution_id, dedupe_key, caller_reference, paths, next_attempt_at
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
         ON CONFLICT (dedupe_key) DO NOTHING
         ",
     )
@@ -50,6 +56,7 @@ pub async fn enqueue(
     .bind(dedupe_key)
     .bind(caller_reference)
     .bind(paths)
+    .bind(INVALIDATION_INITIAL_DELAY_SECS)
     .execute(&mut **tx)
     .await?;
     Ok(inserted.rows_affected() > 0)
@@ -302,5 +309,12 @@ mod tests {
         assert_eq!(retry_backoff_secs(1), 1);
         assert_eq!(retry_backoff_secs(2), 2);
         assert_eq!(retry_backoff_secs(20), 256);
+    }
+
+    #[test]
+    fn initial_delay_outlives_edge_authorization_cache() {
+        const PRODUCTION_EDGE_AVAILABILITY_TTL_SECS: i32 = 5;
+
+        assert!(INVALIDATION_INITIAL_DELAY_SECS >= PRODUCTION_EDGE_AVAILABILITY_TTL_SECS * 2);
     }
 }
