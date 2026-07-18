@@ -48,6 +48,7 @@ resource "aws_lb_target_group" "api" {
 
   health_check {
     enabled             = true
+    protocol            = "HTTPS"
     path                = "/readyz"
     matcher             = "200"
     healthy_threshold   = 2
@@ -68,6 +69,7 @@ resource "aws_lb_target_group" "edge" {
 
   health_check {
     enabled             = true
+    protocol            = "HTTPS"
     path                = "/readyz"
     matcher             = "200"
     healthy_threshold   = 2
