@@ -87,6 +87,38 @@ function cookieHeader(cookies) {
   return cookies.map((cookie) => cookie.split(";", 1)[0]).join("; ");
 }
 
+function assetArtifactUrl(reference, base, label) {
+  const value = new URL(reference, base);
+  const expectedPrefix = `${playbackBase}/v/${assetId}/`;
+  if (!value.toString().startsWith(expectedPrefix)) {
+    throw new Error(`${label} escaped the expected CloudFront asset path`);
+  }
+  if (value.search || value.hash) {
+    throw new Error(`${label} exposed query credentials`);
+  }
+  return value.toString();
+}
+
+async function signedArtifact(url, cookies, label, headers = {}) {
+  const response = await fetch(url, {
+    headers: { cookie: cookieHeader(cookies), ...headers },
+    redirect: "error",
+  });
+  if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
+  const body = new Uint8Array(await response.arrayBuffer());
+  if (body.byteLength === 0) throw new Error(`${label} returned an empty body`);
+  return { response, body };
+}
+
+function manifestReference(body, label, predicate) {
+  const reference = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#") && predicate(line));
+  if (!reference) throw new Error(`${label} omitted the expected artifact reference`);
+  return reference;
+}
+
 async function waitFor(label, timeout, operation) {
   const deadline = Date.now() + timeout;
   let last = "not attempted";
@@ -178,14 +210,10 @@ try {
     redirect: "error",
   });
   const bootstrap = await jsonResponse(bootstrapResponse, "playback bootstrap");
-  const manifestUrl = bootstrap.manifest_url;
-  if (typeof manifestUrl !== "string" || !manifestUrl.startsWith(`${playbackBase}/v/${assetId}/`)) {
+  if (typeof bootstrap.manifest_url !== "string") {
     throw new Error("playback bootstrap did not return the expected CloudFront asset URL");
   }
-  const parsedManifestUrl = new URL(manifestUrl);
-  if (parsedManifestUrl.search || parsedManifestUrl.hash) {
-    throw new Error("playback URL exposed query credentials");
-  }
+  const manifestUrl = assetArtifactUrl(bootstrap.manifest_url, playbackBase, "playback manifest URL");
 
   const cookies = responseCookies(bootstrapResponse.headers);
   for (const requiredCookie of ["CloudFront-Policy", "CloudFront-Signature", "CloudFront-Key-Pair-Id"])
@@ -193,14 +221,59 @@ try {
       throw new Error(`playback bootstrap omitted ${requiredCookie}`);
     }
 
-  const manifest = await fetch(manifestUrl, {
-    headers: { cookie: cookieHeader(cookies) },
-    redirect: "error",
+  const openerUrl = assetArtifactUrl(
+    `${playbackBase}/v/${assetId}/opener.mp4`,
+    playbackBase,
+    "opener URL",
+  );
+  await signedArtifact(openerUrl, cookies, "signed CloudFront opener", {
+    range: "bytes=0-65535",
   });
-  if (!manifest.ok) throw new Error(`signed CloudFront manifest returned HTTP ${manifest.status}`);
-  if (!(await manifest.text()).startsWith("#EXTM3U")) {
-    throw new Error("signed CloudFront manifest was not HLS");
+
+  const manifest = await signedArtifact(manifestUrl, cookies, "signed CloudFront master manifest");
+  const manifestBody = new TextDecoder().decode(manifest.body);
+  if (!manifestBody.startsWith("#EXTM3U")) {
+    throw new Error("signed CloudFront master manifest was not HLS");
   }
+
+  const renditionReference = manifestReference(
+    manifestBody,
+    "signed CloudFront master manifest",
+    (line) => line.endsWith(".m3u8"),
+  );
+  const renditionUrl = assetArtifactUrl(
+    renditionReference,
+    manifestUrl,
+    "rendition playlist URL",
+  );
+  const rendition = await signedArtifact(
+    renditionUrl,
+    cookies,
+    "signed CloudFront rendition playlist",
+  );
+  const renditionBody = new TextDecoder().decode(rendition.body);
+  if (!renditionBody.startsWith("#EXTM3U")) {
+    throw new Error("signed CloudFront rendition playlist was not HLS");
+  }
+
+  const initReference = renditionBody.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1];
+  if (!initReference) throw new Error("signed CloudFront rendition playlist omitted its init file");
+  const initUrl = assetArtifactUrl(initReference, renditionUrl, "HLS init URL");
+  await signedArtifact(initUrl, cookies, "signed CloudFront HLS init file", {
+    range: "bytes=0-65535",
+  });
+
+  const segmentReference = manifestReference(
+    renditionBody,
+    "signed CloudFront rendition playlist",
+    (line) => line.endsWith(".m4s") || line.endsWith(".ts"),
+  );
+  const segmentUrl = assetArtifactUrl(segmentReference, renditionUrl, "HLS segment URL");
+  await signedArtifact(segmentUrl, cookies, "signed CloudFront HLS media segment", {
+    range: "bytes=0-65535",
+  });
+
+  const artifactUrls = [openerUrl, manifestUrl, renditionUrl, initUrl, segmentUrl];
 
   await waitFor("playback analytics", 90_000, async () => {
     const { body } = await apiJson(`/v1/assets/${encodeURIComponent(assetId)}/analytics/playback`);
@@ -223,11 +296,19 @@ try {
   });
 
   await waitFor("CloudFront deletion invalidation", deleteTimeoutMs, async () => {
-    const response = await fetch(manifestUrl, {
-      headers: { cookie: cookieHeader(cookies) },
-      redirect: "manual",
-    });
-    return { done: response.status === 403 || response.status === 404, detail: `HTTP ${response.status}` };
+    const responses = await Promise.all(
+      artifactUrls.map((url) =>
+        fetch(url, {
+          headers: { cookie: cookieHeader(cookies) },
+          redirect: "manual",
+        }),
+      ),
+    );
+    const statuses = responses.map((response) => response.status);
+    return {
+      done: statuses.every((status) => status === 403 || status === 404),
+      detail: `artifact HTTP statuses=${statuses.join(",")}`,
+    };
   });
 
   console.log(`AWS public smoke passed for asset ${assetId}`);
