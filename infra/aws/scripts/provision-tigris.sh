@@ -59,7 +59,7 @@ if [[ -z "$tigris_access_key" || -z "$tigris_secret_key" ]]; then
 fi
 
 tigris_s3api() {
-  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
     AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
@@ -72,7 +72,7 @@ tigris_s3api() {
 # Restrict compatibility mode to the two affected configuration APIs; its
 # bucket-policy API expects the normal AWS CLI headers.
 tigris_s3api_bucket_config() {
-  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
     AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
@@ -83,7 +83,7 @@ tigris_s3api_bucket_config() {
 }
 
 tigris_cli() {
-  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
     AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_ENDPOINT_URL_S3="$TIGRIS_ENDPOINT" \
@@ -93,7 +93,7 @@ tigris_cli() {
 }
 
 tigris_cloudfront() {
-  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
     AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION=us-east-1 \
@@ -208,22 +208,13 @@ if [[ -z "$playback_key_id" ]]; then
     --query 'PublicKey.Id' \
     --output text)"
 else
-  current_key="$(tigris_cloudfront get-public-key-config \
+  current_key="$(tigris_cloudfront get-public-key \
     --id "$playback_key_id" \
     --output json)"
-  current_etag="$(jq -r '.ETag' <<<"$current_key")"
-  current_encoded_key="$(jq -r '.PublicKeyConfig.EncodedKey' <<<"$current_key")"
+  current_encoded_key="$(jq -r '.PublicKey.PublicKeyConfig.EncodedKey' <<<"$current_key")"
   if [[ "$current_encoded_key" != "$playback_public_key_pem" ]]; then
-    jq -n \
-      --arg name "$playback_key_name" \
-      --arg encoded_key "$playback_public_key_pem" \
-      --arg comment "Rend private Tigris playback signed cookies" \
-      '{Name:$name,EncodedKey:$encoded_key,Comment:$comment}' \
-      >"$work_dir/public-key-update.json"
-    tigris_cloudfront update-public-key \
-      --id "$playback_key_id" \
-      --if-match "$current_etag" \
-      --public-key-config "file://$work_dir/public-key-update.json" >/dev/null
+    echo "Tigris private playback public key does not match the configured Rend key" >&2
+    exit 1
   fi
 fi
 if [[ -z "$playback_key_id" || "$playback_key_id" == "None" ]]; then
