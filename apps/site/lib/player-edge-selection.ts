@@ -146,6 +146,13 @@ function playbackMode(env: EnvLike) {
   return mode === "edge" ? "edge" : "tigris";
 }
 
+function configuredPrimaryEdgePlaybackBaseUrl(env: EnvLike) {
+  const configured =
+    envString(env, "REND_PLAYER_PLAYBACK_BASE_URL") ||
+    envString(env, "REND_PLAYBACK_BASE_URL");
+  return configured ? normalizePlaybackBaseUrl(configured) : null;
+}
+
 function envEnabled(env: EnvLike, name: string, fallback = true) {
   const value = envString(env, name).toLowerCase();
   if (!value) return fallback;
@@ -184,9 +191,9 @@ export type PlaybackBaseUrlDecision = {
     | "tigris_direct"
     | "tigris_origin_proxy"
     | "configured_edge"
+    | "configured_primary"
     | "shared_metal"
     | "configured_edge_fallback"
-    | "configured_fallback"
     | "none";
   routeId?: string;
   routeRegion?: string;
@@ -244,6 +251,15 @@ export function playbackBaseUrlDecisionForRequest(
     };
   }
 
+  const configuredPrimary = configuredPrimaryEdgePlaybackBaseUrl(env);
+  if (configuredPrimary) {
+    return {
+      credentialMode: "include",
+      playbackBaseUrl: configuredPrimary,
+      source: "configured_primary",
+    };
+  }
+
   const selectedEdge = selectedMetalPlaybackRouteDecisionFromLocation(
     requestLocation(request),
   );
@@ -267,14 +283,7 @@ export function playbackBaseUrlDecisionForRequest(
       source: "configured_edge_fallback",
     };
 
-  const configured = envString(env, "REND_PLAYER_PLAYBACK_BASE_URL");
-  return configured
-    ? {
-        credentialMode: "include",
-        playbackBaseUrl: normalizePlaybackBaseUrl(configured),
-        source: "configured_fallback",
-      }
-    : { credentialMode: "include", playbackBaseUrl: null, source: "none" };
+  return { credentialMode: "include", playbackBaseUrl: null, source: "none" };
 }
 
 export function playbackBaseUrlForRequest(

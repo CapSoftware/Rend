@@ -212,15 +212,40 @@ test("playback base URL supports allowlisted manual override before geo selectio
   );
 });
 
-test("playback base URL uses the default shared metal route without geo headers in edge mode", () => {
+test("playback base URL prefers the configured production origin over shared metal", () => {
+  const request = new Request("https://www.rend.so/api/player/asset");
+
+  assert.deepEqual(
+    playbackBaseUrlDecisionForRequest(request, {
+      REND_PLAYBACK_MODE: "edge",
+      REND_PLAYER_PLAYBACK_BASE_URL: "https://video.rend.so",
+      REND_PLAYER_EDGE_BASE_URLS: "",
+    }),
+    {
+      credentialMode: "include",
+      playbackBaseUrl: "https://video.rend.so",
+      source: "configured_primary",
+    },
+  );
+});
+
+test("playback base URL accepts the service-wide playback origin as the configured primary", () => {
   const request = new Request("https://www.rend.so/api/player/asset");
 
   assert.equal(
     playbackBaseUrlForRequest(request, {
       REND_PLAYBACK_MODE: "edge",
-      REND_PLAYER_PLAYBACK_BASE_URL: "https://media.rend.so",
-      REND_PLAYER_EDGE_BASE_URLS: "",
+      REND_PLAYBACK_BASE_URL: "https://video.rend.so",
     }),
+    "https://video.rend.so",
+  );
+});
+
+test("playback base URL uses the default shared metal route without a configured origin", () => {
+  const request = new Request("https://www.rend.so/api/player/asset");
+
+  assert.equal(
+    playbackBaseUrlForRequest(request, { REND_PLAYBACK_MODE: "edge" }),
     "https://ash-1.play.rend.so",
   );
 });
