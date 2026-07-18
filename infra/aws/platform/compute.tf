@@ -209,7 +209,7 @@ resource "aws_ecs_task_definition" "api" {
       essential  = true
       entryPoint = ["/bin/sh", "-c"]
       command = [<<-EOT
-        printf '{\n  auto_https disable_redirects\n  admin off\n}\nhttps://:8443 {\n  tls internal\n  reverse_proxy 127.0.0.1:4000\n}\n' >/tmp/Caddyfile
+        printf '{\n  auto_https disable_redirects\n  admin off\n  default_sni localhost\n  fallback_sni localhost\n}\nhttps://localhost:8443, https://:8443 {\n  tls internal\n  reverse_proxy 127.0.0.1:4000\n}\n' >/tmp/Caddyfile
         exec caddy run --config /tmp/Caddyfile --adapter caddyfile
       EOT
       ]
@@ -351,7 +351,7 @@ resource "aws_ecs_task_definition" "edge" {
       essential  = true
       entryPoint = ["/bin/sh", "-c"]
       command = [<<-EOT
-        printf '{\n  auto_https disable_redirects\n  admin off\n}\nhttps://:8443 {\n  tls internal\n  reverse_proxy 127.0.0.1:4100\n}\n' >/tmp/Caddyfile
+        printf '{\n  auto_https disable_redirects\n  admin off\n  default_sni localhost\n  fallback_sni localhost\n}\nhttps://localhost:8443, https://:8443 {\n  tls internal\n  reverse_proxy 127.0.0.1:4100\n}\n' >/tmp/Caddyfile
         exec caddy run --config /tmp/Caddyfile --adapter caddyfile
       EOT
       ]
