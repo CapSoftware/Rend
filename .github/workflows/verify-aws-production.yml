@@ -1,0 +1,30 @@
+name: Verify Rend AWS production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rend-aws-production-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify public media pipeline
+        env:
+          REND_API_BASE_URL: https://api.rend.so
+          REND_PLAYBACK_BASE_URL: https://video.rend.so
+          REND_READINESS_API_KEY: ${{ secrets.REND_READINESS_API_KEY }}
+        run: node scripts/smoke-aws-public.mjs

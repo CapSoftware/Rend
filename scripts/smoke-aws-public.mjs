@@ -104,8 +104,19 @@ async function signedArtifact(url, cookies, label, headers = {}) {
     headers: { cookie: cookieHeader(cookies), ...headers },
     redirect: "error",
   });
-  if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
   const body = new Uint8Array(await response.arrayBuffer());
+  if (!response.ok) {
+    const detail = new TextDecoder()
+      .decode(body.slice(0, 512))
+      .replace(/\s+/g, " ")
+      .trim();
+    const cache = response.headers.get("x-cache") || "missing";
+    const contentType = response.headers.get("content-type") || "missing";
+    throw new Error(
+      `${label} (${new URL(url).pathname}) returned HTTP ${response.status}; ` +
+        `x-cache=${cache}; content-type=${contentType}; body=${detail || "empty"}`,
+    );
+  }
   if (body.byteLength === 0) throw new Error(`${label} returned an empty body`);
   return { response, body };
 }
