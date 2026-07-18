@@ -75,6 +75,17 @@ data "aws_iam_policy_document" "ecs_task" {
   }
 
   statement {
+    sid = "ProtectActiveMediaTask"
+    actions = [
+      "ecs:GetTaskProtection",
+      "ecs:UpdateTaskProtection",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${var.expected_account_id}:task/${local.resource_prefix}/*",
+    ]
+  }
+
+  statement {
     sid       = "InvalidateDeletedPlayback"
     actions   = ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation"]
     resources = [aws_cloudfront_distribution.this.arn]

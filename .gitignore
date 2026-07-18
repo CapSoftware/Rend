@@ -44,6 +44,7 @@ node_modules/
 # testing
 coverage/
 fixtures/media/*.mp4
+!fixtures/media/rend-benchmark-small.mp4
 
 # next.js
 apps/*/.next/

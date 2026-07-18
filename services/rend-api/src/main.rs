@@ -6271,7 +6271,7 @@ async fn process_media_job_inner(
             asset_id = %job.asset_id,
             "media job skipped because asset was deleted or suspended before processing started",
         );
-        return Ok(MediaJobDisposition::Completed(0));
+        return Ok(MediaJobDisposition::DeferredUnavailable);
     }
 
     let (source_object_key, source_bytes) =
