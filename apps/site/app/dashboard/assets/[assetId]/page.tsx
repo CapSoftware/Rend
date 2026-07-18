@@ -5,6 +5,7 @@ import {
   AssetApiError,
   fetchAssetDetail,
   fetchAssetPlaybackAnalytics,
+  fetchAssetPlayerTelemetry,
   normalizeAssetId,
 } from "../../../../lib/asset-api.ts";
 import {
@@ -12,7 +13,6 @@ import {
   organizationSuspendedMessage,
 } from "../../../../lib/dashboard-auth.ts";
 import { requireDashboardAccess } from "../../../../lib/dashboard-auth-next.ts";
-import { recentPlayerTelemetryEvents } from "../../../../lib/player-telemetry.ts";
 
 type AssetTab = "overview" | "artifacts" | "analytics" | "embed";
 
@@ -54,8 +54,10 @@ export default async function AssetPage({ params, searchParams }: AssetPageProps
     throw error;
   }
 
-  const analytics = await fetchAssetPlaybackAnalytics(access, assetId).catch(() => null);
-  const telemetry = recentPlayerTelemetryEvents({ assetId, limit: 20 });
+  const [analytics, telemetry] = await Promise.all([
+    fetchAssetPlaybackAnalytics(access, assetId).catch(() => null),
+    fetchAssetPlayerTelemetry(access, assetId, { limit: 20 }).catch(() => []),
+  ]);
 
   return (
     <AssetDetailClient

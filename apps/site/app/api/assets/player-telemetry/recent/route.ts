@@ -2,13 +2,12 @@ import {
   assetApiErrorResponse,
   assetErrorResponse,
   assetJsonResponse,
-  fetchAssetDetail,
+  fetchAssetPlayerTelemetry,
 } from "../../../../../lib/asset-api.ts";
 import {
   dashboardAccessErrorResponse,
   dashboardAccessFromRequest,
 } from "../../../../../lib/dashboard-auth.ts";
-import { recentPlayerTelemetryEvents } from "../../../../../lib/player-telemetry.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -41,17 +40,14 @@ export async function GET(request: Request) {
   }
 
   try {
-    await fetchAssetDetail(access.context, assetId);
+    return assetJsonResponse({
+      status: "ok",
+      events: await fetchAssetPlayerTelemetry(access.context, assetId, {
+        playbackSessionId,
+        limit: numericLimit(url.searchParams.get("limit")),
+      }),
+    });
   } catch (error) {
     return assetApiErrorResponse(error);
   }
-
-  return assetJsonResponse({
-    status: "ok",
-    events: recentPlayerTelemetryEvents({
-      assetId,
-      playbackSessionId,
-      limit: numericLimit(url.searchParams.get("limit")),
-    }),
-  });
 }

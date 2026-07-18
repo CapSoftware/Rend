@@ -43,6 +43,9 @@ const DEFAULT_LIVE_WINDOW_SECS: u64 = 60 * 60;
 const MAX_LIVE_WINDOW_SECS: u64 = 60 * 60;
 const LIVE_ACTIVE_SESSION_LOOKBACK_SECS: u64 = 5 * 60;
 const LIVE_RECENT_ASSET_LOOKBACK_SECS: u64 = 5 * 60;
+const DEFAULT_RECENT_PLAYER_EVENT_LIMIT: usize = 20;
+const MAX_RECENT_PLAYER_EVENT_LIMIT: usize = 100;
+const RECENT_PLAYER_EVENT_LOOKBACK_DAYS: i64 = 7;
 const PLAYER_WATCH_DELTA_MAX_MS: u32 = 60_000;
 const NIL_ORGANIZATION_ID: &str = "00000000-0000-0000-0000-000000000000";
 
@@ -212,6 +215,12 @@ pub(crate) struct AnalyticsOverviewQuery {
 #[derive(Debug, Deserialize)]
 pub(crate) struct AnalyticsLiveQuery {
     window_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecentPlayerEventsQuery {
+    limit: Option<usize>,
+    playback_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,6 +609,35 @@ struct ClickHouseLiveAnalyticsRow {
     asset_id: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct ClickHouseRecentPlayerEventRow {
+    event_id: String,
+    event_time_ms: i64,
+    received_at_ms: i64,
+    playback_session_id: String,
+    asset_id: String,
+    phase: String,
+    selected_playback_mode: String,
+    selected_artifact_path: String,
+    first_frame_ms: u32,
+    bootstrap_duration_ms: u32,
+    bootstrap_http_status: u16,
+    stall_duration_ms: u32,
+    watch_delta_ms: u32,
+    playback_failure_code: String,
+    browser_name: String,
+    browser_version: String,
+    os_name: String,
+    os_version: String,
+    device_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RecentPlayerEventsResponse {
+    asset_id: String,
+    events: Vec<ClickHouseRecentPlayerEventRow>,
+}
+
 #[derive(Debug, Serialize)]
 struct AnalyticsLiveMinutePoint {
     bucket_start: String,
@@ -766,6 +804,18 @@ pub(crate) async fn get_analytics_live(
     }
 }
 
+pub(crate) async fn get_recent_player_events(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<RequestAuth>,
+    AxumPath(asset_id): AxumPath<String>,
+    Query(query): Query<RecentPlayerEventsQuery>,
+) -> Response {
+    match get_recent_player_events_inner(state, auth, asset_id, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn get_playback_analytics_inner(
     state: Arc<AppState>,
     auth: RequestAuth,
@@ -890,6 +940,42 @@ async fn get_analytics_live_inner(
             analytics_live_from_rollups(state, &organization_id, window, fetched_at).await
         }
     }
+}
+
+async fn get_recent_player_events_inner(
+    state: Arc<AppState>,
+    auth: RequestAuth,
+    asset_id: String,
+    query: RecentPlayerEventsQuery,
+) -> std::result::Result<RecentPlayerEventsResponse, AppError> {
+    require_scope(&auth, ApiScope::Analytics)?;
+    let organization_id = normalize_org_id(&auth.organization_id)?;
+    let asset_id = normalize_asset_id(&asset_id)?;
+    ensure_asset_not_suspended(&state.db, &organization_id, &asset_id).await?;
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_RECENT_PLAYER_EVENT_LIMIT)
+        .clamp(1, MAX_RECENT_PLAYER_EVENT_LIMIT);
+    let playback_session_id = query
+        .playback_session_id
+        .as_deref()
+        .map(|value| normalize_safe_token(value, "playback_session_id", 160))
+        .transpose()?;
+    let rows = query_clickhouse_recent_player_events(
+        &state.http,
+        &state.config.playback_telemetry,
+        &organization_id,
+        &asset_id,
+        playback_session_id.as_deref(),
+        limit,
+    )
+    .await?;
+
+    Ok(RecentPlayerEventsResponse {
+        asset_id,
+        events: rows,
+    })
 }
 
 async fn analytics_live_from_rollups(
@@ -1662,6 +1748,23 @@ async fn query_clickhouse_live_analytics(
     query_clickhouse_rows(http, config, &query).await
 }
 
+async fn query_clickhouse_recent_player_events(
+    http: &reqwest::Client,
+    config: &TelemetryConfig,
+    organization_id: &str,
+    asset_id: &str,
+    playback_session_id: Option<&str>,
+    limit: usize,
+) -> std::result::Result<Vec<ClickHouseRecentPlayerEventRow>, AppError> {
+    let query = clickhouse_recent_player_events_query(
+        organization_id,
+        asset_id,
+        playback_session_id,
+        limit,
+    );
+    query_clickhouse_rows(http, config, &query).await
+}
+
 async fn query_clickhouse_analytics_top_assets(
     http: &reqwest::Client,
     config: &TelemetryConfig,
@@ -2091,6 +2194,50 @@ fn clickhouse_live_analytics_query(
           LIMIT 5 \
         ) \
         FORMAT JSONEachRow",
+    )
+}
+
+fn clickhouse_recent_player_events_query(
+    organization_id: &str,
+    asset_id: &str,
+    playback_session_id: Option<&str>,
+    limit: usize,
+) -> String {
+    let session_filter = playback_session_id
+        .map(|session_id| format!(" AND events.playback_session_id = '{session_id}'"))
+        .unwrap_or_default();
+    let limit = limit.clamp(1, MAX_RECENT_PLAYER_EVENT_LIMIT);
+
+    format!(
+        "\
+        SELECT \
+          events.event_id AS event_id, \
+          toUnixTimestamp64Milli(argMax(events.observed_at, events.received_at)) AS event_time_ms, \
+          toUnixTimestamp64Milli(max(events.received_at)) AS received_at_ms, \
+          argMax(events.playback_session_id, events.received_at) AS playback_session_id, \
+          toString(argMax(events.asset_id, events.received_at)) AS asset_id, \
+          argMax(events.phase, events.received_at) AS phase, \
+          argMax(events.selected_playback_mode, events.received_at) AS selected_playback_mode, \
+          argMax(events.selected_artifact_path, events.received_at) AS selected_artifact_path, \
+          argMax(events.first_frame_ms, events.received_at) AS first_frame_ms, \
+          argMax(events.bootstrap_duration_ms, events.received_at) AS bootstrap_duration_ms, \
+          argMax(events.bootstrap_http_status, events.received_at) AS bootstrap_http_status, \
+          argMax(events.stall_duration_ms, events.received_at) AS stall_duration_ms, \
+          argMax(events.watch_delta_ms, events.received_at) AS watch_delta_ms, \
+          argMax(events.playback_failure_code, events.received_at) AS playback_failure_code, \
+          argMax(events.browser_name, events.received_at) AS browser_name, \
+          argMax(events.browser_version, events.received_at) AS browser_version, \
+          argMax(events.os_name, events.received_at) AS os_name, \
+          argMax(events.os_version, events.received_at) AS os_version, \
+          argMax(events.device_type, events.received_at) AS device_type \
+        FROM player_events AS events \
+        WHERE events.organization_id = toUUID('{organization_id}') \
+          AND events.asset_id = toUUID('{asset_id}') \
+          AND events.observed_at >= now64(3) - INTERVAL {RECENT_PLAYER_EVENT_LOOKBACK_DAYS} DAY{session_filter} \
+        GROUP BY events.event_id \
+        ORDER BY received_at_ms DESC \
+        LIMIT {limit} \
+        FORMAT JSONEachRow"
     )
 }
 
@@ -2891,6 +3038,28 @@ mod tests {
 
         assert!(query.contains("toInt64(toUnixTimestamp(toStartOfMinute(observed_at))) * 1000"));
         assert!(!query.contains("toUnixTimestamp64Milli(toStartOfMinute(observed_at))"));
+    }
+
+    #[test]
+    fn recent_player_events_query_is_tenant_scoped_deduplicated_and_bounded() {
+        let query = clickhouse_recent_player_events_query(
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+            Some("session-1"),
+            500,
+        );
+
+        assert!(
+            query.contains(
+                "events.organization_id = toUUID('00000000-0000-0000-0000-000000000001')"
+            )
+        );
+        assert!(query.contains("events.asset_id = toUUID('00000000-0000-0000-0000-000000000002')"));
+        assert!(query.contains("events.playback_session_id = 'session-1'"));
+        assert!(query.contains("GROUP BY events.event_id"));
+        assert!(query.contains("ORDER BY received_at_ms DESC"));
+        assert!(query.contains("LIMIT 100"));
+        assert!(query.contains("FORMAT JSONEachRow"));
     }
 
     #[test]

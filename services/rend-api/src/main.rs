@@ -2001,6 +2001,10 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         ));
     let site_internal_routes = Router::new()
         .route("/assets/{asset_id}/thumbnail", get(get_asset_thumbnail))
+        .route(
+            "/assets/{asset_id}/player-events",
+            get(telemetry::get_recent_player_events),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_auth,

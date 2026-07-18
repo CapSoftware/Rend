@@ -14,6 +14,7 @@ import type {
   AssetDeleteResponse,
   AssetErrorResponse,
   AssetPlaybackAnalytics,
+  AssetPlayerTelemetryEvent,
   AssetUploadResponse,
   AnalyticsTimeSeriesPoint,
 } from "./asset-types.ts";
@@ -109,6 +110,19 @@ function safeState(value: unknown) {
   return state && /^[a-z0-9_:-]+$/i.test(state) ? state : undefined;
 }
 
+function safeTelemetryToken(value: unknown, maxLength = 160) {
+  const token = safeString(value, maxLength);
+  return token && /^[a-z0-9._:-]+$/i.test(token) ? token : undefined;
+}
+
+function safeArtifactPath(value: unknown) {
+  const path = safeString(value, 512);
+  if (!path || path.startsWith("/") || path.includes("..") || /[?#]/.test(path) || path.includes("://")) {
+    return undefined;
+  }
+  return path;
+}
+
 function safeAssetId(value: unknown) {
   const assetId = safeString(value, 64);
   return assetId && normalizeAssetId(assetId) ? assetId.toLowerCase() : undefined;
@@ -126,6 +140,11 @@ function safeInteger(value: unknown) {
 function safeOptionalPositiveInteger(value: unknown) {
   const number = safeInteger(value);
   return number !== undefined && number >= 0 ? number : undefined;
+}
+
+function safeOptionalNonzeroInteger(value: unknown) {
+  const number = safeOptionalPositiveInteger(value);
+  return number !== undefined && number > 0 ? number : undefined;
 }
 
 function safeTimestamp(value: unknown) {
@@ -495,6 +514,41 @@ function sanitizeAnalytics(value: unknown): AssetPlaybackAnalytics | null {
     status_code_counts: sanitizeCountMap(value.status_code_counts),
     first_seen: safeTimestamp(value.first_seen),
     last_seen: safeTimestamp(value.last_seen),
+  };
+}
+
+function sanitizePlayerTelemetryEvent(value: unknown): AssetPlayerTelemetryEvent | null {
+  if (!isRecord(value)) return null;
+
+  const playbackSessionId = safeTelemetryToken(value.playback_session_id);
+  const assetId = safeAssetId(value.asset_id);
+  const phase = safeState(value.phase);
+  const eventTimeMs = safeOptionalPositiveInteger(value.event_time_ms);
+  const receivedAtMs = safeOptionalPositiveInteger(value.received_at_ms);
+  if (!playbackSessionId || !assetId || !phase || eventTimeMs === undefined || receivedAtMs === undefined) {
+    return null;
+  }
+
+  return {
+    event_id: safeTelemetryToken(value.event_id),
+    playback_session_id: playbackSessionId,
+    asset_id: assetId,
+    phase,
+    event_time_ms: eventTimeMs,
+    received_at_ms: receivedAtMs,
+    selected_playback_mode: safeState(value.selected_playback_mode),
+    selected_artifact_path: safeArtifactPath(value.selected_artifact_path),
+    first_frame_ms: safeOptionalNonzeroInteger(value.first_frame_ms),
+    bootstrap_duration_ms: safeOptionalNonzeroInteger(value.bootstrap_duration_ms),
+    bootstrap_http_status: safeOptionalNonzeroInteger(value.bootstrap_http_status),
+    stall_duration_ms: safeOptionalNonzeroInteger(value.stall_duration_ms),
+    watch_delta_ms: safeOptionalNonzeroInteger(value.watch_delta_ms),
+    playback_failure_code: safeState(value.playback_failure_code),
+    browser_name: safeTelemetryToken(value.browser_name, 64),
+    browser_version: safeTelemetryToken(value.browser_version, 64),
+    os_name: safeTelemetryToken(value.os_name, 64),
+    os_version: safeTelemetryToken(value.os_version, 64),
+    device_type: safeState(value.device_type),
   };
 }
 
@@ -1054,6 +1108,42 @@ export async function fetchAssetPlaybackAnalytics(
   }
 
   return analytics;
+}
+
+export async function fetchAssetPlayerTelemetry(
+  auth: AssetApiAuthContext,
+  assetId: string,
+  options: { limit?: number; playbackSessionId?: string } = {}
+): Promise<AssetPlayerTelemetryEvent[]> {
+  const normalizedAssetId = normalizeAssetId(assetId);
+  if (!normalizedAssetId) {
+    throw new AssetApiError(400, {
+      status: "error",
+      error: "invalid_asset_id",
+      message: "Asset id is invalid",
+    });
+  }
+
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20) || 20, 1), 100);
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options.playbackSessionId) params.set("playback_session_id", options.playbackSessionId);
+  const upstream = await controlPlaneFetch(
+    auth,
+    `/internal/site/assets/${encodeURIComponent(normalizedAssetId)}/player-events?${params}`
+  );
+  const data = await readUpstreamJson(upstream);
+  if (!isRecord(data) || safeAssetId(data.asset_id) !== normalizedAssetId || !Array.isArray(data.events)) {
+    throw new AssetApiError(502, {
+      status: "error",
+      error: "rend_api_invalid_response",
+      message: "Rend API returned invalid player telemetry",
+    });
+  }
+
+  return data.events.flatMap((event) => {
+    const safeEvent = sanitizePlayerTelemetryEvent(event);
+    return safeEvent ? [safeEvent] : [];
+  });
 }
 
 export async function fetchAnalyticsOverview(

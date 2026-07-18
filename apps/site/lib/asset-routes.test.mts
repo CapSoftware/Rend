@@ -6,6 +6,7 @@ import {
   emptyAnalyticsOverview,
   fetchAnalyticsOverview,
   fetchAssetDetail,
+  fetchAssetPlayerTelemetry,
   fetchAssetThumbnail,
   isAnalyticsTemporarilyUnavailable,
   listAssets,
@@ -157,6 +158,69 @@ test("asset thumbnail client streams binary thumbnail responses without playback
       assert.equal(response.headers.get("cache-control"), "private, max-age=31536000, immutable");
       assert.equal(response.headers.get("x-content-type-options"), "nosniff");
       assert.equal(await response.text(), "jpeg");
+    });
+  });
+});
+
+test("asset player telemetry client reads durable events and strips invalid rows", async () => {
+  await withEnv(routeEnv(), async () => {
+    const assetId = "00000000-0000-0000-0000-000000000001";
+    await withMockFetch(async (url, init) => {
+      assert.equal(
+        String(url),
+        `http://127.0.0.1:4000/internal/site/assets/${assetId}/player-events?limit=20`
+      );
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("x-rend-site-token"), "site-internal-token");
+      assert.equal(headers.get("x-rend-organization-id"), AUTH_CONTEXT.organizationId);
+      return Response.json({
+        asset_id: assetId,
+        events: [
+          {
+            event_id: "player-event-1",
+            playback_session_id: "session-1",
+            asset_id: assetId,
+            phase: "first_frame",
+            event_time_ms: 1_765_000_000_000,
+            received_at_ms: 1_765_000_000_100,
+            selected_playback_mode: "primary",
+            selected_artifact_path: "hls/360p/segment_00000.m4s",
+            first_frame_ms: 1133,
+            browser_name: "Chrome",
+          },
+          {
+            playback_session_id: "invalid session with spaces",
+            asset_id: assetId,
+            phase: "first_frame",
+            event_time_ms: 1,
+            received_at_ms: 2,
+          },
+        ],
+      });
+    }, async () => {
+      assert.deepEqual(await fetchAssetPlayerTelemetry(AUTH_CONTEXT, assetId), [
+        {
+          event_id: "player-event-1",
+          playback_session_id: "session-1",
+          asset_id: assetId,
+          phase: "first_frame",
+          event_time_ms: 1_765_000_000_000,
+          received_at_ms: 1_765_000_000_100,
+          selected_playback_mode: "primary",
+          selected_artifact_path: "hls/360p/segment_00000.m4s",
+          first_frame_ms: 1133,
+          bootstrap_duration_ms: undefined,
+          bootstrap_http_status: undefined,
+          stall_duration_ms: undefined,
+          watch_delta_ms: undefined,
+          playback_failure_code: undefined,
+          browser_name: "Chrome",
+          browser_version: undefined,
+          os_name: undefined,
+          os_version: undefined,
+          device_type: undefined,
+        },
+      ]);
     });
   });
 });
