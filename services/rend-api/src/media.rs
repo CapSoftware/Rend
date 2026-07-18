@@ -146,6 +146,14 @@ pub struct PublicPlaybackAliasConfig {
     pub bucket: Option<String>,
     pub prefix: String,
     pub acl: PublicPlaybackAliasAcl,
+    pub metadata_rename: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PlaybackAliasBackfillSummary {
+    pub examined: u64,
+    pub moved: u64,
+    pub already_canonical: u64,
 }
 
 #[derive(Clone)]
@@ -1487,12 +1495,25 @@ async fn persist_artifacts_and_state(
         .iter()
         .filter(|artifact| !existing_keys.contains(&artifact.object_key))
         .collect::<Vec<_>>();
-    // Fenced workers publish only immutable, lease-scoped storage keys. The
-    // stable public object_key is resolved through the committed artifact row,
-    // so a late request from a stale worker can never overwrite a winner.
-    let new_storage_keys = new_artifacts
+    // Fenced workers upload into immutable, lease-scoped keys. On Tigris we
+    // metadata-rename the winning objects into their stable private `/v/`
+    // names while the database publication fence is held. This is an O(1)
+    // metadata operation: no media bytes are copied and stale workers can
+    // never publish over the active lease.
+    let uploaded_storage_keys = new_artifacts
         .iter()
         .map(|artifact| uploaded_artifact_object_key(request, &artifact.object_key))
+        .collect::<Vec<_>>();
+    let new_storage_keys = new_artifacts
+        .iter()
+        .map(|artifact| durable_artifact_storage_key(request, &artifact.object_key))
+        .collect::<Vec<_>>();
+    let publication_storage_keys = uploaded_storage_keys
+        .iter()
+        .chain(new_storage_keys.iter())
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
 
     let database_result: Result<()> = async {
@@ -1514,6 +1535,8 @@ async fn persist_artifacts_and_state(
                 anyhow::bail!("media artifact publication lease expired");
             }
         }
+
+        promote_private_playback_aliases(request, &new_artifacts).await?;
 
         let planned_newly_used_bytes = new_artifacts.iter().fold(0_i64, |total, artifact| {
             total.saturating_add(artifact.byte_size)
@@ -1556,7 +1579,7 @@ async fn persist_artifacts_and_state(
 
         let mut newly_used_bytes = 0_i64;
         for artifact in &new_artifacts {
-            let storage_object_key = uploaded_artifact_object_key(request, &artifact.object_key);
+            let storage_object_key = durable_artifact_storage_key(request, &artifact.object_key);
             let (artifact_id, byte_delta) =
                 insert_artifact(&mut tx, asset_id, artifact, &storage_object_key)
                     .await
@@ -1717,7 +1740,7 @@ async fn persist_artifacts_and_state(
         return match resolve_uncertain_canonical_publication(
             request,
             &new_artifacts,
-            &new_storage_keys,
+            &publication_storage_keys,
             playable_state,
         )
         .await
@@ -1733,7 +1756,7 @@ async fn persist_artifacts_and_state(
         match resolve_uncertain_canonical_publication(
             request,
             &new_artifacts,
-            &new_storage_keys,
+            &publication_storage_keys,
             playable_state,
         )
         .await
@@ -1781,6 +1804,183 @@ async fn persist_artifacts_and_state(
         }
     }
     Ok(true)
+}
+
+fn durable_artifact_storage_key(request: &ProcessMediaRequest, canonical_key: &str) -> String {
+    let Some(config) = request.public_playback_alias.as_ref() else {
+        return uploaded_artifact_object_key(request, canonical_key);
+    };
+    if request.fence.is_none()
+        || !config.metadata_rename
+        || config.acl != PublicPlaybackAliasAcl::Inherit
+        || config
+            .bucket
+            .as_deref()
+            .is_some_and(|bucket| bucket != request.s3_bucket)
+    {
+        return uploaded_artifact_object_key(request, canonical_key);
+    }
+    public_playback_alias_object_key(&request.asset_id, canonical_key, &config.prefix)
+        .unwrap_or_else(|| uploaded_artifact_object_key(request, canonical_key))
+}
+
+async fn promote_private_playback_aliases(
+    request: &ProcessMediaRequest,
+    artifacts: &[&UploadedArtifact],
+) -> Result<()> {
+    let Some(config) = request.public_playback_alias.as_ref() else {
+        return Ok(());
+    };
+    if request.fence.is_none()
+        || !config.metadata_rename
+        || config.acl != PublicPlaybackAliasAcl::Inherit
+        || config
+            .bucket
+            .as_deref()
+            .is_some_and(|bucket| bucket != request.s3_bucket)
+    {
+        return Ok(());
+    }
+
+    let mut ordered = artifacts.to_vec();
+    ordered.sort_by_key(|artifact| publication_order(&artifact.object_key));
+    for artifact in ordered {
+        let source_key = uploaded_artifact_object_key(request, &artifact.object_key);
+        let destination_key = durable_artifact_storage_key(request, &artifact.object_key);
+        if source_key == destination_key {
+            continue;
+        }
+        tigris_metadata_rename(
+            &request.s3,
+            &request.s3_bucket,
+            &source_key,
+            &destination_key,
+        )
+        .await
+            .with_context(|| {
+                format!(
+                    "failed to metadata-rename private playback artifact {source_key} to {destination_key}"
+                )
+            })?;
+    }
+    Ok(())
+}
+
+async fn tigris_metadata_rename(
+    s3: &S3Client,
+    bucket: &str,
+    source_key: &str,
+    destination_key: &str,
+) -> Result<()> {
+    s3.copy_object()
+        .bucket(bucket)
+        .key(destination_key)
+        .copy_source(format!("{bucket}/{source_key}"))
+        .customize()
+        .mutate_request(|request| {
+            request.headers_mut().append("x-tigris-rename", "true");
+        })
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn backfill_private_playback_aliases(
+    db: &PgPool,
+    s3: &S3Client,
+    bucket: &str,
+    alias_prefix: &str,
+) -> Result<PlaybackAliasBackfillSummary> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
+        "
+        SELECT artifact.id::text,
+               artifact.asset_id::text,
+               artifact.object_key,
+               artifact.storage_object_key,
+               artifact.byte_size
+        FROM rend.artifacts artifact
+        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
+        INNER JOIN rend_auth.organization org ON org.id = asset.organization_id
+        WHERE artifact.kind <> 'source'
+          AND asset.deleted_at IS NULL
+          AND asset.suspended_at IS NULL
+          AND org.suspended_at IS NULL
+        ORDER BY artifact.asset_id,
+                 CASE WHEN artifact.object_key LIKE '%/hls/master.m3u8' THEN 2
+                      WHEN artifact.object_key LIKE '%.m3u8' THEN 1
+                      ELSE 0 END,
+                 artifact.object_key
+        ",
+    )
+    .fetch_all(db)
+    .await
+    .context("failed to load playback artifacts for private alias backfill")?;
+
+    let mut summary = PlaybackAliasBackfillSummary::default();
+    for (artifact_id, asset_id, object_key, storage_object_key, byte_size) in rows {
+        summary.examined = summary.examined.saturating_add(1);
+        let destination_key =
+            public_playback_alias_object_key(&asset_id, &object_key, alias_prefix)
+                .with_context(|| format!("artifact {artifact_id} has no safe playback alias"))?;
+        if storage_object_key == destination_key {
+            summary.already_canonical = summary.already_canonical.saturating_add(1);
+            continue;
+        }
+
+        let rename_result =
+            tigris_metadata_rename(s3, bucket, &storage_object_key, &destination_key).await;
+        if let Err(rename_error) = rename_result {
+            let destination = s3
+                .head_object()
+                .bucket(bucket)
+                .key(&destination_key)
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to resume playback alias {destination_key} after rename error: {rename_error}"
+                    )
+                })?;
+            anyhow::ensure!(
+                destination.content_length() == Some(byte_size),
+                "existing playback alias {destination_key} has an unexpected size"
+            );
+        }
+
+        let updated = sqlx::query(
+            "UPDATE rend.artifacts SET storage_object_key = $2 WHERE id = $1::uuid AND storage_object_key = $3",
+        )
+        .bind(&artifact_id)
+        .bind(&destination_key)
+        .bind(&storage_object_key)
+        .execute(db)
+        .await
+        .with_context(|| format!("failed to commit playback alias for artifact {artifact_id}"))?;
+        if updated.rows_affected() == 0 {
+            let durable: Option<String> = sqlx::query_scalar(
+                "SELECT storage_object_key FROM rend.artifacts WHERE id = $1::uuid",
+            )
+            .bind(&artifact_id)
+            .fetch_optional(db)
+            .await?;
+            anyhow::ensure!(
+                durable.as_deref() == Some(destination_key.as_str()),
+                "artifact {artifact_id} changed concurrently during playback alias backfill"
+            );
+        }
+        summary.moved = summary.moved.saturating_add(1);
+    }
+    Ok(summary)
+}
+
+fn publication_order(object_key: &str) -> u8 {
+    if object_key.ends_with("/hls/master.m3u8") {
+        2
+    } else if object_key.ends_with(".m3u8") {
+        1
+    } else {
+        0
+    }
 }
 
 async fn cleanup_uncommitted_storage_objects(
@@ -1859,7 +2059,7 @@ async fn resolve_uncertain_canonical_publication(
     let state_committed = publication_state_committed(playable_state, durable_state.as_deref());
     let committed = state_committed
         && new_artifacts.iter().all(|artifact| {
-            let expected_storage_key = uploaded_artifact_object_key(request, &artifact.object_key);
+            let expected_storage_key = durable_artifact_storage_key(request, &artifact.object_key);
             durable_artifacts.get(&artifact.object_key)
                 == Some(&(artifact.byte_size, expected_storage_key))
         });
@@ -2556,6 +2756,14 @@ mod tests {
         assert!(normalize_public_playback_alias_prefix("../v").is_err());
         assert!(normalize_public_playback_alias_prefix("v//public").is_err());
         assert!(normalize_public_playback_alias_prefix("v/public").is_ok());
+    }
+
+    #[test]
+    fn private_playback_publication_orders_master_manifest_last() {
+        assert_eq!(publication_order("videos/asset/opener.mp4"), 0);
+        assert_eq!(publication_order("videos/asset/hls/720p/init_720p.mp4"), 0);
+        assert_eq!(publication_order("videos/asset/hls/720p/index.m3u8"), 1);
+        assert_eq!(publication_order("videos/asset/hls/master.m3u8"), 2);
     }
 
     #[test]

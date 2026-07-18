@@ -87,3 +87,5 @@ apps/*/.env.*
 *.tsbuildinfo
 next-env.d.ts
 .vercel
+# Local Codex review reports
+analysis/

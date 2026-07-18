@@ -1932,8 +1932,10 @@ async fn resolve_playback_artifact(
     let resolution: ArtifactResolutionResponse = response.json().await.map_err(|error| {
         PlaybackError::Origin(format!("artifact resolver returned invalid JSON: {error}"))
     })?;
-    let required_prefix = format!("videos/{asset_id}/");
-    if !resolution.storage_object_key.starts_with(&required_prefix)
+    let private_prefix = format!("videos/{asset_id}/");
+    let direct_prefix = format!("v/{asset_id}/");
+    if !(resolution.storage_object_key.starts_with(&private_prefix)
+        || resolution.storage_object_key.starts_with(&direct_prefix))
         || resolution.storage_object_key.contains("/../")
         || resolution.storage_object_key.contains("/./")
         || resolution.content_type != artifact.content_type

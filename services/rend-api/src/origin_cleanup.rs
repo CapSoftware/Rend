@@ -118,7 +118,7 @@ async fn process(state: &AppState, worker_id: &str, job: CleanupJob) {
     } else {
         (&state.s3, state.config.s3_bucket.as_str())
     };
-    match delete_asset_prefix(s3, bucket, &job.asset_id).await {
+    match delete_asset_prefix(s3, bucket, &job.asset_id, &job.bucket_kind).await {
         Ok(deleted) => {
             if let Err(error) = mark_succeeded(&state.db, &job.id, worker_id, deleted).await {
                 tracing::error!(job_id = %job.id, error = %error, "failed to complete origin cleanup job");
@@ -135,50 +135,61 @@ async fn process(state: &AppState, worker_id: &str, job: CleanupJob) {
     }
 }
 
-async fn delete_asset_prefix(s3: &S3Client, bucket: &str, asset_id: &str) -> Result<i64, String> {
-    let prefix = format!("videos/{asset_id}/");
-    let mut deleted = 0_i64;
-    loop {
-        let page = s3
-            .list_objects_v2()
-            .bucket(bucket)
-            .prefix(&prefix)
-            .max_keys(DELETE_BATCH_SIZE as i32)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        let objects = page
-            .contents()
-            .iter()
-            .filter_map(|object| object.key())
-            .filter(|key| is_owned_key(&prefix, key))
-            .map(|key| ObjectIdentifier::builder().key(key).build())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if objects.is_empty() {
-            return Ok(deleted);
-        }
-        let count = i64::try_from(objects.len()).unwrap_or(i64::MAX);
-        let delete = Delete::builder()
-            .set_objects(Some(objects))
-            .quiet(true)
-            .build()
-            .map_err(|error| error.to_string())?;
-        let response = s3
-            .delete_objects()
-            .bucket(bucket)
-            .delete(delete)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        if !response.errors().is_empty() {
-            return Err(format!(
-                "object store reported {} cleanup deletion errors",
-                response.errors().len()
-            ));
-        }
-        deleted = deleted.saturating_add(count);
+async fn delete_asset_prefix(
+    s3: &S3Client,
+    bucket: &str,
+    asset_id: &str,
+    bucket_kind: &str,
+) -> Result<i64, String> {
+    let mut prefixes = vec![format!("videos/{asset_id}/")];
+    if bucket_kind == "media" {
+        prefixes.push(format!("v/{asset_id}/"));
     }
+    let mut deleted = 0_i64;
+    for prefix in prefixes {
+        loop {
+            let page = s3
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix(&prefix)
+                .max_keys(DELETE_BATCH_SIZE as i32)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
+            let objects = page
+                .contents()
+                .iter()
+                .filter_map(|object| object.key())
+                .filter(|key| is_owned_key(&prefix, key))
+                .map(|key| ObjectIdentifier::builder().key(key).build())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if objects.is_empty() {
+                break;
+            }
+            let count = i64::try_from(objects.len()).unwrap_or(i64::MAX);
+            let delete = Delete::builder()
+                .set_objects(Some(objects))
+                .quiet(true)
+                .build()
+                .map_err(|error| error.to_string())?;
+            let response = s3
+                .delete_objects()
+                .bucket(bucket)
+                .delete(delete)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
+            if !response.errors().is_empty() {
+                return Err(format!(
+                    "object store reported {} cleanup deletion errors",
+                    response.errors().len()
+                ));
+            }
+            deleted = deleted.saturating_add(count);
+        }
+    }
+    Ok(deleted)
 }
 
 fn is_owned_key(prefix: &str, key: &str) -> bool {

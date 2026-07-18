@@ -1762,8 +1762,6 @@ export function RendPlayer({
   }, [destroyHls, hydrateInitialPlayback, loadPlayback, revokeManifestObjectUrl]);
 
   const updateObservedVideoStats = useCallback(() => {
-    const currentSelection = selectionRef.current;
-    if (!currentSelection || currentSelection.artifactPath !== "hls/master.m3u8") return;
     mergeObservedHlsStats(hlsStatsFromVideo(videoRef.current));
   }, [mergeObservedHlsStats]);
 

@@ -444,6 +444,8 @@ struct NormalizedPlayerTelemetryEvent {
     phase: String,
     selected_playback_mode: String,
     selected_artifact_path: String,
+    selected_width: u32,
+    selected_height: u32,
     first_frame_ms: u32,
     bootstrap_duration_ms: u32,
     bootstrap_http_status: u16,
@@ -492,6 +494,8 @@ struct ClickHousePlayerEventRow {
     phase: String,
     selected_playback_mode: String,
     selected_artifact_path: String,
+    selected_width: u32,
+    selected_height: u32,
     first_frame_ms: u32,
     bootstrap_duration_ms: u32,
     bootstrap_http_status: u16,
@@ -1265,6 +1269,8 @@ fn normalize_player_telemetry_event(
         phase,
         selected_playback_mode,
         selected_artifact_path,
+        selected_width: event.selected_width.unwrap_or(0).min(16_384),
+        selected_height: event.selected_height.unwrap_or(0).min(16_384),
         first_frame_ms: event.first_frame_ms.unwrap_or(0),
         bootstrap_duration_ms: event.bootstrap_duration_ms.unwrap_or(0),
         bootstrap_http_status,
@@ -1609,6 +1615,8 @@ impl NormalizedPlayerTelemetryEvent {
             phase: self.phase,
             selected_playback_mode: self.selected_playback_mode,
             selected_artifact_path: self.selected_artifact_path,
+            selected_width: self.selected_width,
+            selected_height: self.selected_height,
             first_frame_ms: self.first_frame_ms,
             bootstrap_duration_ms: self.bootstrap_duration_ms,
             bootstrap_http_status: self.bootstrap_http_status,
@@ -1687,7 +1695,7 @@ async fn insert_clickhouse_player_events(
 
     let query = "\
         INSERT INTO player_events \
-        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, viewer_id_hash, page_type, page_host, referrer_host, player_name, phase, selected_playback_mode, selected_artifact_path, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version, browser_name, browser_version, os_name, os_version, device_type, autoplay, muted, preload, startup_mode, geo_country, geo_region, geo_city, geo_continent, geo_asn, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content) \
+        (event_id, observed_at, received_at, organization_id, asset_id, playback_session_id, viewer_id_hash, page_type, page_host, referrer_host, player_name, phase, selected_playback_mode, selected_artifact_path, selected_width, selected_height, first_frame_ms, bootstrap_duration_ms, bootstrap_http_status, stall_duration_ms, watch_delta_ms, playback_failure_code, edge_label, region_label, player_version, app_version, browser_name, browser_version, os_name, os_version, device_type, autoplay, muted, preload, startup_mode, geo_country, geo_region, geo_city, geo_continent, geo_asn, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content) \
         FORMAT JSONEachRow";
 
     clickhouse_post(http, config, query, body).await.map(|_| ())
@@ -2957,7 +2965,9 @@ mod tests {
                 "asset_id": "00000000-0000-0000-0000-000000000001",
                 "phase": "player_load",
                 "event_time_ms": event_time_ms,
-                "page_type": "watch"
+                "page_type": "watch",
+                "selected_width": 1920,
+                "selected_height": 1080
             }]
         }))
         .unwrap();
@@ -2968,6 +2978,8 @@ mod tests {
 
         assert_eq!(row.organization_id, NIL_ORGANIZATION_ID);
         assert_eq!(row.page_type, "watch");
+        assert_eq!(row.selected_width, 1920);
+        assert_eq!(row.selected_height, 1080);
     }
 
     #[test]

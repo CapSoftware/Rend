@@ -1244,20 +1244,24 @@ fn clickhouse_delivery_seconds_query(
         "\
         SELECT \
           tier AS resolution_tier, \
-          sum(delivered_duration_ms_value) / 1000.0 AS value \
+          sum(watch_delta_ms_value) / 1000.0 AS value \
         FROM ( \
           SELECT \
             event_id, \
-            any(resolution_tier) AS tier, \
-            any(delivered_duration_ms) AS delivered_duration_ms_value \
-          FROM playback_events \
+            multiIf( \
+              greatest(any(selected_width), any(selected_height)) <= 1280, '720p', \
+              greatest(any(selected_width), any(selected_height)) <= 1920, '1080p', \
+              greatest(any(selected_width), any(selected_height)) <= 2560, '2k', \
+              '4k' \
+            ) AS tier, \
+            any(watch_delta_ms) AS watch_delta_ms_value \
+          FROM player_events \
           WHERE organization_id = toUUID('{organization_id}') \
             AND observed_at >= fromUnixTimestamp64Milli({}) \
             AND observed_at < fromUnixTimestamp64Milli({}) \
-            AND status_code >= 200 \
-            AND status_code < 500 \
-            AND delivered_duration_ms > 0 \
-            AND resolution_tier IN ('720p', '1080p', '2k', '4k') \
+            AND phase = 'watch_heartbeat' \
+            AND watch_delta_ms > 0 \
+            AND greatest(selected_width, selected_height) > 0 \
           GROUP BY event_id \
         ) \
         GROUP BY tier \
@@ -1457,9 +1461,10 @@ mod tests {
         );
 
         assert!(query.contains("GROUP BY event_id"));
-        assert!(query.contains("sum(delivered_duration_ms_value) / 1000.0 AS value"));
-        assert!(query.contains("any(delivered_duration_ms) AS delivered_duration_ms_value"));
-        assert!(query.contains("resolution_tier IN ('720p', '1080p', '2k', '4k')"));
+        assert!(query.contains("sum(watch_delta_ms_value) / 1000.0 AS value"));
+        assert!(query.contains("any(watch_delta_ms) AS watch_delta_ms_value"));
+        assert!(query.contains("phase = 'watch_heartbeat'"));
+        assert!(query.contains("greatest(selected_width, selected_height) > 0"));
         assert!(query.contains("GROUP BY tier"));
     }
 

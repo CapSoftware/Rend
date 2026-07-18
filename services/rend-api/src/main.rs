@@ -274,7 +274,12 @@ impl ApiConfig {
         let fast_embed_playback_base_urls =
             fast_embed_playback_base_urls_from_env(rend_env, allow_insecure_edge_urls)?;
         let public_playback_enabled = env_bool("REND_PUBLIC_PLAYBACK_ENABLED", false)?;
-        let public_playback_alias = public_playback_alias_config_from_env(public_playback_enabled)?;
+        let public_playback_alias_enabled = env_bool(
+            "REND_PUBLIC_PLAYBACK_ALIAS_ENABLED",
+            public_playback_enabled,
+        )?;
+        let public_playback_alias =
+            public_playback_alias_config_from_env(public_playback_alias_enabled)?;
         let playback_cookie_domain = optional_cookie_domain("REND_PLAYBACK_COOKIE_DOMAIN")?;
         let cloudfront_cookie_signer = cloudfront_cookie_signer_from_env()?;
         let cloudfront_distribution_id = env_string("REND_CLOUDFRONT_DISTRIBUTION_ID", "");
@@ -607,6 +612,7 @@ fn public_playback_alias_config_from_env(
             "REND_PUBLIC_PLAYBACK_ALIAS_ACL",
             "public-read",
         ))?,
+        metadata_rename: env_bool("REND_PUBLIC_PLAYBACK_ALIAS_METADATA_RENAME", false)?,
     }))
 }
 
@@ -1486,8 +1492,8 @@ async fn main() -> Result<()> {
             tracing::info!("rend-api database migrations applied");
             return Ok(());
         }
-        [] | ["worker", "media"] => {}
-        _ => anyhow::bail!("usage: rend-api [migrate|worker media]"),
+        [] | ["worker", "media"] | ["backfill", "playback-aliases"] => {}
+        _ => anyhow::bail!("usage: rend-api [migrate|worker media|backfill playback-aliases]"),
     }
 
     if config.edge_registry.rend_env.is_strict() && config.auto_migrate {
@@ -1533,6 +1539,29 @@ async fn main() -> Result<()> {
         [] => {}
         ["worker", "media"] => {
             return run_media_worker(state).await;
+        }
+        ["backfill", "playback-aliases"] => {
+            let alias_prefix = state
+                .config
+                .public_playback_alias
+                .as_ref()
+                .context("private playback aliases are not configured")?
+                .prefix
+                .clone();
+            let summary = media::backfill_private_playback_aliases(
+                &state.db,
+                &state.s3,
+                &state.config.s3_bucket,
+                &alias_prefix,
+            )
+            .await?;
+            tracing::info!(
+                examined = summary.examined,
+                moved = summary.moved,
+                already_canonical = summary.already_canonical,
+                "private Tigris playback alias backfill completed"
+            );
+            return Ok(());
         }
         _ => unreachable!("command was validated before state initialization"),
     }
