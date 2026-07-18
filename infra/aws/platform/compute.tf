@@ -41,7 +41,7 @@ resource "aws_lb" "public_api" {
   name               = substr("${local.resource_prefix}-api-public", 0, 32)
   internal           = false
   load_balancer_type = "application"
-  ip_address_type    = "dualstack"
+  ip_address_type    = "ipv4"
   security_groups    = [aws_security_group.public_api_alb.id]
   subnets            = [for subnet in aws_subnet.public : subnet.id]
 

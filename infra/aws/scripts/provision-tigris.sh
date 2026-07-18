@@ -59,7 +59,8 @@ if [[ -z "$tigris_access_key" || -z "$tigris_secret_key" ]]; then
 fi
 
 tigris_s3api() {
-  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+    AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
     AWS_EC2_METADATA_DISABLED=true \
@@ -71,7 +72,8 @@ tigris_s3api() {
 # Restrict compatibility mode to the two affected configuration APIs; its
 # bucket-policy API expects the normal AWS CLI headers.
 tigris_s3api_bucket_config() {
-  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+    AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
     AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
@@ -81,7 +83,8 @@ tigris_s3api_bucket_config() {
 }
 
 tigris_cli() {
-  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+    AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_ENDPOINT_URL_S3="$TIGRIS_ENDPOINT" \
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
@@ -90,7 +93,8 @@ tigris_cli() {
 }
 
 tigris_cloudfront() {
-  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+  env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+    AWS_ACCESS_KEY_ID="$tigris_access_key" \
     AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
     AWS_DEFAULT_REGION=us-east-1 \
     AWS_EC2_METADATA_DISABLED=true \
