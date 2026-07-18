@@ -52,10 +52,11 @@ pub async fn claim_next_media_job(
     max_active_jobs_per_organization: i32,
 ) -> sqlx::Result<Option<MediaJob>> {
     let lease_seconds = duration_seconds_i64(lease_duration);
-    let row: Option<(String, String, String, String, i32, i32)> = sqlx::query_as(
+    let mut tx = db.begin().await?;
+    let row: Option<(String, String, String, String, i32, i32, Option<String>)> = sqlx::query_as(
         "
         WITH next_job AS (
-          SELECT job.id
+          SELECT job.id, job.lease_token AS previous_lease_token
           FROM rend.media_jobs job
           JOIN rend.assets asset
             ON asset.id = job.asset_id
@@ -68,8 +69,10 @@ pub async fn claim_next_media_job(
             ON quota.organization_id = asset.organization_id
           WHERE job.job_type = $1
             AND job.attempts < job.max_attempts
-            AND job.status IN ($2, $3)
-            AND job.run_after <= now()
+            AND (
+              (job.status IN ($2, $3) AND job.run_after <= now())
+              OR (job.status = $4 AND job.lease_expires_at <= now())
+            )
             AND (
               SELECT count(*)
               FROM rend.media_jobs active_job
@@ -113,9 +116,11 @@ pub async fn claim_next_media_job(
                claimed.lease_token::text,
                claimed.locked_by,
                claimed.attempts,
-               claimed.max_attempts
+               claimed.max_attempts,
+               next_job.previous_lease_token::text
         FROM claimed
         JOIN recorded_attempt ON recorded_attempt.job_id = claimed.id
+        JOIN next_job ON next_job.id = claimed.id
         ",
     )
     .bind(JOB_TYPE_PROCESS_MEDIA)
@@ -125,19 +130,42 @@ pub async fn claim_next_media_job(
     .bind(worker_id)
     .bind(lease_seconds)
     .bind(max_active_jobs_per_organization)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    Ok(row.map(
-        |(id, asset_id, lease_token, worker_id, attempts, max_attempts)| MediaJob {
-            id,
-            asset_id,
-            lease_token,
-            worker_id,
-            attempts,
-            max_attempts,
-        },
-    ))
+    let Some((id, asset_id, lease_token, worker_id, attempts, max_attempts, previous_lease_token)) =
+        row
+    else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+
+    if let Some(previous_lease_token) = previous_lease_token {
+        sqlx::query(
+            "
+            UPDATE rend.media_job_attempts
+            SET status = 'expired', finished_at = now(),
+                error = 'lease expired before the job was reclaimed'
+            WHERE job_id = $1::uuid
+              AND lease_token = $2::uuid
+              AND status = 'running'
+            ",
+        )
+        .bind(&id)
+        .bind(previous_lease_token)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(Some(MediaJob {
+        id,
+        asset_id,
+        lease_token,
+        worker_id,
+        attempts,
+        max_attempts,
+    }))
 }
 
 pub async fn heartbeat_media_job(
