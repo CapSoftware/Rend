@@ -116,7 +116,7 @@ resource "aws_s3_object" "clickhouse_schema" {
   bucket                 = aws_s3_bucket.clickhouse_native_backups.id
   key                    = "bootstrap/clickhouse-schema.sql"
   content                = join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")])
-  etag                   = md5(join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")]))
+  source_hash            = sha256(join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")]))
   server_side_encryption = "aws:kms"
   kms_key_id             = aws_kms_key.clickhouse.arn
 }

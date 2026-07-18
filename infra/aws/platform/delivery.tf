@@ -174,7 +174,16 @@ resource "aws_cloudfront_response_headers_policy" "public" {
     access_control_allow_credentials = true
 
     access_control_allow_headers {
-      items = ["*"]
+      items = [
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "Idempotency-Key",
+        "If-Match",
+        "If-None-Match",
+        "Range",
+        "X-Requested-With",
+      ]
     }
 
     access_control_allow_methods {
