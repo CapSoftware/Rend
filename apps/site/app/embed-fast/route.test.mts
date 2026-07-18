@@ -40,6 +40,16 @@ function readyBootstrap(): WatchPlaybackBootstrapResponse {
   };
 }
 
+function assertInlineScriptsCompile(html: string) {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1],
+  );
+  assert.ok(scripts.length > 0);
+  for (const script of scripts) {
+    assert.doesNotThrow(() => new Function(script));
+  }
+}
+
 test("fast embed renders a direct native HLS video without exposing playback secrets", () => {
   const html = renderFastEmbedHtml({
     assetId: ASSET_ID,
@@ -58,8 +68,17 @@ test("fast embed renders a direct native HLS video without exposing playback sec
   assert.match(html, /data-rend-player-selected="native_hls"/);
   assert.match(html, /data-rend-player-artifact="hls\/master\.m3u8"/);
   assert.match(html, /data-rend-bootstrap-ms="42"/);
+  assert.match(
+    html,
+    /data-rend-organization-id="00000000-0000-0000-0000-000000000002"/,
+  );
+  assert.match(html, /const telemetryUrl = "\/api\/player\/telemetry"/);
+  assert.match(html, /send\("first_frame"/);
+  assert.match(html, /send\("watch_heartbeat"/);
+  assert.match(html, /send\("playback_ended"/);
   assert.match(html, /rel="preconnect" href="https:\/\/api\.rend\.so" crossorigin/);
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
+  assertInlineScriptsCompile(html);
 });
 
 test("fast embed defaults to progressive fMP4 when startup hints support it", () => {
@@ -151,6 +170,10 @@ test("fast embed route supports client bootstrap for immediate document response
     assert.match(body, /data-rend-player-state="loading"/);
     assert.doesNotMatch(body, /<video[^>]+src=/);
     assert.match(body, /progressive_mp4/);
+    assert.match(body, /data\.organization_id/);
+    assert.match(body, /data-rend-bootstrap-status/);
+    assert.match(body, /\/api\/player\/telemetry/);
+    assertInlineScriptsCompile(body);
   } finally {
     globalThis.fetch = originalFetch;
   }

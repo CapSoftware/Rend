@@ -11,6 +11,7 @@ type FastEmbedRenderOptions = {
   assetId: string;
   autoPlay: boolean;
   bootstrap: WatchPlaybackBootstrapResponse | null;
+  bootstrapHttpStatus?: number;
   bootstrapUrl: string;
   bootstrapMs?: number;
   controls: boolean;
@@ -495,6 +496,329 @@ function playerMessage(
   return selection ? "Ready" : "Not playable yet";
 }
 
+const FAST_EMBED_TELEMETRY_SCRIPT = String.raw`
+(() => {
+  const root = document.querySelector("[data-rend-player-state]");
+  const video = document.querySelector("video");
+  if (!root || !video) return;
+
+  const telemetryUrl = "/api/player/telemetry";
+  const randomId = () => {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 14);
+  };
+  const playbackSessionId = randomId();
+  root.setAttribute("data-rend-playback-session-id", playbackSessionId);
+
+  const numberAttribute = (name) => {
+    const rawValue = root.getAttribute(name);
+    if (rawValue === null || rawValue.trim() === "") return undefined;
+    const value = Number(rawValue);
+    return Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  };
+  const selectedFields = () => {
+    const rawMode = root.getAttribute("data-rend-player-selected") || "";
+    const allowedModes = ["native_hls", "hls_js", "opener", "primary"];
+    const selectedMode = allowedModes.includes(rawMode)
+      ? rawMode
+      : rawMode
+        ? "primary"
+        : undefined;
+    const rawArtifact = root.getAttribute("data-rend-player-artifact") || "";
+    const selectedArtifact = rawArtifact.includes("+")
+      ? rawArtifact.split("+").at(-1)
+      : rawArtifact || undefined;
+    return {
+      selected_playback_mode: selectedMode,
+      selected_artifact_path: selectedArtifact,
+      selected_width: numberAttribute("data-rend-selected-width"),
+      selected_height: numberAttribute("data-rend-selected-height"),
+    };
+  };
+  const safeReferrerHost = () => {
+    if (!document.referrer) return undefined;
+    try {
+      return new URL(document.referrer).host;
+    } catch {
+      return undefined;
+    }
+  };
+  const browserContext = async () => {
+    const userAgent = navigator.userAgent || "";
+    const browserMatch = userAgent.match(/Edg\/([0-9.]+)/)
+      || userAgent.match(/Chrome\/([0-9.]+)/)
+      || userAgent.match(/Firefox\/([0-9.]+)/)
+      || userAgent.match(/Version\/([0-9.]+).*Safari/);
+    const browserName = /Edg\//.test(userAgent)
+      ? "Edge"
+      : /Chrome\//.test(userAgent)
+        ? "Chrome"
+        : /Firefox\//.test(userAgent)
+          ? "Firefox"
+          : /Safari\//.test(userAgent)
+            ? "Safari"
+            : "unknown";
+    const osName = /Windows NT/.test(userAgent)
+      ? "Windows"
+      : /Android/.test(userAgent)
+        ? "Android"
+        : /iPhone|iPad|iPod/.test(userAgent)
+          ? "iOS"
+          : /Mac OS X/.test(userAgent)
+            ? "macOS"
+            : /Linux/.test(userAgent)
+              ? "Linux"
+              : "unknown";
+    const deviceType = /iPad|Tablet|Android(?!.*Mobile)/i.test(userAgent)
+      ? "tablet"
+      : /Mobi|iPhone|Android/i.test(userAgent)
+        ? "mobile"
+        : /TV|SmartTV|AppleTV/i.test(userAgent)
+          ? "tv"
+          : "desktop";
+    let viewerId = playbackSessionId;
+    try {
+      const key = "rend:viewer-id:v1";
+      viewerId = localStorage.getItem(key) || randomId();
+      localStorage.setItem(key, viewerId);
+    } catch {}
+    let viewerHash;
+    try {
+      if (globalThis.crypto?.subtle) {
+        const digest = await globalThis.crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(viewerId),
+        );
+        viewerHash = "sha256:" + Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("");
+      }
+    } catch {}
+    return {
+      viewer_id_hash: viewerHash,
+      page_host: location.host,
+      referrer_host: safeReferrerHost(),
+      browser_name: browserName,
+      browser_version: browserMatch?.[1],
+      os_name: osName,
+      device_type: deviceType,
+    };
+  };
+
+  let resolvedContext = {};
+  void browserContext().then((context) => {
+    resolvedContext = context;
+  }).catch(() => {});
+  let queue = [];
+  let flushTimer;
+  const flush = (preferBeacon = false) => {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    if (queue.length === 0) return;
+    const events = queue.splice(0, 16).map((event) => ({ ...resolvedContext, ...event }));
+    const body = JSON.stringify({ events });
+    try {
+      if (preferBeacon && navigator.sendBeacon) {
+        const blob = new Blob([body], { type: "application/json" });
+        if (navigator.sendBeacon(telemetryUrl, blob)) return;
+      }
+      void fetch(telemetryUrl, {
+        method: "POST",
+        cache: "no-store",
+        credentials: "omit",
+        keepalive: true,
+        headers: { "content-type": "application/json" },
+        body,
+      }).catch(() => {});
+    } catch {}
+    if (queue.length > 0 && !flushTimer) {
+      flushTimer = setTimeout(() => flush(), 0);
+    }
+  };
+  const send = (phase, fields = {}) => {
+    queue.push({
+      event_id: "evt-" + randomId(),
+      organization_id: root.getAttribute("data-rend-organization-id") || undefined,
+      playback_session_id: playbackSessionId,
+      asset_id: root.getAttribute("data-rend-asset-id") || "",
+      page_type: "embed",
+      player_name: "rend-fast",
+      phase,
+      event_time_ms: Date.now(),
+      player_version: "0.1.0",
+      autoplay: root.getAttribute("data-rend-autoplay") === "true",
+      muted: video.muted,
+      preload: video.preload,
+      startup_mode: root.getAttribute("data-rend-startup-mode") || undefined,
+      ...fields,
+    });
+    if (!flushTimer) flushTimer = setTimeout(() => flush(), 250);
+  };
+
+  let bootstrapSent = false;
+  let sourceKey = "";
+  let metadataSent = false;
+  let canplaySent = false;
+  let firstFrameSent = false;
+  let bootstrapFailureSent = false;
+  let failureSent = false;
+  let endedSent = false;
+  let stallStartedAt = null;
+  let lastWatchPositionMs = null;
+
+  const emitBootstrap = () => {
+    if (bootstrapSent || root.getAttribute("data-rend-ready-status") !== "ready") return;
+    const duration = numberAttribute("data-rend-bootstrap-ms");
+    if (duration === undefined) return;
+    bootstrapSent = true;
+    send("bootstrap_complete", {
+      bootstrap_start_ms: 0,
+      bootstrap_end_ms: duration,
+      bootstrap_duration_ms: duration,
+      bootstrap_http_status: numberAttribute("data-rend-bootstrap-status") || 200,
+    });
+  };
+  const emitSource = () => {
+    const fields = selectedFields();
+    if (!fields.selected_playback_mode || !fields.selected_artifact_path) return;
+    const key = fields.selected_playback_mode + ":" + fields.selected_artifact_path;
+    if (sourceKey === key) return;
+    sourceKey = key;
+    send("source_selected", fields);
+  };
+  const emitMetadata = () => {
+    if (metadataSent) return;
+    const duration = numberAttribute("data-rend-metadata-ms");
+    if (duration === undefined && video.readyState < 1) return;
+    metadataSent = true;
+    send("metadata_loaded", {
+      metadata_loaded_ms: duration ?? Math.max(0, Math.round(performance.now())),
+      ...selectedFields(),
+    });
+  };
+  const emitCanplay = () => {
+    if (canplaySent) return;
+    const duration = numberAttribute("data-rend-canplay-ms");
+    if (duration === undefined && video.readyState < 3) return;
+    canplaySent = true;
+    send("canplay", {
+      canplay_ms: duration ?? Math.max(0, Math.round(performance.now())),
+      ...selectedFields(),
+    });
+  };
+  const emitFirstFrame = () => {
+    if (firstFrameSent) return;
+    const duration = numberAttribute("data-rend-first-frame-ms");
+    if (duration === undefined) return;
+    firstFrameSent = true;
+    lastWatchPositionMs = Math.max(0, Math.round(video.currentTime * 1000));
+    send("first_frame", { first_frame_ms: duration, ...selectedFields() });
+  };
+  const emitWatchHeartbeat = (force = false) => {
+    if (!firstFrameSent || (!force && (video.paused || video.ended))) return;
+    const currentPositionMs = Math.max(0, Math.round(video.currentTime * 1000));
+    if (lastWatchPositionMs === null) {
+      lastWatchPositionMs = currentPositionMs;
+      return;
+    }
+    const deltaMs = Math.max(0, currentPositionMs - lastWatchPositionMs);
+    lastWatchPositionMs = currentPositionMs;
+    if (deltaMs < (force ? 1000 : 250)) return;
+    send("watch_heartbeat", { watch_delta_ms: deltaMs, ...selectedFields() });
+  };
+  const emitFailure = (code, reason) => {
+    if (failureSent) return;
+    failureSent = true;
+    send("playback_failure", {
+      playback_failure_code: code,
+      playback_failure_reason: reason,
+      ...selectedFields(),
+    });
+  };
+  const emitCurrentState = () => {
+    emitBootstrap();
+    emitSource();
+    emitMetadata();
+    emitCanplay();
+    emitFirstFrame();
+    if (root.getAttribute("data-rend-player-state") === "playback_failure") {
+      if (!bootstrapSent && !bootstrapFailureSent) {
+        bootstrapFailureSent = true;
+        send("bootstrap_failure", {
+          playback_failure_code: "fast_embed_bootstrap_failure",
+          playback_failure_reason: "Playback bootstrap failed",
+        });
+      }
+      emitFailure("fast_embed_playback_failure", "Playback could not start");
+    }
+  };
+
+  send("player_load");
+  const observer = new MutationObserver(emitCurrentState);
+  observer.observe(root, { attributes: true });
+  video.addEventListener("loadedmetadata", emitMetadata);
+  video.addEventListener("canplay", emitCanplay);
+  video.addEventListener("playing", () => {
+    emitCurrentState();
+    if (stallStartedAt !== null) {
+      const stallEnd = Math.max(0, Math.round(performance.now()));
+      send("stall_end", {
+        stall_start_ms: stallStartedAt,
+        stall_end_ms: stallEnd,
+        stall_duration_ms: Math.max(0, stallEnd - stallStartedAt),
+        ...selectedFields(),
+      });
+      stallStartedAt = null;
+    }
+  });
+  video.addEventListener("waiting", () => {
+    if (!firstFrameSent || video.paused || stallStartedAt !== null) return;
+    stallStartedAt = Math.max(0, Math.round(performance.now()));
+    send("stall_start", { stall_start_ms: stallStartedAt, ...selectedFields() });
+  });
+  video.addEventListener("pause", () => emitWatchHeartbeat(true));
+  video.addEventListener("error", () => {
+    const code = video.error?.code ? "media_error_" + video.error.code : "media_error";
+    emitFailure(code, "The browser reported a media playback error");
+  });
+  video.addEventListener("ended", () => {
+    emitWatchHeartbeat(true);
+    if (!endedSent) {
+      endedSent = true;
+      send("playback_ended", selectedFields());
+    }
+  });
+  if ("requestVideoFrameCallback" in video) {
+    video.requestVideoFrameCallback(() => {
+      if (!root.getAttribute("data-rend-first-frame-ms")) {
+        root.setAttribute("data-rend-first-frame-ms", String(Math.round(performance.now())));
+      }
+      emitFirstFrame();
+    });
+  } else {
+    video.addEventListener("playing", () => {
+      if (!root.getAttribute("data-rend-first-frame-ms")) {
+        root.setAttribute("data-rend-first-frame-ms", String(Math.round(performance.now())));
+      }
+      emitFirstFrame();
+    }, { once: true });
+  }
+  const heartbeatTimer = setInterval(() => emitWatchHeartbeat(), 10000);
+  const flushOnExit = () => {
+    emitWatchHeartbeat(true);
+    flush(true);
+  };
+  window.addEventListener("pagehide", flushOnExit, { once: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushOnExit();
+  });
+  window.addEventListener("unload", () => {
+    clearInterval(heartbeatTimer);
+    observer.disconnect();
+  }, { once: true });
+  emitCurrentState();
+})();`;
+
 export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const ready = options.bootstrap?.status === "ready" ? options.bootstrap : null;
   const selection = playbackSelection(options.bootstrap, options.startupMode);
@@ -522,6 +846,10 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const bootstrapMs =
     typeof options.bootstrapMs === "number"
       ? ` data-rend-bootstrap-ms="${Math.max(0, Math.round(options.bootstrapMs))}"`
+      : "";
+  const bootstrapHttpStatus =
+    typeof options.bootstrapHttpStatus === "number"
+      ? ` data-rend-bootstrap-status="${Math.max(100, Math.round(options.bootstrapHttpStatus))}"`
       : "";
   const preferredStartup = options.startupMode;
   const inlineStartupJson = scriptJson(
@@ -570,13 +898,14 @@ body{overflow:hidden}
 </style>
 </head>
 <body>
-<main class="rend-fast" aria-label="Video player" data-rend-player-state="${html(state)}" data-rend-player-selected="${html(selectedLabel)}" data-rend-player-artifact="${html(selectedArtifact)}" data-rend-ready-status="${html(ready?.status ?? options.bootstrap?.status ?? state)}" data-rend-source-state="${html(ready?.source_state ?? "")}" data-rend-playable-state="${html(ready?.playable_state ?? "")}" data-rend-manifest-content-type="${html(ready?.manifest_content_type ?? "")}" data-rend-opener-content-type="${html(ready?.opener_content_type ?? "")}" data-rend-poster="${html(ready?.poster_url ?? "")}" data-rend-prefetch-hint-count="${html(ready?.prefetch_hints.length ?? 0)}" data-rend-playback-engine="${html(playbackEngine)}" data-rend-document-start-ms="0"${bootstrapMs} data-rend-asset-id="${html(options.assetId)}">
+<main class="rend-fast" aria-label="Video player" data-rend-player-state="${html(state)}" data-rend-player-selected="${html(selectedLabel)}" data-rend-player-artifact="${html(selectedArtifact)}" data-rend-ready-status="${html(ready?.status ?? options.bootstrap?.status ?? state)}" data-rend-source-state="${html(ready?.source_state ?? "")}" data-rend-playable-state="${html(ready?.playable_state ?? "")}" data-rend-manifest-content-type="${html(ready?.manifest_content_type ?? "")}" data-rend-opener-content-type="${html(ready?.opener_content_type ?? "")}" data-rend-poster="${html(ready?.poster_url ?? "")}" data-rend-prefetch-hint-count="${html(ready?.prefetch_hints.length ?? 0)}" data-rend-playback-engine="${html(playbackEngine)}" data-rend-document-start-ms="0"${bootstrapMs}${bootstrapHttpStatus} data-rend-asset-id="${html(options.assetId)}" data-rend-organization-id="${html(ready?.organization_id ?? "")}" data-rend-autoplay="${options.autoPlay ? "true" : "false"}" data-rend-muted="${options.muted ? "true" : "false"}" data-rend-startup-mode="${html(options.startupMode)}">
 <video class="rend-fast__video"${source}${contentType}${poster}${autoPlay}${controls}${muted} playsinline preload="auto" crossorigin="${html(crossOrigin)}"></video>
 <div class="rend-fast__message" role="status" aria-live="polite">${html(message)}</div>
 </main>
 <script>
-	(()=>{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const assetId=${jsString(options.assetId)};const preferredStartup=${jsString(preferredStartup)};const bootstrapUrl=${jsString(options.bootstrapUrl)};const inlineStartup=${inlineStartupJson};const fallback=${fallbackJson};const autoPlay=${options.autoPlay ? "true" : "false"};const fetchCredentials=${jsString(fetchCredentials)};const bootstrapStarted=performance.now();const mark=(name)=>{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))};const dims=()=>{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))};const play=()=>{if(autoPlay)video.play().catch(()=>{})};const setSelection=(label,artifactPath,engine)=>{root.setAttribute("data-rend-player-state","ready");root.setAttribute("data-rend-player-selected",label||"");root.setAttribute("data-rend-player-artifact",artifactPath||"");root.setAttribute("data-rend-playback-engine",engine||"native")};const crossOrigin=(data)=>data&&data.playback_credential_mode==="omit"?"anonymous":"use-credentials";const progressive=(data)=>{if(data.playable_state!=="hls_ready"||!data.manifest_url)return null;const byRendition=new Map();for(const hint of Array.isArray(data.prefetch_hints)?data.prefetch_hints:[]){const match=/^hls\\/([^/]+)\\/([^/]+)$/.exec(String(hint.artifact_path||""));if(!match)continue;const state=byRendition.get(match[1])||{init:false,segment:false};state.init=state.init||match[2]===\`init_\${match[1]}.mp4\`;state.segment=state.segment||match[2]==="segment_00000.m4s";byRendition.set(match[1],state)}let rendition="";for(const candidate of ["360p","480p","720p","1080p","2k","4k"]){const state=byRendition.get(candidate);if(state&&state.init&&state.segment){rendition=candidate;break}}if(!rendition)return null;try{const parsed=new URL(data.manifest_url);const prefix="/v/"+assetId+"/";if(!parsed.pathname.startsWith(prefix))return null;const artifactPath="hls/"+rendition+"/progressive.mp4";parsed.pathname=prefix+artifactPath;parsed.search="";parsed.hash="";return{artifactPath,contentType:"video/mp4",label:"progressive_mp4",url:parsed.toString()}}catch{return null}};const select=(data)=>{if(!data||data.status!=="ready")return null;if(preferredStartup==="opener"&&data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(preferredStartup==="progressive"){const selected=progressive(data);if(selected)return selected}if(data.playable_state==="hls_ready"&&data.manifest_url)return{artifactPath:"hls/master.m3u8",contentType:data.manifest_content_type||"application/vnd.apple.mpegurl",label:"native_hls",url:data.manifest_url};if(data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(data.playback_url)return{artifactPath:data.playable_state==="hls_ready"?"hls/master.m3u8":"opener.mp4",contentType:data.playback_content_type||"",label:"primary",url:data.playback_url};return null};const bytes=(value)=>{const binary=atob(value);const output=new Uint8Array(binary.length);for(let index=0;index<binary.length;index++)output[index]=binary.charCodeAt(index);return output};const append=(buffer,data)=>new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve()};const fail=()=>{cleanup();reject(new Error("append failed"))};const cleanup=()=>{buffer.removeEventListener("updateend",done);buffer.removeEventListener("error",fail)};buffer.addEventListener("updateend",done);buffer.addEventListener("error",fail);buffer.appendBuffer(data)});const sourceOpen=(mediaSource)=>new Promise((resolve,reject)=>{if(mediaSource.readyState==="open"){resolve();return}const done=()=>{cleanup();resolve()};const fail=()=>{cleanup();reject(new Error("source open failed"))};const cleanup=()=>{mediaSource.removeEventListener("sourceopen",done);mediaSource.removeEventListener("sourceclose",fail);mediaSource.removeEventListener("sourceended",fail)};mediaSource.addEventListener("sourceopen",done,{once:true});mediaSource.addEventListener("sourceclose",fail,{once:true});mediaSource.addEventListener("sourceended",fail,{once:true})});const fetchSegment=(url)=>fetch(url,{credentials:fetchCredentials}).then(response=>{if(!response.ok)throw new Error("segment fetch failed");return response.arrayBuffer()}).then(buffer=>new Uint8Array(buffer));const bufferedAhead=()=>{try{for(let index=0;index<video.buffered.length;index++){const start=video.buffered.start(index);const end=video.buffered.end(index);if(start<=video.currentTime&&end>video.currentTime)return end-video.currentTime}}catch{}return 0};const waitForBufferRoom=()=>new Promise(resolve=>{if(bufferedAhead()<8){resolve();return}const cleanup=()=>{video.removeEventListener("timeupdate",tick);video.removeEventListener("playing",tick);clearTimeout(timeout)};const tick=()=>{if(bufferedAhead()<5){cleanup();resolve()}};const timeout=setTimeout(()=>{cleanup();resolve()},1000);video.addEventListener("timeupdate",tick);video.addEventListener("playing",tick)});const startNative=(selected=fallback)=>{if(!selected)return false;setSelection(selected.label,selected.artifactPath,"native");if(selected.url&&video.getAttribute("src")!==selected.url){video.src=selected.url;video.load()}play();return true};const startInline=async()=>{if(!inlineStartup||!("MediaSource"in window)||!MediaSource.isTypeSupported(inlineStartup.mimeType))return false;setSelection("mse_inline",inlineStartup.artifactPath,"mse-inline");const mediaSource=new MediaSource();const objectUrl=URL.createObjectURL(mediaSource);video.removeAttribute("src");video.src=objectUrl;video.load();await sourceOpen(mediaSource);const sourceBuffer=mediaSource.addSourceBuffer(inlineStartup.mimeType);await append(sourceBuffer,bytes(inlineStartup.startup));play();(async()=>{for(const url of inlineStartup.segmentUrls){await waitForBufferRoom();await append(sourceBuffer,await fetchSegment(url))}if(mediaSource.readyState==="open")mediaSource.endOfStream()})().catch(()=>{});return true};video.addEventListener("loadedmetadata",()=>{dims();mark("data-rend-metadata-ms")},{once:true});video.addEventListener("canplay",()=>{dims();mark("data-rend-canplay-ms")},{once:true});video.addEventListener("playing",()=>{root.setAttribute("data-rend-player-state","playing");dims()});if("requestVideoFrameCallback"in video){video.requestVideoFrameCallback(()=>{dims();mark("data-rend-first-frame-ms")})}else{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{once:true})}if(inlineStartup){startInline().then(started=>{if(!started&&!startNative())root.setAttribute("data-rend-player-state","playback_failure")}).catch(()=>{if(!startNative())root.setAttribute("data-rend-player-state","playback_failure")});return}if(video.currentSrc||video.getAttribute("src")){play();return}if(fallback){startNative();return}fetch(bootstrapUrl,{credentials:"same-origin",headers:{accept:"application/json"}}).then(r=>r.ok?r.json():null).then(data=>{root.setAttribute("data-rend-bootstrap-ms",String(Math.round(performance.now()-bootstrapStarted)));const selected=select(data);if(!selected)return;video.crossOrigin=crossOrigin(data);if(data.poster_url){root.setAttribute("data-rend-poster",data.poster_url);video.poster=data.poster_url}root.setAttribute("data-rend-ready-status",data.status||"ready");root.setAttribute("data-rend-source-state",data.source_state||"");root.setAttribute("data-rend-playable-state",data.playable_state||"");startNative(selected)}).catch(()=>{root.setAttribute("data-rend-player-state","playback_failure")})})();
+	(()=>{const root=document.querySelector("[data-rend-player-state]");const video=document.querySelector("video");if(!root||!video)return;const assetId=${jsString(options.assetId)};const preferredStartup=${jsString(preferredStartup)};const bootstrapUrl=${jsString(options.bootstrapUrl)};const inlineStartup=${inlineStartupJson};const fallback=${fallbackJson};const autoPlay=${options.autoPlay ? "true" : "false"};const fetchCredentials=${jsString(fetchCredentials)};const bootstrapStarted=performance.now();const mark=(name)=>{if(!root.getAttribute(name))root.setAttribute(name,String(Math.round(performance.now())))};const dims=()=>{if(video.videoWidth)root.setAttribute("data-rend-selected-width",String(video.videoWidth));if(video.videoHeight)root.setAttribute("data-rend-selected-height",String(video.videoHeight))};const play=()=>{if(autoPlay)video.play().catch(()=>{})};const setSelection=(label,artifactPath,engine)=>{root.setAttribute("data-rend-player-state","ready");root.setAttribute("data-rend-player-selected",label||"");root.setAttribute("data-rend-player-artifact",artifactPath||"");root.setAttribute("data-rend-playback-engine",engine||"native")};const crossOrigin=(data)=>data&&data.playback_credential_mode==="omit"?"anonymous":"use-credentials";const progressive=(data)=>{if(data.playable_state!=="hls_ready"||!data.manifest_url)return null;const byRendition=new Map();for(const hint of Array.isArray(data.prefetch_hints)?data.prefetch_hints:[]){const match=/^hls\\/([^/]+)\\/([^/]+)$/.exec(String(hint.artifact_path||""));if(!match)continue;const state=byRendition.get(match[1])||{init:false,segment:false};state.init=state.init||match[2]===\`init_\${match[1]}.mp4\`;state.segment=state.segment||match[2]==="segment_00000.m4s";byRendition.set(match[1],state)}let rendition="";for(const candidate of ["360p","480p","720p","1080p","2k","4k"]){const state=byRendition.get(candidate);if(state&&state.init&&state.segment){rendition=candidate;break}}if(!rendition)return null;try{const parsed=new URL(data.manifest_url);const prefix="/v/"+assetId+"/";if(!parsed.pathname.startsWith(prefix))return null;const artifactPath="hls/"+rendition+"/progressive.mp4";parsed.pathname=prefix+artifactPath;parsed.search="";parsed.hash="";return{artifactPath,contentType:"video/mp4",label:"progressive_mp4",url:parsed.toString()}}catch{return null}};const select=(data)=>{if(!data||data.status!=="ready")return null;if(preferredStartup==="opener"&&data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(preferredStartup==="progressive"){const selected=progressive(data);if(selected)return selected}if(data.playable_state==="hls_ready"&&data.manifest_url)return{artifactPath:"hls/master.m3u8",contentType:data.manifest_content_type||"application/vnd.apple.mpegurl",label:"native_hls",url:data.manifest_url};if(data.opener_url)return{artifactPath:"opener.mp4",contentType:data.opener_content_type||"video/mp4",label:"opener",url:data.opener_url};if(data.playback_url)return{artifactPath:data.playable_state==="hls_ready"?"hls/master.m3u8":"opener.mp4",contentType:data.playback_content_type||"",label:"primary",url:data.playback_url};return null};const bytes=(value)=>{const binary=atob(value);const output=new Uint8Array(binary.length);for(let index=0;index<binary.length;index++)output[index]=binary.charCodeAt(index);return output};const append=(buffer,data)=>new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve()};const fail=()=>{cleanup();reject(new Error("append failed"))};const cleanup=()=>{buffer.removeEventListener("updateend",done);buffer.removeEventListener("error",fail)};buffer.addEventListener("updateend",done);buffer.addEventListener("error",fail);buffer.appendBuffer(data)});const sourceOpen=(mediaSource)=>new Promise((resolve,reject)=>{if(mediaSource.readyState==="open"){resolve();return}const done=()=>{cleanup();resolve()};const fail=()=>{cleanup();reject(new Error("source open failed"))};const cleanup=()=>{mediaSource.removeEventListener("sourceopen",done);mediaSource.removeEventListener("sourceclose",fail);mediaSource.removeEventListener("sourceended",fail)};mediaSource.addEventListener("sourceopen",done,{once:true});mediaSource.addEventListener("sourceclose",fail,{once:true});mediaSource.addEventListener("sourceended",fail,{once:true})});const fetchSegment=(url)=>fetch(url,{credentials:fetchCredentials}).then(response=>{if(!response.ok)throw new Error("segment fetch failed");return response.arrayBuffer()}).then(buffer=>new Uint8Array(buffer));const bufferedAhead=()=>{try{for(let index=0;index<video.buffered.length;index++){const start=video.buffered.start(index);const end=video.buffered.end(index);if(start<=video.currentTime&&end>video.currentTime)return end-video.currentTime}}catch{}return 0};const waitForBufferRoom=()=>new Promise(resolve=>{if(bufferedAhead()<8){resolve();return}const cleanup=()=>{video.removeEventListener("timeupdate",tick);video.removeEventListener("playing",tick);clearTimeout(timeout)};const tick=()=>{if(bufferedAhead()<5){cleanup();resolve()}};const timeout=setTimeout(()=>{cleanup();resolve()},1000);video.addEventListener("timeupdate",tick);video.addEventListener("playing",tick)});const startNative=(selected=fallback)=>{if(!selected)return false;setSelection(selected.label,selected.artifactPath,"native");if(selected.url&&video.getAttribute("src")!==selected.url){video.src=selected.url;video.load()}play();return true};const startInline=async()=>{if(!inlineStartup||!("MediaSource"in window)||!MediaSource.isTypeSupported(inlineStartup.mimeType))return false;setSelection("mse_inline",inlineStartup.artifactPath,"mse-inline");const mediaSource=new MediaSource();const objectUrl=URL.createObjectURL(mediaSource);video.removeAttribute("src");video.src=objectUrl;video.load();await sourceOpen(mediaSource);const sourceBuffer=mediaSource.addSourceBuffer(inlineStartup.mimeType);await append(sourceBuffer,bytes(inlineStartup.startup));play();(async()=>{for(const url of inlineStartup.segmentUrls){await waitForBufferRoom();await append(sourceBuffer,await fetchSegment(url))}if(mediaSource.readyState==="open")mediaSource.endOfStream()})().catch(()=>{});return true};video.addEventListener("loadedmetadata",()=>{dims();mark("data-rend-metadata-ms")},{once:true});video.addEventListener("canplay",()=>{dims();mark("data-rend-canplay-ms")},{once:true});video.addEventListener("playing",()=>{root.setAttribute("data-rend-player-state","playing");dims()});if("requestVideoFrameCallback"in video){video.requestVideoFrameCallback(()=>{dims();mark("data-rend-first-frame-ms")})}else{video.addEventListener("playing",()=>mark("data-rend-first-frame-ms"),{once:true})}if(inlineStartup){startInline().then(started=>{if(!started&&!startNative())root.setAttribute("data-rend-player-state","playback_failure")}).catch(()=>{if(!startNative())root.setAttribute("data-rend-player-state","playback_failure")});return}if(video.currentSrc||video.getAttribute("src")){play();return}if(fallback){startNative();return}fetch(bootstrapUrl,{credentials:"same-origin",headers:{accept:"application/json"}}).then(r=>{root.setAttribute("data-rend-bootstrap-status",String(r.status));return r.ok?r.json():null}).then(data=>{root.setAttribute("data-rend-bootstrap-ms",String(Math.round(performance.now()-bootstrapStarted)));if(data&&data.organization_id)root.setAttribute("data-rend-organization-id",data.organization_id);const selected=select(data);if(!selected)return;video.crossOrigin=crossOrigin(data);if(data.poster_url){root.setAttribute("data-rend-poster",data.poster_url);video.poster=data.poster_url}root.setAttribute("data-rend-ready-status",data.status||"ready");root.setAttribute("data-rend-source-state",data.source_state||"");root.setAttribute("data-rend-playable-state",data.playable_state||"");startNative(selected)}).catch(()=>{root.setAttribute("data-rend-player-state","playback_failure")})})();
 </script>
+<script>${FAST_EMBED_TELEMETRY_SCRIPT}</script>
 </body>
 </html>`;
 }
@@ -655,6 +984,7 @@ export async function GET(
       assetId: normalizedAssetId,
       autoPlay,
       bootstrap,
+      bootstrapHttpStatus: response?.status,
       bootstrapUrl: clientBootstrapUrlForRequest(request, normalizedAssetId),
       bootstrapMs: elapsedMs,
       controls,
