@@ -992,7 +992,7 @@ async fn playback_analytics_endpoint_requires_dev_api_key() {
 #[tokio::test]
 async fn recent_player_events_endpoint_requires_dev_api_key() {
     let app = build_app(test_state(), Duration::from_secs(10));
-    let path = "/internal/site/assets/00000000-0000-0000-0000-000000000001/player-events";
+    let path = "/v1/site/assets/00000000-0000-0000-0000-000000000001/player-events";
 
     let response = route_response(app.clone(), path, None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

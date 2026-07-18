@@ -1016,7 +1016,7 @@ export async function fetchAssetThumbnail(
 
   const upstream = await controlPlaneFetch(
     auth,
-    `/internal/site/assets/${encodeURIComponent(normalizedAssetId)}/thumbnail`,
+    `/v1/site/assets/${encodeURIComponent(normalizedAssetId)}/thumbnail`,
     {
       headers: { accept: "image/jpeg,image/*;q=0.8,*/*;q=0.5" },
     }
@@ -1129,7 +1129,7 @@ export async function fetchAssetPlayerTelemetry(
   if (options.playbackSessionId) params.set("playback_session_id", options.playbackSessionId);
   const upstream = await controlPlaneFetch(
     auth,
-    `/internal/site/assets/${encodeURIComponent(normalizedAssetId)}/player-events?${params}`
+    `/v1/site/assets/${encodeURIComponent(normalizedAssetId)}/player-events?${params}`
   );
   const data = await readUpstreamJson(upstream);
   if (!isRecord(data) || safeAssetId(data.asset_id) !== normalizedAssetId || !Array.isArray(data.events)) {

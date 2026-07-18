@@ -2086,7 +2086,7 @@ fn build_app(state: Arc<AppState>, request_timeout: Duration) -> Router {
         .merge(metrics_routes)
         .merge(authenticated_routes)
         .merge(site_player_telemetry_routes)
-        .nest("/internal/site", site_internal_routes)
+        .nest("/v1/site", site_internal_routes)
         .nest("/internal/edges", edge_routes)
         .nest("/internal/operator", operator_routes)
         .nest("/internal/telemetry", telemetry_routes);

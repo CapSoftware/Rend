@@ -152,7 +152,7 @@ test("asset thumbnail client streams binary thumbnail responses without playback
       );
 
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].url, "http://127.0.0.1:4000/internal/site/assets/00000000-0000-0000-0000-000000000001/thumbnail");
+      assert.equal(calls[0].url, "http://127.0.0.1:4000/v1/site/assets/00000000-0000-0000-0000-000000000001/thumbnail");
       assert.equal(calls[0].accept, "image/jpeg,image/*;q=0.8,*/*;q=0.5");
       assert.equal(response.headers.get("content-type"), "image/jpeg");
       assert.equal(response.headers.get("cache-control"), "private, max-age=31536000, immutable");
@@ -168,7 +168,7 @@ test("asset player telemetry client reads durable events and strips invalid rows
     await withMockFetch(async (url, init) => {
       assert.equal(
         String(url),
-        `http://127.0.0.1:4000/internal/site/assets/${assetId}/player-events?limit=20`
+        `http://127.0.0.1:4000/v1/site/assets/${assetId}/player-events?limit=20`
       );
       const headers = new Headers(init?.headers);
       assert.equal(headers.get("x-rend-site-token"), "site-internal-token");
