@@ -248,6 +248,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "arn:${data.aws_partition.current.partition}:sns:${var.aws_region}:${var.expected_account_id}:rend-*",
       "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${var.expected_account_id}:parameter/rend/*",
       "arn:${data.aws_partition.current.partition}:wafv2:us-east-1:${var.expected_account_id}:global/webacl/rend-*/*",
+      "arn:${data.aws_partition.current.partition}:wafv2:${var.aws_region}:${var.expected_account_id}:regional/webacl/rend-*/*",
     ]
   }
 

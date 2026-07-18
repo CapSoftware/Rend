@@ -504,10 +504,23 @@ resource "aws_route53_record" "public_ipv4" {
   type    = "A"
 
   alias {
-    name                   = aws_cloudfront_distribution.this.domain_name
-    zone_id                = aws_cloudfront_distribution.this.hosted_zone_id
-    evaluate_target_health = false
+    name = (
+      each.key == "api"
+      ? aws_lb.public_api.dns_name
+      : aws_cloudfront_distribution.this.domain_name
+    )
+    zone_id = (
+      each.key == "api"
+      ? aws_lb.public_api.zone_id
+      : aws_cloudfront_distribution.this.hosted_zone_id
+    )
+    evaluate_target_health = each.key == "api"
   }
+
+  depends_on = [
+    aws_ecs_service.api,
+    aws_wafv2_web_acl_association.public_api,
+  ]
 }
 
 resource "aws_route53_record" "public_ipv6" {
@@ -527,10 +540,147 @@ resource "aws_route53_record" "public_ipv6" {
   type    = "AAAA"
 
   alias {
-    name                   = aws_cloudfront_distribution.this.domain_name
-    zone_id                = aws_cloudfront_distribution.this.hosted_zone_id
-    evaluate_target_health = false
+    name = (
+      each.key == "api"
+      ? aws_lb.public_api.dns_name
+      : aws_cloudfront_distribution.this.domain_name
+    )
+    zone_id = (
+      each.key == "api"
+      ? aws_lb.public_api.zone_id
+      : aws_cloudfront_distribution.this.hosted_zone_id
+    )
+    evaluate_target_health = each.key == "api"
   }
+
+
+  depends_on = [
+    aws_ecs_service.api,
+    aws_wafv2_web_acl_association.public_api,
+  ]
+}
+
+resource "aws_wafv2_web_acl" "public_api" {
+  name  = "${local.resource_prefix}-public-api"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  rule {
+    name     = "BlockInternalRoutes"
+    priority = 0
+
+    action {
+      block {}
+    }
+
+    statement {
+      or_statement {
+        statement {
+          byte_match_statement {
+            positional_constraint = "STARTS_WITH"
+            search_string         = "/internal/"
+            field_to_match {
+              uri_path {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          byte_match_statement {
+            positional_constraint = "EXACTLY"
+            search_string         = "/metrics"
+            field_to_match {
+              uri_path {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "BlockInternalRoutes"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "RateLimitByIP"
+    priority = 10
+    action {
+      block {}
+    }
+    statement {
+      rate_based_statement {
+        aggregate_key_type = "IP"
+        limit              = 2000
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "RateLimitByIP"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSCommonRules"
+    priority = 20
+    override_action {
+      none {}
+    }
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSCommonRules"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSKnownBadInputs"
+    priority = 30
+    override_action {
+      none {}
+    }
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSKnownBadInputs"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${local.resource_prefix}-public-api"
+    sampled_requests_enabled   = true
+  }
+}
+
+resource "aws_wafv2_web_acl_association" "public_api" {
+  resource_arn = aws_lb.public_api.arn
+  web_acl_arn  = aws_wafv2_web_acl.public_api.arn
 }
 
 resource "aws_route53_zone" "internal" {

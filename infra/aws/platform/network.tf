@@ -156,6 +156,37 @@ resource "aws_security_group" "origin_alb" {
   }
 }
 
+resource "aws_security_group" "public_api_alb" {
+  name        = "${local.resource_prefix}-public-api-alb"
+  description = "Public HTTPS ingress for the Rend API"
+  vpc_id      = aws_vpc.this.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "public_api_ipv4" {
+  description       = "Public HTTPS IPv4"
+  security_group_id = aws_security_group.public_api_alb.id
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "public_api_ipv6" {
+  description       = "Public HTTPS IPv6"
+  security_group_id = aws_security_group.public_api_alb.id
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv6         = "::/0"
+}
+
 resource "aws_security_group" "ecs" {
   name        = "${local.resource_prefix}-ecs"
   description = "Rend API and edge traffic from the internal ALB"
@@ -195,6 +226,15 @@ resource "aws_vpc_security_group_ingress_rule" "ecs_from_origin" {
   from_port                    = 8443
   to_port                      = 8443
   referenced_security_group_id = aws_security_group.origin_alb.id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "ecs_from_public_api" {
+  description                  = "HTTPS to API task-local TLS proxies from the public ALB"
+  security_group_id            = aws_security_group.ecs.id
+  ip_protocol                  = "tcp"
+  from_port                    = 8443
+  to_port                      = 8443
+  referenced_security_group_id = aws_security_group.public_api_alb.id
 }
 
 resource "aws_security_group" "clickhouse" {

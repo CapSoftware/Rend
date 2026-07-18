@@ -7,6 +7,8 @@ resource "terraform_data" "tigris_buckets" {
     source_location = var.tigris_source_location
     media_location  = var.tigris_media_location
     allowed_origins = local.site_origins
+    playback_domain = var.playback_domain_name
+    playback_key    = sha256(var.cloudfront_public_key_pem)
   }
 
   triggers_replace = [
@@ -17,6 +19,8 @@ resource "terraform_data" "tigris_buckets" {
     var.tigris_source_location,
     var.tigris_media_location,
     sha256(jsonencode(local.site_origins)),
+    var.playback_domain_name,
+    sha256(var.cloudfront_public_key_pem),
     filesha256("${path.module}/../scripts/provision-tigris.sh"),
   ]
 
@@ -36,15 +40,18 @@ resource "terraform_data" "tigris_buckets" {
     command = "${path.module}/../scripts/provision-tigris.sh"
 
     environment = {
-      TIGRIS_ENDPOINT                 = var.tigris_endpoint
-      TIGRIS_REGION                   = var.tigris_region
-      TIGRIS_SOURCE_BUCKET            = var.tigris_source_bucket
-      TIGRIS_MEDIA_BUCKET             = var.tigris_media_bucket
-      TIGRIS_SOURCE_LOCATION          = var.tigris_source_location
-      TIGRIS_MEDIA_LOCATION           = var.tigris_media_location
-      TIGRIS_ACCESS_KEY_PARAMETER_ARN = var.tigris_access_key_id_parameter_arn
-      TIGRIS_SECRET_KEY_PARAMETER_ARN = var.tigris_secret_access_key_parameter_arn
-      TIGRIS_ALLOWED_ORIGINS_JSON     = jsonencode(local.site_origins)
+      TIGRIS_ENDPOINT                    = var.tigris_endpoint
+      TIGRIS_REGION                      = var.tigris_region
+      TIGRIS_SOURCE_BUCKET               = var.tigris_source_bucket
+      TIGRIS_MEDIA_BUCKET                = var.tigris_media_bucket
+      TIGRIS_SOURCE_LOCATION             = var.tigris_source_location
+      TIGRIS_MEDIA_LOCATION              = var.tigris_media_location
+      TIGRIS_ACCESS_KEY_PARAMETER_ARN    = var.tigris_access_key_id_parameter_arn
+      TIGRIS_SECRET_KEY_PARAMETER_ARN    = var.tigris_secret_access_key_parameter_arn
+      TIGRIS_ALLOWED_ORIGINS_JSON        = jsonencode(local.site_origins)
+      TIGRIS_PLAYBACK_DOMAIN             = var.playback_domain_name
+      TIGRIS_PLAYBACK_PUBLIC_KEY_PEM_B64 = base64encode(var.cloudfront_public_key_pem)
+      TIGRIS_PLAYBACK_KEY_ID_PARAMETER   = "/rend/${var.environment}/tigris-playback-key-id"
     }
   }
 

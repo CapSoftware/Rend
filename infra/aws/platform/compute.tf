@@ -37,8 +37,42 @@ resource "aws_lb" "origin" {
   idle_timeout               = 60
 }
 
+resource "aws_lb" "public_api" {
+  name               = substr("${local.resource_prefix}-api-public", 0, 32)
+  internal           = false
+  load_balancer_type = "application"
+  ip_address_type    = "dualstack"
+  security_groups    = [aws_security_group.public_api_alb.id]
+  subnets            = [for subnet in aws_subnet.public : subnet.id]
+
+  enable_deletion_protection = true
+  drop_invalid_header_fields = true
+  idle_timeout               = 120
+}
+
 resource "aws_lb_target_group" "api" {
   name        = substr("${local.resource_prefix}-api", 0, 32)
+  port        = 8443
+  protocol    = "HTTPS"
+  target_type = "ip"
+  vpc_id      = aws_vpc.this.id
+
+  deregistration_delay = 30
+
+  health_check {
+    enabled             = true
+    protocol            = "HTTPS"
+    path                = "/readyz"
+    matcher             = "200"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    interval            = 15
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_target_group" "public_api" {
+  name        = substr("${local.resource_prefix}-api-public", 0, 32)
   port        = 8443
   protocol    = "HTTPS"
   target_type = "ip"
@@ -113,6 +147,19 @@ resource "aws_lb_listener" "internal_https" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.api.arn
+  }
+}
+
+resource "aws_lb_listener" "public_api_https" {
+  load_balancer_arn = aws_lb.public_api.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.public.certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.public_api.arn
   }
 }
 
@@ -462,11 +509,21 @@ resource "aws_ecs_service" "api" {
     container_port   = 8443
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.public_api.arn
+    container_name   = "tls-proxy"
+    container_port   = 8443
+  }
+
   lifecycle {
     ignore_changes = [desired_count, task_definition]
   }
 
-  depends_on = [aws_lb_listener.internal_https, terraform_data.service_activation_guard]
+  depends_on = [
+    aws_lb_listener.internal_https,
+    aws_lb_listener.public_api_https,
+    terraform_data.service_activation_guard,
+  ]
 }
 
 resource "aws_ecs_service" "edge" {

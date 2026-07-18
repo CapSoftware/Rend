@@ -16,15 +16,16 @@ locals {
     cidrsubnet(var.vpc_cidr, 8, 3),
   ]
 
-  playback_base_url          = "https://${var.playback_domain_name}"
-  api_base_url               = "https://${var.api_domain_name}"
-  internal_base_url          = "https://${var.internal_domain_name}"
-  clickhouse_internal_domain = "clickhouse.${var.internal_domain_name}"
-  site_origins               = distinct(concat([var.site_domain_name], var.additional_site_origins))
-  allowed_origins            = join(",", distinct(concat(local.site_origins, [local.api_base_url, local.playback_base_url])))
-  edge_id                    = "aws-edge-pool"
-  edge_region                = var.aws_region
-  expected_edges             = "${local.edge_id}=${local.edge_region}=${local.playback_base_url}"
+  playback_base_url                    = "https://${var.playback_domain_name}"
+  api_base_url                         = "https://${var.api_domain_name}"
+  internal_base_url                    = "https://${var.internal_domain_name}"
+  clickhouse_internal_domain           = "clickhouse.${var.internal_domain_name}"
+  site_origins                         = distinct(concat([var.site_domain_name], var.additional_site_origins))
+  allowed_origins                      = join(",", distinct(concat(local.site_origins, [local.api_base_url, local.playback_base_url])))
+  edge_id                              = "aws-edge-pool"
+  edge_region                          = var.aws_region
+  expected_edges                       = "${local.edge_id}=${local.edge_region}=${local.playback_base_url}"
+  tigris_playback_key_id_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${var.expected_account_id}:parameter/rend/${var.environment}/tigris-playback-key-id"
 
   common_container_environment = [
     { name = "REND_ENV", value = "production" },
@@ -41,9 +42,11 @@ locals {
     { name = "REND_PLAYBACK_BASE_URL", value = local.playback_base_url },
     { name = "REND_TIGRIS_PLAYBACK_BASE_URL", value = local.playback_base_url },
     { name = "REND_PUBLIC_PLAYBACK_ENABLED", value = "false" },
-    { name = "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET", value = "" },
+    { name = "REND_PUBLIC_PLAYBACK_ALIAS_ENABLED", value = "true" },
+    { name = "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET", value = var.tigris_media_bucket },
     { name = "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX", value = "v" },
     { name = "REND_PUBLIC_PLAYBACK_ALIAS_ACL", value = "inherit" },
+    { name = "REND_PUBLIC_PLAYBACK_ALIAS_METADATA_RENAME", value = "true" },
     { name = "REND_EXPECTED_EDGES", value = local.expected_edges },
     { name = "REND_ALLOW_INSECURE_EDGE_URLS", value = "false" },
     { name = "REND_EDGE_ACTIVE_HEARTBEAT_WINDOW_SECS", value = "120" },
@@ -125,5 +128,6 @@ locals {
     [for secret in local.common_container_secrets : secret.valueFrom],
     [for secret in local.edge_container_secrets : secret.valueFrom],
     [var.cloudfront_private_key_parameter_arn],
+    [local.tigris_playback_key_id_parameter_arn],
   ))
 }

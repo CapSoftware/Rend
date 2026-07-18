@@ -11,6 +11,9 @@ required_environment=(
   TIGRIS_ACCESS_KEY_PARAMETER_ARN
   TIGRIS_SECRET_KEY_PARAMETER_ARN
   TIGRIS_ALLOWED_ORIGINS_JSON
+  TIGRIS_PLAYBACK_DOMAIN
+  TIGRIS_PLAYBACK_PUBLIC_KEY_PEM_B64
+  TIGRIS_PLAYBACK_KEY_ID_PARAMETER
 )
 for name in "${required_environment[@]}"; do
   if [[ -z "${!name:-}" ]]; then
@@ -84,6 +87,14 @@ tigris_cli() {
     AWS_DEFAULT_REGION="$TIGRIS_REGION" \
     AWS_EC2_METADATA_DISABLED=true \
     tigris "$@"
+}
+
+tigris_cloudfront() {
+  AWS_ACCESS_KEY_ID="$tigris_access_key" \
+    AWS_SECRET_ACCESS_KEY="$tigris_secret_key" \
+    AWS_DEFAULT_REGION=us-east-1 \
+    AWS_EC2_METADATA_DISABLED=true \
+    aws --endpoint-url https://t3.storage.dev cloudfront "$@" --no-cli-pager
 }
 
 jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("https://"))' \
@@ -170,4 +181,63 @@ ensure_bucket() {
 
 ensure_bucket "$TIGRIS_SOURCE_BUCKET" "$TIGRIS_SOURCE_LOCATION" "$work_dir/source-cors.json"
 ensure_bucket "$TIGRIS_MEDIA_BUCKET" "$TIGRIS_MEDIA_LOCATION" "$work_dir/media-cors.json"
-echo "Tigris source and media bucket contracts are reconciled and private; Rend owns abandoned multipart expiry."
+
+playback_public_key_pem="$(printf '%s' "$TIGRIS_PLAYBACK_PUBLIC_KEY_PEM_B64" | base64 --decode)"
+if [[ "$playback_public_key_pem" != "-----BEGIN PUBLIC KEY-----"* ]]; then
+  echo "Tigris playback public key is not a PEM public key" >&2
+  exit 1
+fi
+playback_key_name="rend-production-private-playback"
+playback_key_id="$(tigris_cloudfront list-public-keys --output json \
+  | jq -r --arg name "$playback_key_name" '.PublicKeyList.Items[]? | select(.Name == $name) | .Id' \
+  | head -n 1)"
+jq -n \
+  --arg caller_reference "rend-production-private-playback-v1" \
+  --arg name "$playback_key_name" \
+  --arg encoded_key "$playback_public_key_pem" \
+  --arg comment "Rend private Tigris playback signed cookies" \
+  '{CallerReference:$caller_reference,Name:$name,EncodedKey:$encoded_key,Comment:$comment}' \
+  >"$work_dir/public-key-create.json"
+
+if [[ -z "$playback_key_id" ]]; then
+  playback_key_id="$(tigris_cloudfront create-public-key \
+    --public-key-config "file://$work_dir/public-key-create.json" \
+    --query 'PublicKey.Id' \
+    --output text)"
+else
+  current_key="$(tigris_cloudfront get-public-key-config \
+    --id "$playback_key_id" \
+    --output json)"
+  current_etag="$(jq -r '.ETag' <<<"$current_key")"
+  current_encoded_key="$(jq -r '.PublicKeyConfig.EncodedKey' <<<"$current_key")"
+  if [[ "$current_encoded_key" != "$playback_public_key_pem" ]]; then
+    jq -n \
+      --arg name "$playback_key_name" \
+      --arg encoded_key "$playback_public_key_pem" \
+      --arg comment "Rend private Tigris playback signed cookies" \
+      '{Name:$name,EncodedKey:$encoded_key,Comment:$comment}' \
+      >"$work_dir/public-key-update.json"
+    tigris_cloudfront update-public-key \
+      --id "$playback_key_id" \
+      --if-match "$current_etag" \
+      --public-key-config "file://$work_dir/public-key-update.json" >/dev/null
+  fi
+fi
+if [[ -z "$playback_key_id" || "$playback_key_id" == "None" ]]; then
+  echo "Tigris did not return a private playback public key ID" >&2
+  exit 1
+fi
+
+tigris_cli buckets set "$TIGRIS_MEDIA_BUCKET" \
+  --custom-domain "$TIGRIS_PLAYBACK_DOMAIN" \
+  --json \
+  --yes >/dev/null
+
+aws ssm put-parameter \
+  --name "$TIGRIS_PLAYBACK_KEY_ID_PARAMETER" \
+  --type String \
+  --value "$playback_key_id" \
+  --overwrite \
+  --no-cli-pager >/dev/null
+
+echo "Tigris source and media bucket contracts, private playback key, and custom playback domain are reconciled."

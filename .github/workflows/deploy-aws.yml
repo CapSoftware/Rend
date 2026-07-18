@@ -268,6 +268,28 @@ jobs:
             aws ecs wait services-stable --cluster "$cluster" --services "$service"
           done
 
+      - name: Promote existing playback objects into private Tigris aliases
+        if: ${{ inputs.apply && inputs.services_enabled }}
+        working-directory: infra/aws/platform
+        run: |
+          set -euo pipefail
+          cluster="$(terraform output -raw ecs_cluster_name)"
+          task_definition="$(terraform output -json task_definition_arns | jq -r .migrate)"
+          security_group="$(terraform output -raw ecs_security_group_id)"
+          subnets="$(terraform output -json ecs_public_subnet_ids | jq -r 'join(",")')"
+          overrides='{"containerOverrides":[{"name":"rend-api","command":["backfill","playback-aliases"]}]}'
+          task_arn="$(aws ecs run-task \
+            --cluster "$cluster" \
+            --launch-type FARGATE \
+            --task-definition "$task_definition" \
+            --overrides "$overrides" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)"
+          test "$task_arn" != None
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task_arn"
+          exit_code="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" --output json | jq -r '.tasks[0].containers[] | select(.name == "rend-api") | .exitCode')"
+          test "$exit_code" = 0
+
       - name: Verify public media pipeline
         if: ${{ inputs.apply && inputs.services_enabled }}
         working-directory: infra/aws/platform
