@@ -65,15 +65,9 @@ api_max_tasks    = 6
 edge_min_tasks   = 2
 edge_max_tasks   = 6
 worker_min_tasks = 1
-worker_max_tasks = 10
+worker_max_tasks = 50
 
 cloudfront_price_class = "PriceClass_All"
-# VPC Origins require Business or Premium. For a brand-new distribution only,
-# set bootstrap=true for its first apply, immediately subscribe it to Business
-# in the CloudFront console, then set verified=true and bootstrap=false.
-cloudfront_flat_rate_plan_tier     = "Business"
-cloudfront_flat_rate_plan_bootstrap = false
-cloudfront_flat_rate_plan_verified  = false
 monthly_budget_usd                  = 400
 # Linked accounts cannot activate this tag themselves. Leave false for the
 # initial migration, then enable it after the Organizations management account

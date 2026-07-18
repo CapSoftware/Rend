@@ -1703,8 +1703,17 @@ async fn publish_media_queue_metrics(state: &AppState) -> Result<()> {
           GREATEST(count(DISTINCT locked_by) FILTER (
             WHERE status = 'running' AND lease_expires_at > now()
           ), 1)
-        FROM rend.media_jobs
-        WHERE job_type = 'process_media'
+        FROM rend.media_jobs job
+        JOIN rend.assets asset
+          ON asset.id = job.asset_id
+         AND asset.deleted_at IS NULL
+         AND asset.suspended_at IS NULL
+        JOIN rend_auth.organization org
+          ON org.id = asset.organization_id
+         AND org.suspended_at IS NULL
+        JOIN rend.organization_storage_usage quota
+          ON quota.organization_id = asset.organization_id
+        WHERE job.job_type = 'process_media'
         ",
     )
     .fetch_one(&state.db)

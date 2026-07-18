@@ -372,12 +372,12 @@ variable "worker_min_tasks" {
 
 variable "worker_max_tasks" {
   type    = number
-  default = 10
+  default = 50
 
 
   validation {
-    condition     = var.worker_max_tasks >= 1 && var.worker_max_tasks <= 10
-    error_message = "worker_max_tasks must be between 1 and the hard ceiling of 10."
+    condition     = var.worker_max_tasks >= 1 && var.worker_max_tasks <= 50
+    error_message = "worker_max_tasks must be between 1 and the hard global ceiling of 50."
   }
 }
 
@@ -423,29 +423,6 @@ variable "cloudfront_price_class" {
     condition     = contains(["PriceClass_100", "PriceClass_200", "PriceClass_All"], var.cloudfront_price_class)
     error_message = "cloudfront_price_class must be PriceClass_100, PriceClass_200, or PriceClass_All."
   }
-}
-
-variable "cloudfront_flat_rate_plan_verified" {
-  description = "Explicit production gate confirming the AWS account has an active CloudFront flat-rate plan."
-  type        = bool
-  default     = false
-}
-
-variable "cloudfront_flat_rate_plan_tier" {
-  description = "Selected CloudFront flat-rate tier. VPC Origins require Business or Premium."
-  type        = string
-  default     = "Business"
-
-  validation {
-    condition     = contains(["Business", "Premium"], var.cloudfront_flat_rate_plan_tier)
-    error_message = "The Rend VPC Origin requires the Business or Premium CloudFront flat-rate tier."
-  }
-}
-
-variable "cloudfront_flat_rate_plan_bootstrap" {
-  description = "One-apply escape hatch used only to create a new distribution before subscribing it to a plan in the CloudFront console."
-  type        = bool
-  default     = false
 }
 
 variable "tls_proxy_image" {

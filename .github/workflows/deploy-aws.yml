@@ -268,14 +268,13 @@ jobs:
             aws ecs wait services-stable --cluster "$cluster" --services "$service"
           done
 
-      - name: Verify public health and flat-rate gate
+      - name: Verify public media pipeline
         if: ${{ inputs.apply && inputs.services_enabled }}
         working-directory: infra/aws/platform
         env:
           REND_READINESS_API_KEY: ${{ secrets.REND_READINESS_API_KEY }}
         run: |
           set -euo pipefail
-          test "$(terraform output -raw cloudfront_flat_rate_plan_verified)" = true
           api_url="$(terraform output -raw api_url)"
           playback_url="$(terraform output -raw playback_url)"
           curl --fail --silent --show-error "$api_url/readyz" >/dev/null

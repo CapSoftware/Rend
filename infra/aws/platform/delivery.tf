@@ -152,21 +152,6 @@ resource "aws_cloudfront_key_group" "playback" {
   items   = [aws_cloudfront_public_key.playback.id]
 }
 
-resource "terraform_data" "cloudfront_flat_rate_plan_guard" {
-  input = {
-    bootstrap = var.cloudfront_flat_rate_plan_bootstrap
-    tier      = var.cloudfront_flat_rate_plan_tier
-    verified  = var.cloudfront_flat_rate_plan_verified
-  }
-
-  lifecycle {
-    precondition {
-      condition     = var.cloudfront_flat_rate_plan_verified || var.cloudfront_flat_rate_plan_bootstrap
-      error_message = "Production is blocked until the CloudFront flat-rate plan is active in account 211125561119. For the first distribution apply only, explicitly set cloudfront_flat_rate_plan_bootstrap=true, subscribe immediately, then set verified=true and bootstrap=false."
-    }
-  }
-}
-
 resource "aws_cloudfront_response_headers_policy" "public" {
   name = "${local.resource_prefix}-security"
 
@@ -499,7 +484,6 @@ resource "aws_cloudfront_distribution" "this" {
   depends_on = [
     aws_s3_bucket_acl.cloudfront_logs,
     aws_s3_bucket_policy.cloudfront_logs,
-    terraform_data.cloudfront_flat_rate_plan_guard,
   ]
 }
 

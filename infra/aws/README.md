@@ -132,14 +132,9 @@ Before the first platform apply:
 
    Delete local plaintext copies after storing the secret and your encrypted
    recovery copy.
-4. Activate the CloudFront Business flat-rate plan in account `211125561119`,
-   then set `cloudfront_flat_rate_plan_verified = true`. VPC Origins require at
-   least Business. Terraform blocks production while verification is false.
-   For the first distribution only, set
-   `cloudfront_flat_rate_plan_bootstrap = true` for one apply, subscribe the new
-   distribution immediately in the CloudFront console, then set bootstrap back
-   to false and verification to true. This escape hatch avoids an IaC/console
-   creation deadlock and must never remain enabled.
+4. Keep CloudFront on pay-as-you-go pricing. Rend controls exposure through
+   authenticated playback, WAF rules, backend quotas, and hard ECS autoscaling
+   ceilings rather than a fixed monthly CloudFront plan.
 5. Obtain the production PlanetScale PrivateLink endpoint service name, set it
    in tfvars, and ensure the TLS database URL uses PlanetScale's private DNS.
 6. Add the two Route53 delegation record sets emitted by bootstrap at the
@@ -153,11 +148,11 @@ Before the first platform apply:
    `Application=rend`; an account-wide budget is intentionally forbidden in
    this shared account.
 
-The Business plan is $200/month with no traffic overage charges. The remaining
-default cost envelope is guarded by a $400 monthly AWS alert budget, 50 videos
-and 10 open uploads per organization, two active media jobs per organization,
-and at most ten 4-vCPU/8-GiB workers. ClickHouse starts with 100 GiB encrypted
-gp3.
+CloudFront is pay-as-you-go. The default cost envelope is guarded by a $400
+monthly AWS alert budget, 50 videos and 10 open uploads per organization, two
+active media jobs per organization, and at most fifty 4-vCPU/8-GiB workers.
+Only one worker is kept warm; the fleet scales from queue demand. ClickHouse
+starts with 100 GiB encrypted gp3.
 
 ClickHouse has two independent nightly recovery layers: a native database
 backup copied to a versioned KMS-encrypted S3 bucket at 02:15 UTC and an AWS

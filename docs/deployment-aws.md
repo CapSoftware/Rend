@@ -170,14 +170,11 @@ must activate this tag when Rend runs in a linked account. Service, worker,
 storage, and organization hard ceilings remain active while the Budget is
 pending; set the flag true and apply again as soon as the tag is active.
 
-Production planning is also gated by
-`cloudfront_flat_rate_plan_verified = true`. Set it only after AWS shows the
-Business flat-rate plan active in account `211125561119`; VPC Origins require
-Business or Premium. Terraform cannot activate the commercial plan itself. A
-brand-new distribution therefore has one explicit bootstrap apply: set
-`cloudfront_flat_rate_plan_bootstrap = true`, apply, subscribe the distribution
-to Business in the CloudFront console, then immediately set bootstrap false and
-verification true before the next apply.
+CloudFront remains on pay-as-you-go pricing. Playback is authenticated and WAF
+protected, while cost and abuse exposure is controlled by server-side quotas,
+queue admission, and hard ECS autoscaling ceilings. Production keeps one media
+worker warm and can run at most 50 workers globally; no quota or infrastructure
+limit needs to be rendered in the dashboard.
 
 The source and media buckets remain external to AWS but their full contract is
 owned by Terraform. During apply, an idempotent reconciler reads Tigris

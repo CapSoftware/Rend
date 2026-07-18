@@ -11,14 +11,6 @@ output "cloudfront_playback_key_pair_id" {
   value       = aws_cloudfront_public_key.playback.id
 }
 
-output "cloudfront_flat_rate_plan_verified" {
-  value = var.cloudfront_flat_rate_plan_verified
-}
-
-output "cloudfront_flat_rate_plan_tier" {
-  value = var.cloudfront_flat_rate_plan_tier
-}
-
 output "api_url" {
   value = local.api_base_url
 }
