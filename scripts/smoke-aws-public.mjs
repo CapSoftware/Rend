@@ -259,9 +259,7 @@ try {
   const initReference = renditionBody.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1];
   if (!initReference) throw new Error("signed CloudFront rendition playlist omitted its init file");
   const initUrl = assetArtifactUrl(initReference, renditionUrl, "HLS init URL");
-  await signedArtifact(initUrl, cookies, "signed CloudFront HLS init file", {
-    range: "bytes=0-65535",
-  });
+  await signedArtifact(initUrl, cookies, "signed CloudFront HLS init file");
 
   const segmentReference = manifestReference(
     renditionBody,
@@ -269,9 +267,7 @@ try {
     (line) => line.endsWith(".m4s") || line.endsWith(".ts"),
   );
   const segmentUrl = assetArtifactUrl(segmentReference, renditionUrl, "HLS segment URL");
-  await signedArtifact(segmentUrl, cookies, "signed CloudFront HLS media segment", {
-    range: "bytes=0-65535",
-  });
+  await signedArtifact(segmentUrl, cookies, "signed CloudFront HLS media segment");
 
   const artifactUrls = [openerUrl, manifestUrl, renditionUrl, initUrl, segmentUrl];
 
