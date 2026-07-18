@@ -258,6 +258,7 @@ resource "aws_ecs_task_definition" "migrate" {
       { name = "REND_SERVICE_NAME", value = "rend-api-migrate" },
       { name = "REND_API_AUTO_MIGRATE", value = "false" },
       { name = "REND_API_INLINE_MEDIA_PROCESSING", value = "false" },
+      { name = "REND_CLOUDFRONT_KEY_PAIR_ID", value = aws_cloudfront_public_key.playback.id },
     ])
     secrets = local.api_container_secrets
     logConfiguration = {
