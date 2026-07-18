@@ -1712,17 +1712,21 @@ async fn clickhouse_post(
     query: &str,
     body: String,
 ) -> std::result::Result<String, AppError> {
+    let request_body = clickhouse_request_body(query, &body);
     let response = http
         .post(&config.clickhouse_url)
         .basic_auth(&config.clickhouse_user, Some(&config.clickhouse_password))
-        .header(reqwest::header::CONTENT_LENGTH, body.len().to_string())
+        .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            reqwest::header::CONTENT_LENGTH,
+            request_body.len().to_string(),
+        )
         .query(&[
             ("database", config.clickhouse_database.as_str()),
-            ("query", query),
             ("date_time_input_format", "best_effort"),
             ("output_format_json_quote_64bit_integers", "0"),
         ])
-        .body(body)
+        .body(request_body)
         .send()
         .await
         .map_err(|error| service_unavailable(format!("ClickHouse request failed: {error}")))?;
@@ -1736,6 +1740,18 @@ async fn clickhouse_post(
     }
 
     Ok(text)
+}
+
+fn clickhouse_request_body(query: &str, data: &str) -> String {
+    if data.is_empty() {
+        return query.to_owned();
+    }
+
+    let mut body = String::with_capacity(query.len() + data.len() + 1);
+    body.push_str(query);
+    body.push('\n');
+    body.push_str(data);
+    body
 }
 
 fn clickhouse_playback_analytics_query(
@@ -2691,6 +2707,18 @@ mod tests {
             default_analytics_window_secs: 60,
             max_analytics_window_secs: 3600,
         }
+    }
+
+    #[test]
+    fn clickhouse_sql_and_insert_rows_share_the_post_body() {
+        let query = "INSERT INTO player_events FORMAT JSONEachRow";
+        let rows = "{\"event_id\":\"evt-1\"}\n";
+
+        assert_eq!(clickhouse_request_body("SELECT 1", ""), "SELECT 1");
+        assert_eq!(
+            clickhouse_request_body(query, rows),
+            format!("{query}\n{rows}")
+        );
     }
 
     fn event_json() -> serde_json::Value {
