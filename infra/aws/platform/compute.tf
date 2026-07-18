@@ -228,10 +228,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "REND_PUBLIC_API_BASE_URL", value = local.api_base_url },
       { name = "REND_API_CORS_ALLOWED_ORIGINS", value = local.allowed_origins },
       { name = "REND_PLAYBACK_COOKIE_DOMAIN", value = var.playback_cookie_domain },
-      { name = "REND_CLOUDFRONT_KEY_PAIR_ID", value = aws_cloudfront_public_key.playback.id },
-      { name = "REND_CLOUDFRONT_DISTRIBUTION_ID", value = aws_cloudfront_distribution.this.id },
-      { name = "REND_EDGE_WARM_URL", value = "${local.internal_base_url}/internal/warm" },
-      { name = "REND_EDGE_PURGE_URL", value = "${local.internal_base_url}/internal/purge" },
     ])
     secrets = local.api_container_secrets
     healthCheck = {
@@ -306,7 +302,6 @@ resource "aws_ecs_task_definition" "migrate" {
       { name = "REND_SERVICE_NAME", value = "rend-api-migrate" },
       { name = "REND_API_AUTO_MIGRATE", value = "false" },
       { name = "REND_API_INLINE_MEDIA_PROCESSING", value = "false" },
-      { name = "REND_CLOUDFRONT_KEY_PAIR_ID", value = aws_cloudfront_public_key.playback.id },
     ])
     secrets = local.api_container_secrets
     logConfiguration = {
@@ -451,8 +446,6 @@ resource "aws_ecs_task_definition" "worker" {
       { name = "REND_SERVICE_NAME", value = "rend-media-worker" },
       { name = "REND_API_AUTO_MIGRATE", value = "false" },
       { name = "REND_API_INLINE_MEDIA_PROCESSING", value = "false" },
-      { name = "REND_EDGE_WARM_URL", value = "${local.internal_base_url}/internal/warm" },
-      { name = "REND_EDGE_PURGE_URL", value = "${local.internal_base_url}/internal/purge" },
     ])
     secrets     = local.common_container_secrets
     stopTimeout = 120

@@ -411,7 +411,7 @@ resource "aws_cloudfront_distribution" "this" {
   aliases             = [var.api_domain_name, var.playback_domain_name]
   http_version        = "http2and3"
   price_class         = var.cloudfront_price_class
-  retain_on_delete    = true
+  retain_on_delete    = false
   wait_for_deployment = true
   web_acl_id          = aws_wafv2_web_acl.cloudfront.arn
 

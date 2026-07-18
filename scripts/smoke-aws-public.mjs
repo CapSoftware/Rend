@@ -91,7 +91,7 @@ function assetArtifactUrl(reference, base, label) {
   const value = new URL(reference, base);
   const expectedPrefix = `${playbackBase}/v/${assetId}/`;
   if (!value.toString().startsWith(expectedPrefix)) {
-    throw new Error(`${label} escaped the expected CloudFront asset path`);
+    throw new Error(`${label} escaped the expected private Tigris asset path`);
   }
   if (value.search || value.hash) {
     throw new Error(`${label} exposed query credentials`);
@@ -165,7 +165,7 @@ try {
     { redirect: "manual" },
   );
   if (anonymous.status !== 403) {
-    throw new Error(`anonymous CloudFront playback expected HTTP 403, got ${anonymous.status}`);
+    throw new Error(`anonymous private Tigris playback expected HTTP 403, got ${anonymous.status}`);
   }
 
   const created = await apiJson("/v1/uploads", {
@@ -222,7 +222,7 @@ try {
   });
   const bootstrap = await jsonResponse(bootstrapResponse, "playback bootstrap");
   if (typeof bootstrap.manifest_url !== "string") {
-    throw new Error("playback bootstrap did not return the expected CloudFront asset URL");
+    throw new Error("playback bootstrap did not return the expected private Tigris asset URL");
   }
   const manifestUrl = assetArtifactUrl(bootstrap.manifest_url, playbackBase, "playback manifest URL");
 
@@ -237,19 +237,19 @@ try {
     playbackBase,
     "opener URL",
   );
-  await signedArtifact(openerUrl, cookies, "signed CloudFront opener", {
+  await signedArtifact(openerUrl, cookies, "signed private Tigris opener", {
     range: "bytes=0-65535",
   });
 
-  const manifest = await signedArtifact(manifestUrl, cookies, "signed CloudFront master manifest");
+  const manifest = await signedArtifact(manifestUrl, cookies, "signed private Tigris master manifest");
   const manifestBody = new TextDecoder().decode(manifest.body);
   if (!manifestBody.startsWith("#EXTM3U")) {
-    throw new Error("signed CloudFront master manifest was not HLS");
+    throw new Error("signed private Tigris master manifest was not HLS");
   }
 
   const renditionReference = manifestReference(
     manifestBody,
-    "signed CloudFront master manifest",
+    "signed private Tigris master manifest",
     (line) => line.endsWith(".m3u8"),
   );
   const renditionUrl = assetArtifactUrl(
@@ -260,36 +260,27 @@ try {
   const rendition = await signedArtifact(
     renditionUrl,
     cookies,
-    "signed CloudFront rendition playlist",
+    "signed private Tigris rendition playlist",
   );
   const renditionBody = new TextDecoder().decode(rendition.body);
   if (!renditionBody.startsWith("#EXTM3U")) {
-    throw new Error("signed CloudFront rendition playlist was not HLS");
+    throw new Error("signed private Tigris rendition playlist was not HLS");
   }
 
   const initReference = renditionBody.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1];
-  if (!initReference) throw new Error("signed CloudFront rendition playlist omitted its init file");
+  if (!initReference) throw new Error("signed private Tigris rendition playlist omitted its init file");
   const initUrl = assetArtifactUrl(initReference, renditionUrl, "HLS init URL");
-  await signedArtifact(initUrl, cookies, "signed CloudFront HLS init file");
+  await signedArtifact(initUrl, cookies, "signed private Tigris HLS init file");
 
   const segmentReference = manifestReference(
     renditionBody,
-    "signed CloudFront rendition playlist",
+    "signed private Tigris rendition playlist",
     (line) => line.endsWith(".m4s") || line.endsWith(".ts"),
   );
   const segmentUrl = assetArtifactUrl(segmentReference, renditionUrl, "HLS segment URL");
-  await signedArtifact(segmentUrl, cookies, "signed CloudFront HLS media segment");
+  await signedArtifact(segmentUrl, cookies, "signed private Tigris HLS media segment");
 
   const artifactUrls = [openerUrl, manifestUrl, renditionUrl, initUrl, segmentUrl];
-
-  await waitFor("playback analytics", 90_000, async () => {
-    const { body } = await apiJson(`/v1/assets/${encodeURIComponent(assetId)}/analytics/playback`);
-    return {
-      done: Number(body.request_count) > 0 && Number(body.bytes_served) > 0,
-      value: body,
-      detail: `request_count=${body.request_count} bytes_served=${body.bytes_served}`,
-    };
-  });
 
   await apiJson(`/v1/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" });
   deleted = true;
@@ -302,7 +293,7 @@ try {
     return { done: response.status === 404, detail: `HTTP ${response.status}` };
   });
 
-  await waitFor("CloudFront deletion invalidation", deleteTimeoutMs, async () => {
+  await waitFor("private Tigris object deletion", deleteTimeoutMs, async () => {
     const responses = await Promise.all(
       artifactUrls.map((url) =>
         fetch(url, {

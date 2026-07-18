@@ -38,7 +38,7 @@ locals {
     { name = "S3_REGION", value = var.tigris_region },
     { name = "S3_BUCKET", value = var.tigris_media_bucket },
     { name = "S3_SOURCE_BUCKET", value = var.tigris_source_bucket },
-    { name = "REND_PLAYBACK_MODE", value = "edge" },
+    { name = "REND_PLAYBACK_MODE", value = "tigris" },
     { name = "REND_PLAYBACK_BASE_URL", value = local.playback_base_url },
     { name = "REND_TIGRIS_PLAYBACK_BASE_URL", value = local.playback_base_url },
     { name = "REND_PUBLIC_PLAYBACK_ENABLED", value = "false" },
@@ -114,6 +114,7 @@ locals {
 
   api_container_secrets = concat(local.common_container_secrets, [
     { name = "REND_CLOUDFRONT_PRIVATE_KEY", valueFrom = var.cloudfront_private_key_parameter_arn },
+    { name = "REND_CLOUDFRONT_KEY_PAIR_ID", valueFrom = local.tigris_playback_key_id_parameter_arn },
   ])
 
   edge_container_secrets = [
