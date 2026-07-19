@@ -142,34 +142,56 @@ async function forwardDurablePlayerTelemetry(events: SanitizedPlayerTelemetryEve
   if (events.length === 0) return;
 
   const body = JSON.stringify({ events });
+  const failures: string[] = [];
+
+  async function forward(path: string, headers: Record<string, string>, label: string) {
+    try {
+      const response = await fetch(controlPlaneUrl(path), {
+        method: "POST",
+        cache: "no-store",
+        signal: AbortSignal.timeout(1500),
+        headers: {
+          "content-type": "application/json",
+          ...headers,
+        },
+        body,
+      });
+      if (response.ok) return true;
+      failures.push(`${label}_http_${response.status}`);
+    } catch (error) {
+      failures.push(
+        `${label}_${error instanceof Error && error.name === "TimeoutError" ? "timeout" : "network_error"}`
+      );
+    }
+    return false;
+  }
+
   const siteToken = siteInternalToken();
-  if (siteToken) {
-    const response = await fetch(controlPlaneUrl("/v1/site/player-telemetry"), {
-      method: "POST",
-      cache: "no-store",
-      signal: AbortSignal.timeout(1500),
-      headers: {
-        "content-type": "application/json",
-        "x-rend-site-token": siteToken,
-      },
-      body,
-    });
-    if (response.ok) return;
+  if (
+    siteToken &&
+    (await forward(
+      "/v1/site/player-telemetry",
+      { "x-rend-site-token": siteToken },
+      "site"
+    ))
+  ) {
+    return;
   }
 
   const token = telemetryInternalToken();
-  if (!token) return;
+  if (
+    token &&
+    (await forward(
+      "/internal/telemetry/player",
+      { "x-rend-internal-token": token },
+      "internal"
+    ))
+  ) {
+    return;
+  }
 
-  await fetch(controlPlaneUrl("/internal/telemetry/player"), {
-    method: "POST",
-    cache: "no-store",
-    signal: AbortSignal.timeout(1500),
-    headers: {
-      "content-type": "application/json",
-      "x-rend-internal-token": token,
-    },
-    body,
-  });
+  if (!siteToken && !token) failures.push("credentials_missing");
+  throw new Error(failures.join(",") || "forward_failed");
 }
 
 export async function POST(request: Request) {
@@ -223,7 +245,23 @@ export async function POST(request: Request) {
 
   const events = enrichPlayerTelemetryEvents(request, result.events);
   recordPlayerTelemetryEvents(events);
-  await forwardDurablePlayerTelemetry(events).catch(() => undefined);
+  try {
+    await forwardDurablePlayerTelemetry(events);
+  } catch (error) {
+    console.error("[rend-player-telemetry] durable forwarding failed", {
+      event_count: events.length,
+      failure: error instanceof Error ? error.message : "unknown",
+    });
+    if (productionProfile()) {
+      return jsonResponse(
+        {
+          status: "error",
+          error: "telemetry_upstream_unavailable",
+        },
+        { status: 503 }
+      );
+    }
+  }
 
   return jsonResponse({
     status: "ok",

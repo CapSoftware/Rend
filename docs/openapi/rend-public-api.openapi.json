@@ -568,7 +568,8 @@
           },
           "400": { "$ref": "#/components/responses/TelemetryValidationError" },
           "413": { "$ref": "#/components/responses/TelemetryValidationError" },
-          "415": { "$ref": "#/components/responses/TelemetryValidationError" }
+          "415": { "$ref": "#/components/responses/TelemetryValidationError" },
+          "503": { "$ref": "#/components/responses/TelemetryUnavailable" }
         }
       }
     },
@@ -788,6 +789,19 @@
             "schema": { "$ref": "#/components/schemas/TelemetryErrorResponse" },
             "examples": {
               "invalidJson": { "value": { "status": "error", "error": "invalid_json" } }
+            }
+          }
+        }
+      },
+      "TelemetryUnavailable": {
+        "description": "Durable telemetry storage is temporarily unavailable.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/TelemetryErrorResponse" },
+            "examples": {
+              "unavailable": {
+                "value": { "status": "error", "error": "telemetry_upstream_unavailable" }
+              }
             }
           }
         }

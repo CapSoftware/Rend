@@ -240,7 +240,7 @@ test("POST no-ops when telemetry ingest is disabled", async () => {
   }
 });
 
-test("POST enables telemetry ingest by default in production", async () => {
+test("POST enables telemetry ingest by default and fails closed without durable forwarding", async () => {
   const env = process.env as Record<string, string | undefined>;
   const previousNodeEnv = env.NODE_ENV;
   const previousIngest = env.REND_PLAYER_TELEMETRY_INGEST;
@@ -262,8 +262,11 @@ test("POST enables telemetry ingest by default in production", async () => {
       })
     );
 
-    assert.equal(response.status, 200);
-    assert.deepEqual(await responseJson(response), { status: "ok", accepted: 1 });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await responseJson(response), {
+      status: "error",
+      error: "telemetry_upstream_unavailable",
+    });
   } finally {
     if (previousNodeEnv === undefined) {
       delete env.NODE_ENV;
@@ -286,6 +289,37 @@ test("POST enables telemetry ingest by default in production", async () => {
       env.REND_INTERNAL_TELEMETRY_TOKEN = previousToken;
     }
   }
+});
+
+test("POST exposes a production durable telemetry upstream failure", async () => {
+  await withEnv(
+    {
+      REND_ENV_PROFILE: "production",
+      REND_PLAYER_TELEMETRY_INGEST: "1",
+      REND_API_BASE_URL: "https://api.example.test",
+      REND_SITE_INTERNAL_TOKEN: "site-token",
+      REND_INTERNAL_TELEMETRY_TOKEN: undefined,
+      REND_EDGE_INTERNAL_TOKEN: undefined,
+    },
+    async () => {
+      await withMockFetch(async () => new Response(null, { status: 503 }), async () => {
+        const response = await POST(
+          telemetryRequest({
+            playback_session_id: "route-session-forward-failure",
+            asset_id: "asset-123",
+            phase: "player_load",
+            event_time_ms: EVENT_TIME_MS,
+          })
+        );
+
+        assert.equal(response.status, 503);
+        assert.deepEqual(await responseJson(response), {
+          status: "error",
+          error: "telemetry_upstream_unavailable",
+        });
+      });
+    }
+  );
 });
 
 test("recent endpoint is production-disabled unless telemetry debug is enabled", async () => {
