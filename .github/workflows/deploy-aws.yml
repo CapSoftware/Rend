@@ -88,14 +88,12 @@ jobs:
               echo "Reusing immutable $service:$GITHUB_SHA ($digest)"
             else
               metadata="$RUNNER_TEMP/$service-metadata.json"
-              # Import prior builder caches and reuse the live BuildKit cache
-              # across both targets. Exporting the full Rust target directory
-              # made the release path slower than a bounded rebuild.
+              # Reuse the live BuildKit cache across both targets. Importing or
+              # exporting the multi-gigabyte Rust target directory made the
+              # release path slower than one bounded build on the same runner.
               docker buildx build \
                 --platform linux/amd64 \
                 --target "$service" \
-                --cache-from "type=gha,scope=rend-backend" \
-                --cache-from "type=gha,scope=$service" \
                 --build-arg REND_GIT_SHA="$GITHUB_SHA" \
                 --build-arg REND_BUILD_TIME="$build_time" \
                 --build-arg REND_IMAGE_VERSION="aws-${GITHUB_SHA::12}" \
