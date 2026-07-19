@@ -98,7 +98,8 @@ case "$command_name" in
     ;;
   up)
     doctor
-    if "${compose[@]}" config --images | grep -q ':local$'; then
+    images="$("${compose[@]}" config --images)"
+    if grep -q ':local$' <<<"$images"; then
       "${compose[@]}" up -d --build --wait
     else
       "${compose[@]}" pull
