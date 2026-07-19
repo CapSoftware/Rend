@@ -34,6 +34,8 @@ use crate::{
 const OUTPUT_LOG_LIMIT_BYTES: usize = 8 * 1024;
 const HLS_X264_PRESET: &str = "superfast";
 const HLS_AUDIO_BITRATE: &str = "96k";
+const OPENER_MAX_DIMENSION: i32 = 640;
+const OPENER_VIDEO_CRF: &str = "27";
 const HLS_TARGET_SEGMENT_SECONDS: u32 = 1;
 const HLS_FFMPEG_INIT_FILENAME: &str = "init.mp4";
 const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 30;
@@ -631,44 +633,7 @@ async fn generate_and_upload_opener(
     source_path: &Path,
     source_probe: &SourceProbe,
 ) -> Result<UploadedArtifact> {
-    let compatible = source_probe.video_codec.as_deref() == Some("h264")
-        && (!source_probe.has_audio || source_probe.audio_codec.as_deref() == Some("aac"));
-    let mut args = vec![
-        os("-y"),
-        os("-i"),
-        source_path.as_os_str().to_owned(),
-        os("-map"),
-        os("0:v:0"),
-    ];
-    if source_probe.has_audio {
-        args.extend([os("-map"), os("0:a:0")]);
-    }
-    if compatible {
-        args.extend([os("-c"), os("copy")]);
-    } else {
-        args.extend([
-            os("-vf"),
-            os("scale='min(640,iw)':-2"),
-            os("-c:v"),
-            os("libx264"),
-            os("-preset"),
-            os(HLS_X264_PRESET),
-            os("-crf"),
-            os("27"),
-            os("-pix_fmt"),
-            os("yuv420p"),
-        ]);
-        if source_probe.has_audio {
-            args.extend([os("-c:a"), os("aac"), os("-b:a"), os(HLS_AUDIO_BITRATE)]);
-        }
-    }
-    args.extend([
-        os("-movflags"),
-        os("+frag_keyframe+empty_moov+default_base_moof"),
-        os("-f"),
-        os("mp4"),
-        os("pipe:1"),
-    ]);
+    let args = opener_ffmpeg_args(source_path, source_probe);
     let object_key = opener_object_key(&request.asset_id);
     let uploaded_object_key = uploaded_artifact_object_key(request, &object_key);
     let source_size = request
@@ -706,8 +671,63 @@ async fn generate_and_upload_opener(
         content_type: "video/mp4",
         byte_size,
         duration_ms: Some(source_probe.duration_ms),
-        resolution_tier: Some(source_probe.resolution_tier.to_owned()),
+        resolution_tier: Some(
+            if source_probe.width.max(source_probe.height) <= OPENER_MAX_DIMENSION {
+                source_probe.resolution_tier
+            } else {
+                "720p"
+            }
+            .to_owned(),
+        ),
     })
+}
+
+fn opener_ffmpeg_args(source_path: &Path, source_probe: &SourceProbe) -> Vec<OsString> {
+    let copy_video = source_probe.video_codec.as_deref() == Some("h264")
+        && source_probe.width.max(source_probe.height) <= OPENER_MAX_DIMENSION;
+    let mut args = vec![
+        os("-y"),
+        os("-i"),
+        source_path.as_os_str().to_owned(),
+        os("-map"),
+        os("0:v:0"),
+    ];
+    if source_probe.has_audio {
+        args.extend([os("-map"), os("0:a:0")]);
+    }
+    if copy_video {
+        args.extend([os("-c:v"), os("copy")]);
+    } else {
+        args.extend([
+            os("-vf"),
+            os(&format!(
+                "scale=w='if(gte(iw,ih),min({OPENER_MAX_DIMENSION},iw),-2)':h='if(gte(iw,ih),-2,min({OPENER_MAX_DIMENSION},ih))'"
+            )),
+            os("-c:v"),
+            os("libx264"),
+            os("-preset"),
+            os(HLS_X264_PRESET),
+            os("-crf"),
+            os(OPENER_VIDEO_CRF),
+            os("-pix_fmt"),
+            os("yuv420p"),
+        ]);
+    }
+    if source_probe.has_audio {
+        if copy_video && source_probe.audio_codec.as_deref() == Some("aac") {
+            args.extend([os("-c:a"), os("copy")]);
+        } else {
+            args.extend([os("-c:a"), os("aac"), os("-b:a"), os(HLS_AUDIO_BITRATE)]);
+        }
+    }
+    args.extend([
+        os("-movflags"),
+        os("+frag_keyframe+empty_moov+default_base_moof"),
+        os("-f"),
+        os("mp4"),
+        os("pipe:1"),
+    ]);
+    args
 }
 
 fn multipart_output_part_size(estimated_bytes: u64) -> usize {
@@ -2944,6 +2964,58 @@ mod tests {
             hls_variant_stream_map(&renditions, false),
             "v:0,name:360p v:1,name:480p v:2,name:720p v:3,name:1080p"
         );
+    }
+
+    #[test]
+    fn opener_downscales_large_compatible_video_and_reduces_audio() {
+        let source_probe = SourceProbe {
+            duration_ms: 75_000,
+            width: 1920,
+            height: 1080,
+            resolution_tier: "1080p",
+            has_audio: true,
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            frame_rate: Some(30.0),
+        };
+
+        let args = opener_ffmpeg_args(Path::new("source.mp4"), &source_probe)
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:a", "96k"]));
+        assert!(args.iter().any(|value| value.contains("min(640,iw)")));
+        assert!(args.iter().any(|value| value.contains("min(640,ih)")));
+        assert!(
+            args.iter()
+                .any(|value| value == "+frag_keyframe+empty_moov+default_base_moof")
+        );
+    }
+
+    #[test]
+    fn opener_keeps_zero_copy_for_small_compatible_video() {
+        let source_probe = SourceProbe {
+            duration_ms: 12_000,
+            width: 640,
+            height: 360,
+            resolution_tier: "720p",
+            has_audio: true,
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            frame_rate: Some(30.0),
+        };
+
+        let args = opener_ffmpeg_args(Path::new("source.mp4"), &source_probe)
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "copy"]));
+        assert!(!args.iter().any(|value| value == "-vf"));
     }
 
     #[test]

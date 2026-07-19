@@ -43,7 +43,7 @@ export function toneForState(state: string): StatusTone {
 const stateLabels: Record<string, string> = {
   ready: "Ready",
   hls_ready: "Ready",
-  opener_ready: "Optimizing",
+  opener_ready: "Ready, optimizing",
   uploaded: "Uploaded",
   uploading: "Uploading",
   processing: "Processing",
