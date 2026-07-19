@@ -68,9 +68,9 @@ tigris_s3api() {
 }
 
 # Recent AWS CLI releases add optional S3 request checksums by default. Tigris
-# accepts those writes but currently persists an empty CORS/lifecycle document.
-# Restrict compatibility mode to the two affected configuration APIs; its
-# bucket-policy API expects the normal AWS CLI headers.
+# does not consistently implement those headers for bucket configuration APIs.
+# Keep compatibility mode scoped to bucket configuration; object data keeps
+# the SDK's normal integrity checks.
 tigris_s3api_bucket_config() {
   env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
     AWS_ACCESS_KEY_ID="$tigris_access_key" \
@@ -201,7 +201,7 @@ jq -n --arg bucket "$TIGRIS_MEDIA_BUCKET" '{
     Resource: ["arn:aws:s3:::" + $bucket + "/v/*"]
   }]
 }' >"$work_dir/media-policy.json"
-tigris_s3api put-bucket-policy \
+tigris_s3api_bucket_config put-bucket-policy \
   --bucket "$TIGRIS_MEDIA_BUCKET" \
   --policy "file://$work_dir/media-policy.json" >/dev/null
 
