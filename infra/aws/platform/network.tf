@@ -141,7 +141,7 @@ resource "aws_vpc_endpoint" "planetscale" {
 
 resource "aws_security_group" "origin_alb" {
   name        = "${local.resource_prefix}-origin-alb"
-  description = "Internal Rend API and ClickHouse ALB"
+  description = "CloudFront VPC Origin to the internal Rend ALB"
   vpc_id      = aws_vpc.this.id
 
   egress {
@@ -185,7 +185,7 @@ resource "aws_vpc_security_group_ingress_rule" "public_api_ipv6" {
 
 resource "aws_security_group" "ecs" {
   name        = "${local.resource_prefix}-ecs"
-  description = "Rend API traffic from the public and internal ALBs"
+  description = "Rend API and edge traffic from the internal ALB"
   vpc_id      = aws_vpc.this.id
 
   egress {

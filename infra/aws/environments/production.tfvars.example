@@ -6,6 +6,7 @@ availability_zones = ["us-east-1a", "us-east-1b"]
 vpc_cidr            = "10.42.0.0/16"
 
 api_route53_zone_id  = "replace-me-with-bootstrap-api-zone-id"
+playback_route53_zone_id = "replace-me-with-bootstrap-playback-zone-id"
 api_domain_name      = "api.rend.so"
 playback_domain_name = "video.rend.so"
 internal_domain_name = "origin.api.rend.so"

@@ -1,8 +1,9 @@
 resource "aws_acm_certificate" "public" {
   provider = aws.us_east_1
 
-  domain_name       = var.api_domain_name
-  validation_method = "DNS"
+  domain_name               = var.api_domain_name
+  subject_alternative_names = [var.playback_domain_name]
+  validation_method         = "DNS"
 
   lifecycle {
     create_before_destroy = true
@@ -18,7 +19,11 @@ resource "aws_route53_record" "certificate_validation" {
     }
   }
 
-  zone_id         = var.api_route53_zone_id
+  zone_id = (
+    each.key == var.playback_domain_name
+    ? var.playback_route53_zone_id
+    : var.api_route53_zone_id
+  )
   name            = each.value.name
   type            = each.value.type
   records         = [each.value.record]
@@ -67,10 +72,15 @@ resource "aws_acm_certificate_validation" "internal" {
 
 
 resource "aws_route53_record" "public_ipv4" {
-  count = var.services_enabled ? 1 : 0
+  for_each = var.services_enabled ? {
+    api = {
+      name    = var.api_domain_name
+      zone_id = var.api_route53_zone_id
+    }
+  } : {}
 
-  zone_id = var.api_route53_zone_id
-  name    = var.api_domain_name
+  zone_id = each.value.zone_id
+  name    = each.value.name
   type    = "A"
 
   alias {

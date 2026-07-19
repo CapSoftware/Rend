@@ -48,6 +48,11 @@ variable "api_route53_zone_id" {
   type        = string
 }
 
+variable "playback_route53_zone_id" {
+  description = "Delegated playback zone retained for the existing certificate validation record; Tigris serves playback through the authoritative CNAME."
+  type        = string
+}
+
 variable "api_domain_name" {
   description = "Public API hostname routed directly to the public ALB."
   type        = string
