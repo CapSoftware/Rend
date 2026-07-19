@@ -19,6 +19,15 @@ const checksum = crypto.createHash("sha256").update(fixture).digest("base64");
 const idempotencyKey = `aws-smoke-${crypto.randomUUID()}`;
 let assetId = "";
 let deleted = false;
+const smokeStartedAt = performance.now();
+const timings = {};
+
+async function timed(name, operation) {
+  const startedAt = performance.now();
+  const result = await operation();
+  timings[name] = Math.round(performance.now() - startedAt);
+  return result;
+}
 
 function required(name) {
   const value = (process.env[name] || "").trim();
@@ -160,66 +169,87 @@ async function cleanup() {
 }
 
 try {
-  const anonymous = await fetch(
-    `${playbackBase}/v/00000000-0000-0000-0000-000000000000/opener.mp4`,
-    { redirect: "manual" },
+  const anonymous = await timed("anonymous_denial_ms", () =>
+    fetch(`${playbackBase}/v/00000000-0000-0000-0000-000000000000/opener.mp4`, {
+      redirect: "manual",
+    }),
   );
   if (anonymous.status !== 403) {
     throw new Error(`anonymous private Tigris playback expected HTTP 403, got ${anonymous.status}`);
   }
 
-  const created = await apiJson("/v1/uploads", {
-    method: "POST",
-    headers: { "idempotency-key": idempotencyKey },
-    body: {
-      content_type: "video/mp4",
-      content_length: fixture.byteLength,
-      filename: path.basename(fixturePath),
-    },
-  });
+  const created = await timed("upload_create_ms", () =>
+    apiJson("/v1/uploads", {
+      method: "POST",
+      headers: { "idempotency-key": idempotencyKey },
+      body: {
+        content_type: "video/mp4",
+        content_length: fixture.byteLength,
+        filename: path.basename(fixturePath),
+      },
+    }),
+  );
   assetId = created.body.asset_id;
   const uploadId = created.body.upload_id;
   if (!assetId || !uploadId || created.body.part_count !== 1) {
     throw new Error("multipart create returned an invalid single-part session");
   }
 
-  const signed = await apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/parts`, {
-    method: "POST",
-    body: { parts: [{ part_number: 1, checksum_sha256: checksum }] },
-  });
+  const signed = await timed("upload_sign_part_ms", () =>
+    apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/parts`, {
+      method: "POST",
+      body: { parts: [{ part_number: 1, checksum_sha256: checksum }] },
+    }),
+  );
   const part = signed.body.parts?.[0];
   if (!part?.url || part.method !== "PUT") throw new Error("multipart signing omitted the upload part");
   const signedUrl = new URL(part.url);
   if (signedUrl.protocol !== "https:") throw new Error("multipart part URL must use HTTPS");
 
-  const uploaded = await fetch(signedUrl, {
-    method: "PUT",
-    headers: part.headers,
-    body: fixture,
-    redirect: "error",
-  });
+  const uploaded = await timed("direct_upload_ms", () =>
+    fetch(signedUrl, {
+      method: "PUT",
+      headers: part.headers,
+      body: fixture,
+      redirect: "error",
+    }),
+  );
   if (!uploaded.ok) throw new Error(`direct multipart PUT returned HTTP ${uploaded.status}`);
   const etag = uploaded.headers.get("etag");
   if (!etag) throw new Error("direct multipart PUT omitted ETag");
 
-  await apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
-    method: "POST",
-    body: { parts: [{ part_number: 1, etag, checksum_sha256: checksum }] },
-  });
+  await timed("upload_complete_ms", () =>
+    apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
+      method: "POST",
+      body: { parts: [{ part_number: 1, etag, checksum_sha256: checksum }] },
+    }),
+  );
 
+  const processingStartedAt = performance.now();
+  let openerReadyMs;
   await waitFor("HLS processing", timeoutMs, async () => {
     const { body } = await apiJson(`/v1/assets/${encodeURIComponent(assetId)}`);
+    if (
+      openerReadyMs === undefined &&
+      (body.playable_state === "opener_ready" || body.playable_state === "hls_ready")
+    ) {
+      openerReadyMs = Math.round(performance.now() - processingStartedAt);
+    }
     return {
       done: body.playable_state === "hls_ready",
       value: body,
       detail: `playable_state=${body.playable_state}`,
     };
   });
+  timings.processing_to_opener_ms = openerReadyMs;
+  timings.processing_to_hls_ms = Math.round(performance.now() - processingStartedAt);
 
-  const bootstrapResponse = await fetch(apiUrl(`/v1/assets/${encodeURIComponent(assetId)}/playback`), {
-    headers: authHeaders(),
-    redirect: "error",
-  });
+  const bootstrapResponse = await timed("playback_bootstrap_ms", () =>
+    fetch(apiUrl(`/v1/assets/${encodeURIComponent(assetId)}/playback`), {
+      headers: authHeaders(),
+      redirect: "error",
+    }),
+  );
   const bootstrap = await jsonResponse(bootstrapResponse, "playback bootstrap");
   if (typeof bootstrap.manifest_url !== "string") {
     throw new Error("playback bootstrap did not return the expected private Tigris asset URL");
@@ -237,10 +267,13 @@ try {
     playbackBase,
     "opener URL",
   );
-  await signedArtifact(openerUrl, cookies, "signed private Tigris opener", {
-    range: "bytes=0-65535",
-  });
+  await timed("opener_range_ms", () =>
+    signedArtifact(openerUrl, cookies, "signed private Tigris opener", {
+      range: "bytes=0-65535",
+    }),
+  );
 
+  const hlsStartedAt = performance.now();
   const manifest = await signedArtifact(manifestUrl, cookies, "signed private Tigris master manifest");
   const manifestBody = new TextDecoder().decode(manifest.body);
   if (!manifestBody.startsWith("#EXTM3U")) {
@@ -279,10 +312,14 @@ try {
   );
   const segmentUrl = assetArtifactUrl(segmentReference, renditionUrl, "HLS segment URL");
   await signedArtifact(segmentUrl, cookies, "signed private Tigris HLS media segment");
+  timings.hls_startup_artifacts_ms = Math.round(performance.now() - hlsStartedAt);
 
   const artifactUrls = [openerUrl, manifestUrl, renditionUrl, initUrl, segmentUrl];
 
-  await apiJson(`/v1/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" });
+  const deleteStartedAt = performance.now();
+  await timed("delete_request_ms", () =>
+    apiJson(`/v1/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }),
+  );
   deleted = true;
 
   await waitFor("post-delete control plane denial", 30_000, async () => {
@@ -292,6 +329,7 @@ try {
     });
     return { done: response.status === 404, detail: `HTTP ${response.status}` };
   });
+  timings.delete_control_plane_ms = Math.round(performance.now() - deleteStartedAt);
 
   await waitFor("private Tigris object deletion", deleteTimeoutMs, async () => {
     const responses = await Promise.all(
@@ -308,8 +346,11 @@ try {
       detail: `artifact HTTP statuses=${statuses.join(",")}`,
     };
   });
+  timings.delete_storage_ms = Math.round(performance.now() - deleteStartedAt);
+  timings.total_ms = Math.round(performance.now() - smokeStartedAt);
 
   console.log(`AWS public smoke passed for asset ${assetId}`);
+  console.log(`AWS public smoke timings ${JSON.stringify(timings)}`);
 } catch (error) {
   await cleanup();
   throw error;
