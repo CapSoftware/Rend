@@ -152,6 +152,13 @@ export function initialSourceSelection(
     return null;
   }
 
+  // The server cannot know whether the browser supports native HLS. Start the
+  // universally playable opener for auto mode, then let the client upgrade to
+  // native HLS or hls.js without first assigning an unsupported manifest.
+  if (playbackEngine === "auto" && ready.opener_url) {
+    return { label: "opener", artifactPath: "opener.mp4", url: ready.opener_url };
+  }
+
   if (ready.playable_state === "hls_ready" && ready.manifest_url) {
     return { label: "native_hls", artifactPath: "hls/master.m3u8", url: ready.manifest_url };
   }

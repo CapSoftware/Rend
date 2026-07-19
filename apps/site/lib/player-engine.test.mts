@@ -123,3 +123,11 @@ test("explicit MSE playback still allows opener startup when requested", () => {
     url: "https://ash-1.play.rend.so/v/asset/opener.mp4",
   });
 });
+
+test("automatic playback starts with the opener until browser HLS support is known", () => {
+  assert.deepEqual(initialSourceSelection(READY_BOOTSTRAP, "hls", "auto"), {
+    label: "opener",
+    artifactPath: "opener.mp4",
+    url: "https://ash-1.play.rend.so/v/asset/opener.mp4",
+  });
+});
