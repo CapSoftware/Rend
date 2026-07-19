@@ -3334,7 +3334,7 @@ async fn api_fast_embed_inner(
         get_public_asset_playback_inner(state.clone(), asset_id, &playback_base_url).await?;
     let startup =
         fast_embed_startup_mode(query.startup_mode.as_deref().or(query.startup.as_deref()));
-    let selection = fast_embed_playback_selection(&response, startup)
+    let preferred_selection = fast_embed_playback_selection(&response, startup)
         .ok_or_else(|| AppError::not_found("asset is not playable yet"))?;
     let auto_play = query_flag(query.autoplay.as_deref(), false);
     let controls = query_flag(query.controls.as_deref(), true);
@@ -3344,11 +3344,21 @@ async fn api_fast_embed_inner(
         .map(|value| query_flag(Some(value), true))
         .unwrap_or(auto_play);
     let inline_startup = if startup == "mse" {
-        fast_embed_inline_startup(state.as_ref(), &response, &selection, &playback_base_url)
-            .await
-            .unwrap_or(None)
+        fast_embed_inline_startup(
+            state.as_ref(),
+            &response,
+            &preferred_selection,
+            &playback_base_url,
+        )
+        .await
+        .unwrap_or(None)
     } else {
         None
+    };
+    let selection = if inline_startup.is_none() && preferred_selection.label == "progressive_mp4" {
+        fast_embed_playback_selection(&response, "opener").unwrap_or(preferred_selection)
+    } else {
+        preferred_selection
     };
     let html = render_api_fast_embed_html(
         &response,

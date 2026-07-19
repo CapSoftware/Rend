@@ -264,6 +264,18 @@ function progressivePlaybackUrl(bootstrap: WatchPlaybackBootstrapReady) {
   }
 }
 
+function nativeFallbackSelection(
+  bootstrap: WatchPlaybackBootstrapResponse | null,
+  selection: ReturnType<typeof playbackSelection>,
+  inlineStartup: FastEmbedInlineStartup | null | undefined,
+) {
+  if (inlineStartup || selection?.label !== "progressive_mp4") {
+    return selection;
+  }
+
+  return playbackSelection(bootstrap, "opener") ?? selection;
+}
+
 function progressiveStartupRendition(bootstrap: WatchPlaybackBootstrapReady) {
   const byRendition = new Map<string, { init: boolean; segment: boolean }>();
   for (const hint of bootstrap.prefetch_hints) {
@@ -821,8 +833,16 @@ const FAST_EMBED_TELEMETRY_SCRIPT = String.raw`
 
 export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const ready = options.bootstrap?.status === "ready" ? options.bootstrap : null;
-  const selection = playbackSelection(options.bootstrap, options.startupMode);
+  const preferredSelection = playbackSelection(
+    options.bootstrap,
+    options.startupMode,
+  );
   const inlineStartup = options.inlineStartup ?? null;
+  const selection = nativeFallbackSelection(
+    options.bootstrap,
+    preferredSelection,
+    inlineStartup,
+  );
   const edge = playbackOrigin(ready) ?? options.playbackOriginHint ?? null;
   const state = selection ? "ready" : options.bootstrap ? options.bootstrap.status : "loading";
   const message = playerMessage(options.bootstrap, selection);
@@ -851,7 +871,10 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
     typeof options.bootstrapHttpStatus === "number"
       ? ` data-rend-bootstrap-status="${Math.max(100, Math.round(options.bootstrapHttpStatus))}"`
       : "";
-  const preferredStartup = options.startupMode;
+  const preferredStartup =
+    !inlineStartup && options.startupMode === "progressive"
+      ? "opener"
+      : options.startupMode;
   const inlineStartupJson = scriptJson(
     inlineStartup
       ? {
@@ -959,10 +982,15 @@ export async function GET(
     : { bootstrap: null, elapsedMs: 0, response: null };
   const { bootstrap, elapsedMs, response } = bootstrapResult;
   const ready = bootstrap?.status === "ready" ? bootstrap : null;
-  const selection = playbackSelection(bootstrap, startup);
+  const preferredSelection = playbackSelection(bootstrap, startup);
   const inlineStartup = shouldServerBootstrap
-    ? await inlineStartupForSelection(bootstrap, selection, response)
+    ? await inlineStartupForSelection(bootstrap, preferredSelection, response)
     : null;
+  const selection = nativeFallbackSelection(
+    bootstrap,
+    preferredSelection,
+    inlineStartup,
+  );
   const edge = playbackOrigin(ready) ?? defaultPlaybackOriginHint();
   const crossOrigin = playbackCrossOrigin(bootstrap);
   const headers = new Headers({

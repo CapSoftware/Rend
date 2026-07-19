@@ -1671,28 +1671,30 @@ fn cloudfront_cookie_values_and_attributes_match_aws_format() {
 }
 
 #[test]
-fn api_fast_embed_prefers_progressive_startup_without_token_material() {
+fn api_fast_embed_progressive_selection_can_fall_back_to_the_real_opener() {
+    let mut artifacts = hls_artifact_records();
+    artifacts.extend(opener_artifact_records());
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
-        &hls_artifact_records(),
+        &artifacts,
         "https://api.rend.so",
         &test_issuer(),
         8,
         NOW,
     )
     .unwrap();
-    let selection = fast_embed_playback_selection(&response, "progressive").unwrap();
+    let preferred_selection = fast_embed_playback_selection(&response, "progressive").unwrap();
+    let selection = fast_embed_playback_selection(&response, "opener").unwrap();
     let html =
         render_api_fast_embed_html(&response, &selection, None, true, false, true, "include");
 
-    assert_eq!(selection.label, "progressive_mp4");
-    assert_eq!(selection.artifact_path, "hls/360p/progressive.mp4");
-    assert_eq!(
-        selection.url,
-        "https://api.rend.so/v/asset-123/hls/360p/progressive.mp4"
-    );
-    assert!(html.contains("data-rend-player-selected=\"progressive_mp4\""));
-    assert!(html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
+    assert_eq!(preferred_selection.label, "progressive_mp4");
+    assert_eq!(selection.label, "opener");
+    assert_eq!(selection.artifact_path, "opener.mp4");
+    assert_eq!(selection.url, "https://api.rend.so/v/asset-123/opener.mp4");
+    assert!(html.contains("data-rend-player-selected=\"opener\""));
+    assert!(html.contains("src=\"https://api.rend.so/v/asset-123/opener.mp4\""));
+    assert!(!html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(html.contains("rel=\"preload\" as=\"video\""));
     assert!(!html.contains(&response.playback_token), "{html}");
     assert!(!html.contains("?token="), "{html}");

@@ -81,7 +81,7 @@ test("fast embed renders a direct native HLS video without exposing playback sec
   assertInlineScriptsCompile(html);
 });
 
-test("fast embed defaults to progressive fMP4 when startup hints support it", () => {
+test("fast embed falls back to the real opener when inline startup is unavailable", () => {
   const html = renderFastEmbedHtml({
     assetId: ASSET_ID,
     autoPlay: true,
@@ -94,14 +94,15 @@ test("fast embed defaults to progressive fMP4 when startup hints support it", ()
     startupMode: "progressive",
   });
 
-  assert.match(html, /src="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4"/);
-  assert.match(html, /rel="preload" as="video" href="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4" type="video\/mp4" crossorigin="use-credentials" fetchpriority="high"/);
-  assert.match(html, /data-rend-player-selected="progressive_mp4"/);
-  assert.match(html, /data-rend-player-artifact="hls\/360p\/progressive\.mp4"/);
+  assert.match(html, /src="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4"/);
+  assert.match(html, /rel="preload" as="video" href="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4" type="video\/mp4" crossorigin="use-credentials" fetchpriority="high"/);
+  assert.match(html, /data-rend-player-selected="opener"/);
+  assert.match(html, /data-rend-player-artifact="opener\.mp4"/);
+  assert.doesNotMatch(html, /src="[^"]*progressive\.mp4"/);
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
-test("fast embed uses anonymous progressive MP4 for public playback", () => {
+test("fast embed uses the real opener for anonymous public playback", () => {
   const base = readyBootstrap();
   if (base.status !== "ready") throw new Error("expected ready bootstrap");
   const bootstrap = {
@@ -136,10 +137,11 @@ test("fast embed uses anonymous progressive MP4 for public playback", () => {
     startupMode: "progressive",
   });
 
-  assert.match(html, /src="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4"/);
+  assert.match(html, /src="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4"/);
   assert.match(html, /crossorigin="anonymous"/);
-  assert.match(html, /data-rend-player-selected="progressive_mp4"/);
-  assert.match(html, /rel="preload" as="video" href="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/hls\/360p\/progressive\.mp4" type="video\/mp4" crossorigin="anonymous" fetchpriority="high"/);
+  assert.match(html, /data-rend-player-selected="opener"/);
+  assert.match(html, /rel="preload" as="video" href="https:\/\/media\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4" type="video\/mp4" crossorigin="anonymous" fetchpriority="high"/);
+  assert.doesNotMatch(html, /src="[^"]*progressive\.mp4"/);
   assert.doesNotMatch(html, /crossorigin="use-credentials"/);
 });
 
