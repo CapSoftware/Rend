@@ -57,6 +57,25 @@ AWS log and backup traffic.
 - Tigris serves immutable playback aliases directly. AWS and Vercel do not carry
   video bytes, and there is no second CDN or hosted edge service.
 
+## Retired AWS CloudFront playback
+
+The former AWS CloudFront playback distribution is disabled and serves no
+traffic. AWS does not allow a distribution on a flat-rate plan to be deleted
+until the plan cancellation becomes effective at the end of its billing cycle.
+Terraform therefore records the retired distribution and its dedicated policy,
+key, VPC-origin, and WAF resources as retained removals instead of blocking
+unrelated production deploys on an impossible deletion.
+
+After the AWS console reports that the cancellation is effective, remove only
+those known retired resources with an authenticated Rend administrator:
+
+```bash
+infra/aws/scripts/cleanup-retired-cloudfront.sh --confirm
+```
+
+The cleanup script refuses the wrong AWS account and an enabled or
+not-fully-deployed distribution. It is safe to rerun after a partial cleanup.
+
 ## Bootstrap
 
 Run bootstrap once with an administrator identity in the target account:

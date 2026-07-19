@@ -150,6 +150,7 @@ jobs:
           test -n "$REND_AWS_TFVARS"
           install -m 600 /dev/null "$RUNNER_TEMP/production.tfvars"
           printf '%s\n' "$REND_AWS_TFVARS" > "$RUNNER_TEMP/production.tfvars"
+          sed -i -E '/^(edge_image|edge_min_tasks|edge_max_tasks|cloudfront_price_class)[[:space:]]*=/d' "$RUNNER_TEMP/production.tfvars"
 
       - name: Terraform plan
         working-directory: infra/aws/platform
