@@ -1123,26 +1123,47 @@ async fn run_hls_command_with_streaming_uploads(
 }
 
 async fn normalize_hls_init_fragments(hls_dir: &Path, renditions: &[HlsRendition]) -> Result<()> {
-    for rendition in renditions {
+    for (variant_index, rendition) in renditions.iter().enumerate() {
         let variant_dir = hls_dir.join(rendition.name);
         let ffmpeg_init_path = variant_dir.join(HLS_FFMPEG_INIT_FILENAME);
+        let indexed_init_name = format!("init_{variant_index}.mp4");
+        let indexed_init_path = variant_dir.join(&indexed_init_name);
         let normalized_init_name = format!("init_{}.mp4", rendition.name);
         let normalized_init_path = variant_dir.join(&normalized_init_name);
-        let ffmpeg_init_exists = fs::try_exists(&ffmpeg_init_path).await?;
-        let normalized_init_exists = fs::try_exists(&normalized_init_path).await?;
+
+        // FFmpeg adds the numeric var_stream_map index even when the configured
+        // init filename does not contain `%v`. Single-variant builds may still
+        // emit the configured `init.mp4`, while retried normalization tests can
+        // already contain Rend's rendition-named form. Accept exactly one of
+        // those valid shapes and normalize it before uploading.
+        let candidate_paths = [
+            ffmpeg_init_path,
+            indexed_init_path,
+            normalized_init_path.clone(),
+        ];
+        let mut existing_paths = Vec::new();
+        for candidate_path in candidate_paths {
+            if fs::try_exists(&candidate_path).await? {
+                existing_paths.push(candidate_path);
+            }
+        }
         anyhow::ensure!(
-            ffmpeg_init_exists ^ normalized_init_exists,
-            "ffmpeg created an invalid {} HLS init file set",
-            rendition.name
+            existing_paths.len() == 1,
+            "ffmpeg created an invalid {} HLS init file set; expected exactly one of {}, {}, or {}",
+            rendition.name,
+            HLS_FFMPEG_INIT_FILENAME,
+            indexed_init_name,
+            normalized_init_name,
         );
-        if ffmpeg_init_exists {
-            fs::rename(&ffmpeg_init_path, &normalized_init_path)
+        let source_init_path = existing_paths.pop().expect("one init path was verified");
+        if source_init_path != normalized_init_path {
+            fs::rename(&source_init_path, &normalized_init_path)
                 .await
                 .with_context(|| {
                     format!(
                         "failed to normalize {} HLS init file {}",
                         rendition.name,
-                        ffmpeg_init_path.display()
+                        source_init_path.display()
                     )
                 })?;
         }
@@ -1151,7 +1172,8 @@ async fn normalize_hls_init_fragments(hls_dir: &Path, renditions: &[HlsRendition
         let playlist = fs::read_to_string(&playlist_path)
             .await
             .with_context(|| format!("failed to read {} HLS playlist", rendition.name))?;
-        let normalized = normalize_hls_variant_playlist_init(&playlist, rendition.name)?;
+        let normalized =
+            normalize_hls_variant_playlist_init(&playlist, rendition.name, variant_index)?;
         if normalized != playlist {
             fs::write(&playlist_path, normalized)
                 .await
@@ -1161,8 +1183,13 @@ async fn normalize_hls_init_fragments(hls_dir: &Path, renditions: &[HlsRendition
     Ok(())
 }
 
-fn normalize_hls_variant_playlist_init(playlist: &str, rendition: &str) -> Result<String> {
+fn normalize_hls_variant_playlist_init(
+    playlist: &str,
+    rendition: &str,
+    variant_index: usize,
+) -> Result<String> {
     let ffmpeg_reference = format!("URI=\"{HLS_FFMPEG_INIT_FILENAME}\"");
+    let indexed_reference = format!("URI=\"init_{variant_index}.mp4\"");
     let normalized_reference = format!("URI=\"init_{rendition}.mp4\"");
     let init_maps = playlist
         .lines()
@@ -1174,11 +1201,15 @@ fn normalize_hls_variant_playlist_init(playlist: &str, rendition: &str) -> Resul
     );
     anyhow::ensure!(
         init_maps.iter().all(|line| {
-            line.contains(&ffmpeg_reference) || line.contains(&normalized_reference)
+            line.contains(&ffmpeg_reference)
+                || line.contains(&indexed_reference)
+                || line.contains(&normalized_reference)
         }),
         "{rendition} HLS playlist referenced an unexpected init file"
     );
-    Ok(playlist.replace(&ffmpeg_reference, &normalized_reference))
+    Ok(playlist
+        .replace(&ffmpeg_reference, &normalized_reference)
+        .replace(&indexed_reference, &normalized_reference))
 }
 
 async fn upload_finalized_hls_fragments(
@@ -2976,7 +3007,7 @@ segment_00000.m4s
 #EXT-X-ENDLIST
 "#;
 
-        let normalized = normalize_hls_variant_playlist_init(playlist, "360p").unwrap();
+        let normalized = normalize_hls_variant_playlist_init(playlist, "360p", 0).unwrap();
 
         assert!(normalized.contains("#EXT-X-MAP:URI=\"init_360p.mp4\""));
         assert!(!normalized.contains("URI=\"init.mp4\""));
@@ -2990,13 +3021,13 @@ segment_00000.m4s
 segment_00000.m4s
 "#;
 
-        let error = normalize_hls_variant_playlist_init(playlist, "360p").unwrap_err();
+        let error = normalize_hls_variant_playlist_init(playlist, "360p", 0).unwrap_err();
 
         assert!(error.to_string().contains("unexpected init file"));
     }
 
     #[tokio::test]
-    async fn hls_init_fragment_normalization_renames_file_and_playlist_reference() {
+    async fn hls_init_fragment_normalization_renames_indexed_ffmpeg_output() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3005,36 +3036,47 @@ segment_00000.m4s
             "rend-hls-init-normalization-{}-{unique}",
             std::process::id()
         ));
-        let variant_dir = root.join("360p");
-        fs::create_dir_all(&variant_dir).await.unwrap();
-        fs::write(variant_dir.join(HLS_FFMPEG_INIT_FILENAME), b"init")
+        let renditions = &HLS_RENDITIONS[..4];
+        for (variant_index, rendition) in renditions.iter().enumerate() {
+            let variant_dir = root.join(rendition.name);
+            fs::create_dir_all(&variant_dir).await.unwrap();
+            fs::write(
+                variant_dir.join(format!("init_{variant_index}.mp4")),
+                b"init",
+            )
             .await
             .unwrap();
-        fs::write(
-            variant_dir.join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\nsegment_00000.m4s\n",
-        )
-        .await
-        .unwrap();
+            fs::write(
+                variant_dir.join("index.m3u8"),
+                format!(
+                    "#EXTM3U\n#EXT-X-MAP:URI=\"init_{variant_index}.mp4\"\nsegment_00000.m4s\n"
+                ),
+            )
+            .await
+            .unwrap();
+        }
 
-        normalize_hls_init_fragments(&root, &[HLS_RENDITIONS[0]])
+        normalize_hls_init_fragments(&root, renditions)
             .await
             .unwrap();
 
-        assert!(
-            !fs::try_exists(variant_dir.join(HLS_FFMPEG_INIT_FILENAME))
+        for (variant_index, rendition) in renditions.iter().enumerate() {
+            let variant_dir = root.join(rendition.name);
+            assert!(
+                !fs::try_exists(variant_dir.join(format!("init_{variant_index}.mp4")))
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                fs::try_exists(variant_dir.join(format!("init_{}.mp4", rendition.name)))
+                    .await
+                    .unwrap()
+            );
+            let playlist = fs::read_to_string(variant_dir.join("index.m3u8"))
                 .await
-                .unwrap()
-        );
-        assert!(
-            fs::try_exists(variant_dir.join("init_360p.mp4"))
-                .await
-                .unwrap()
-        );
-        let playlist = fs::read_to_string(variant_dir.join("index.m3u8"))
-            .await
-            .unwrap();
-        assert!(playlist.contains("#EXT-X-MAP:URI=\"init_360p.mp4\""));
+                .unwrap();
+            assert!(playlist.contains(&format!("#EXT-X-MAP:URI=\"init_{}.mp4\"", rendition.name)));
+        }
 
         fs::remove_dir_all(root).await.unwrap();
     }
