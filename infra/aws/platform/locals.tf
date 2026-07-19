@@ -41,7 +41,7 @@ locals {
     { name = "REND_PLAYBACK_MODE", value = "tigris" },
     { name = "REND_PLAYBACK_BASE_URL", value = local.playback_base_url },
     { name = "REND_TIGRIS_PLAYBACK_BASE_URL", value = local.playback_base_url },
-    { name = "REND_PUBLIC_PLAYBACK_ENABLED", value = "true" },
+    { name = "REND_PUBLIC_PLAYBACK_ENABLED", value = "false" },
     { name = "REND_PUBLIC_PLAYBACK_ALIAS_ENABLED", value = "true" },
     { name = "REND_PUBLIC_PLAYBACK_ALIAS_BUCKET", value = var.tigris_media_bucket },
     { name = "REND_PUBLIC_PLAYBACK_ALIAS_PREFIX", value = "v" },

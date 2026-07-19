@@ -17,7 +17,7 @@ export type StartupPreloadHint = {
   artifactPath: string;
   as: "fetch" | "image" | "video";
   contentType?: string;
-  crossOrigin: "anonymous" | "use-credentials";
+  crossOrigin?: "anonymous";
   url: string;
 };
 
@@ -123,7 +123,25 @@ export function playbackCredentialMode(data: WatchPlaybackBootstrapResponse | nu
 }
 
 export function playbackCrossOrigin(data: WatchPlaybackBootstrapResponse | null | undefined) {
-  return playbackCredentialMode(data) === "omit" ? "anonymous" : "use-credentials";
+  // Tigris authorizes private playback with cookies, but its S3 CORS response
+  // does not include Access-Control-Allow-Credentials. Omitting crossorigin
+  // lets the media element use its credentialed no-CORS path; public playback
+  // remains explicitly anonymous and CORS-readable.
+  return playbackCredentialMode(data) === "omit" ? "anonymous" : undefined;
+}
+
+export function scriptedHlsAllowed(
+  data: WatchPlaybackBootstrapResponse | null | undefined,
+  pageUrl: string,
+) {
+  const ready = readyBootstrap(data);
+  if (!ready?.manifest_url) return false;
+  if (playbackCredentialMode(ready) === "omit") return true;
+  try {
+    return new URL(ready.manifest_url, pageUrl).origin === new URL(pageUrl).origin;
+  } catch {
+    return false;
+  }
 }
 
 function hlsStartupConfig(data: WatchPlaybackBootstrapReady) {
@@ -745,6 +763,12 @@ export function attachPlayback(
   const ready = readyBootstrap(options.initialBootstrap);
   telemetry?.playerLoad();
 
+  const applyCrossOrigin = (data: WatchPlaybackBootstrapReady | null) => {
+    const value = playbackCrossOrigin(data);
+    if (value) video.crossOrigin = value;
+    else video.removeAttribute("crossorigin");
+  };
+
   const applyProgressiveSource = (
     selection: SourceSelection,
     data: WatchPlaybackBootstrapReady | null = ready,
@@ -753,7 +777,7 @@ export function attachPlayback(
     setSelection(player, selection);
     setState(player, "ready");
     telemetry?.sourceSelected(selection);
-    video.crossOrigin = playbackCrossOrigin(data);
+    applyCrossOrigin(data);
     if (video.currentSrc !== selection.url && video.getAttribute("src") !== selection.url) {
       video.src = selection.url;
       setAttribute(player, "data-rend-src-assigned-ms", Math.max(0, Math.round(performance.now())));
@@ -775,7 +799,7 @@ export function attachPlayback(
       setSelection(player, selection);
       setState(player, "ready");
       telemetry?.sourceSelected(selection);
-      video.crossOrigin = playbackCrossOrigin(data);
+      applyCrossOrigin(data);
       if (!video.currentSrc && !video.getAttribute("src")) {
         video.src = selection.url;
         setAttribute(player, "data-rend-src-assigned-ms", Math.max(0, Math.round(performance.now())));
@@ -786,7 +810,11 @@ export function attachPlayback(
     }
 
     let Hls: HlsConstructor | null = null;
-    if (data.manifest_url && (options.playbackEngine === "mse" || !nativeHls)) {
+    if (
+      data.manifest_url &&
+      scriptedHlsAllowed(data, window.location.href) &&
+      (options.playbackEngine === "mse" || !nativeHls)
+    ) {
       try {
         Hls = await loadHlsConstructor();
       } catch {
@@ -812,7 +840,7 @@ export function attachPlayback(
     setSelection(player, selection);
     setState(player, "ready");
     telemetry?.sourceSelected(selection);
-    video.crossOrigin = playbackCrossOrigin(data);
+    applyCrossOrigin(data);
     video.removeAttribute("src");
     video.load();
     hls = new Hls(hlsStartupConfig(data));

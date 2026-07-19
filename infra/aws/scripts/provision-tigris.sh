@@ -130,7 +130,6 @@ ensure_bucket() {
   local bucket="$1"
   local location="$2"
   local cors_file="$3"
-  local allow_public_policy="${4:-false}"
   local bucket_info
   local expected_location
   local actual_location
@@ -161,7 +160,7 @@ ensure_bucket() {
     --bucket "$bucket" \
     --query 'PolicyStatus.IsPublic' \
     --output text)"
-  if [[ "$allow_public_policy" != "true" && "$public_policy" != "False" && "$public_policy" != "false" ]]; then
+  if [[ "$public_policy" != "False" && "$public_policy" != "false" ]]; then
     echo "Tigris policy is public for bucket $bucket" >&2
     exit 1
   fi
@@ -184,35 +183,7 @@ ensure_bucket() {
 }
 
 ensure_bucket "$TIGRIS_SOURCE_BUCKET" "$TIGRIS_SOURCE_LOCATION" "$work_dir/source-cors.json"
-ensure_bucket "$TIGRIS_MEDIA_BUCKET" "$TIGRIS_MEDIA_LOCATION" "$work_dir/media-cors.json" true
-
-# Only immutable playback aliases are anonymously readable. Canonical media,
-# processing attempts, and source objects remain private. Asset identifiers are
-# unguessable UUIDs and the public API already grants playback by asset ID, so
-# signed cookies add no authorization boundary while preventing credentialed
-# browser playback on Tigris's S3-compatible CORS responses.
-jq -n --arg bucket "$TIGRIS_MEDIA_BUCKET" '{
-  Version: "2012-10-17",
-  Statement: [{
-    Sid: "PublicReadPlaybackAliases",
-    Effect: "Allow",
-    Principal: "*",
-    Action: ["s3:GetObject"],
-    Resource: ["arn:aws:s3:::" + $bucket + "/v/*"]
-  }]
-}' >"$work_dir/media-policy.json"
-tigris_s3api_bucket_config put-bucket-policy \
-  --bucket "$TIGRIS_MEDIA_BUCKET" \
-  --policy "file://$work_dir/media-policy.json" >/dev/null
-
-media_public_policy="$(tigris_s3api get-bucket-policy-status \
-  --bucket "$TIGRIS_MEDIA_BUCKET" \
-  --query 'PolicyStatus.IsPublic' \
-  --output text)"
-if [[ "$media_public_policy" != "True" && "$media_public_policy" != "true" ]]; then
-  echo "Tigris playback alias policy is not public for bucket $TIGRIS_MEDIA_BUCKET" >&2
-  exit 1
-fi
+ensure_bucket "$TIGRIS_MEDIA_BUCKET" "$TIGRIS_MEDIA_LOCATION" "$work_dir/media-cors.json"
 
 playback_public_key_pem="$(printf '%s' "$TIGRIS_PLAYBACK_PUBLIC_KEY_PEM_B64" | base64 --decode)"
 if [[ "$playback_public_key_pem" != "-----BEGIN PUBLIC KEY-----"* ]]; then
@@ -263,4 +234,4 @@ aws ssm put-parameter \
   --overwrite \
   --no-cli-pager >/dev/null
 
-echo "Tigris private source/canonical media, public playback aliases, and custom playback domain are reconciled."
+echo "Tigris private source/media buckets, signed playback key, and custom playback domain are reconciled."

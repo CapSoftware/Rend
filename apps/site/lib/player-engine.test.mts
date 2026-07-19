@@ -4,6 +4,7 @@ import {
   initialPlaybackState,
   initialSourceSelection,
   playbackCrossOrigin,
+  scriptedHlsAllowed,
   startupPreloadHints,
   watchHeartbeatDelta,
 } from "./player-engine.ts";
@@ -87,7 +88,19 @@ test("startup preload hints avoid duplicating native HLS startup requests", () =
       hint.crossOrigin,
       hint.url,
     ]),
-    [["thumbnail.jpg", "image", "use-credentials", "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"]]
+    [["thumbnail.jpg", "image", undefined, "https://ash-1.play.rend.so/v/asset/thumbnail.jpg"]]
+  );
+});
+
+test("private Tigris media uses credentialed no-CORS playback", () => {
+  assert.equal(playbackCrossOrigin(READY_BOOTSTRAP), undefined);
+  assert.equal(scriptedHlsAllowed(READY_BOOTSTRAP, "https://www.rend.so/watch/asset"), false);
+  assert.equal(
+    scriptedHlsAllowed(
+      { ...READY_BOOTSTRAP, manifest_url: "https://www.rend.so/api/player/asset/master.m3u8" },
+      "https://www.rend.so/watch/asset",
+    ),
+    true,
   );
 });
 
@@ -102,6 +115,7 @@ test("public playback uses anonymous cross-origin media requests", () => {
   };
 
   assert.equal(playbackCrossOrigin(publicBootstrap), "anonymous");
+  assert.equal(scriptedHlsAllowed(publicBootstrap, "https://www.rend.so/watch/asset"), true);
   assert.equal(startupPreloadHints(publicBootstrap, "hls")[0]?.crossOrigin, "anonymous");
 });
 

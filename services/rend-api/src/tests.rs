@@ -1696,6 +1696,8 @@ fn api_fast_embed_progressive_selection_can_fall_back_to_the_real_opener() {
     assert!(html.contains("src=\"https://api.rend.so/v/asset-123/opener.mp4\""));
     assert!(!html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(html.contains("rel=\"preload\" as=\"video\""));
+    assert!(!html.contains(r#"crossorigin="use-credentials""#));
+    assert!(!html.contains(r#"crossorigin="anonymous""#));
     assert!(!html.contains(&response.playback_token), "{html}");
     assert!(!html.contains("?token="), "{html}");
     assert!(
@@ -1705,11 +1707,11 @@ fn api_fast_embed_progressive_selection_can_fall_back_to_the_real_opener() {
 }
 
 #[test]
-fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
+fn api_fast_embed_can_render_public_inline_mse_startup_without_token_material() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
         &hls_artifact_records(),
-        "https://api.rend.so",
+        "https://media.rend.so",
         &test_issuer(),
         8,
         NOW,
@@ -1720,7 +1722,9 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
         artifact_path: "hls/360p/init_360p.mp4+hls/360p/segment_00000.m4s".to_owned(),
         mime_type: "video/mp4; codecs=\"avc1.64001f,mp4a.40.2\"".to_owned(),
         startup_b64: BASE64_STANDARD.encode([0, 1, 2, 3]),
-        segment_urls: vec!["https://api.rend.so/v/asset-123/hls/360p/segment_00001.m4s".to_owned()],
+        segment_urls: vec![
+            "https://media.rend.so/v/asset-123/hls/360p/segment_00001.m4s".to_owned(),
+        ],
     };
     let html = render_api_fast_embed_html(
         &response,
@@ -1729,7 +1733,7 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
         true,
         false,
         true,
-        "include",
+        "omit",
     );
 
     assert_eq!(fast_embed_startup_mode(None), "mse");
@@ -1741,6 +1745,7 @@ fn api_fast_embed_can_render_inline_mse_startup_without_token_material() {
     assert!(html.contains("waitForBufferRoom"));
     assert!(!html.contains("pending.length<4"));
     assert!(html.contains("rel=\"preload\" as=\"fetch\""));
+    assert!(html.contains(r#"crossorigin="anonymous""#));
     assert!(!html.contains("src=\"https://api.rend.so/v/asset-123/hls/360p/progressive.mp4\""));
     assert!(!html.contains(&response.playback_token), "{html}");
     assert!(!html.contains("?token="), "{html}");

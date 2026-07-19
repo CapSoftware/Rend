@@ -95,10 +95,11 @@ test("fast embed falls back to the real opener when inline startup is unavailabl
   });
 
   assert.match(html, /src="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4"/);
-  assert.match(html, /rel="preload" as="video" href="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4" type="video\/mp4" crossorigin="use-credentials" fetchpriority="high"/);
+  assert.match(html, /rel="preload" as="video" href="https:\/\/api\.rend\.so\/v\/00000000-0000-0000-0000-000000000001\/opener\.mp4" type="video\/mp4" fetchpriority="high"/);
   assert.match(html, /data-rend-player-selected="opener"/);
   assert.match(html, /data-rend-player-artifact="opener\.mp4"/);
   assert.doesNotMatch(html, /src="[^"]*progressive\.mp4"/);
+  assert.doesNotMatch(html, /crossorigin="use-credentials"/);
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
@@ -244,21 +245,19 @@ test("fast embed route forwards bootstrap cookies to the document response by de
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.equal(response.headers.get("x-rend-fast-embed"), "1");
     assert.match(response.headers.get("link") ?? "", /rel=preconnect/);
-    assert.match(response.headers.get("link") ?? "", /hls\/360p\/segment_00001\.m4s/);
-    assert.match(response.headers.get("link") ?? "", /rel=preload; as=fetch/);
+    assert.match(response.headers.get("link") ?? "", /opener\.mp4/);
+    assert.match(response.headers.get("link") ?? "", /rel=preload; as=video/);
     assert.match(response.headers.get("set-cookie") ?? "", /__rend_playback=/);
     assert.equal(
       fetches[0]?.url,
       `https://www.rend.so/api/player/${ASSET_ID}`,
     );
     assert.equal(fetches[0]?.headers.get("x-vercel-ip-country"), "GB");
-    assert.match(fetches[1]?.headers.get("cookie") ?? "", /__rend_playback=/);
-    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Policy=policy_value/);
-    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Signature=signature_value/);
-    assert.match(fetches[1]?.headers.get("cookie") ?? "", /CloudFront-Key-Pair-Id=key_pair/);
+    assert.equal(fetches.length, 1);
     assert.match(body, /autoplay/);
     assert.doesNotMatch(body, /controls/);
-    assert.match(body, /mse_inline/);
+    assert.match(body, /data-rend-player-selected="opener"/);
+    assert.doesNotMatch(body, /crossorigin="use-credentials"/);
     assert.doesNotMatch(body, /playback_token|authorization/i);
   } finally {
     globalThis.fetch = originalFetch;

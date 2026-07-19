@@ -3343,7 +3343,7 @@ async fn api_fast_embed_inner(
         .as_deref()
         .map(|value| query_flag(Some(value), true))
         .unwrap_or(auto_play);
-    let inline_startup = if startup == "mse" {
+    let inline_startup = if startup == "mse" && playback_credential_mode == "omit" {
         fast_embed_inline_startup(
             state.as_ref(),
             &response,
@@ -5115,10 +5115,10 @@ fn render_api_fast_embed_html(
             html_escape(&selection.content_type)
         )
     };
-    let cross_origin = if playback_credential_mode == "omit" {
-        "anonymous"
+    let cross_origin_attr = if playback_credential_mode == "omit" {
+        r#" crossorigin="anonymous""#
     } else {
-        "use-credentials"
+        ""
     };
     let fetch_credentials = if playback_credential_mode == "omit" {
         "omit"
@@ -5131,18 +5131,18 @@ fn render_api_fast_embed_html(
             .first()
             .map(|url| {
                 format!(
-                    r#"<link rel="preload" as="fetch" href="{}" type="video/mp4" crossorigin="{}" fetchpriority="high">"#,
+                    r#"<link rel="preload" as="fetch" href="{}" type="video/mp4"{} fetchpriority="high">"#,
                     html_escape(url),
-                    cross_origin
+                    cross_origin_attr
                 )
             })
             .unwrap_or_default()
     } else if selection.content_type == "video/mp4" {
         format!(
-            r#"<link rel="preload" as="video" href="{}" type="{}" crossorigin="{}" fetchpriority="high">"#,
+            r#"<link rel="preload" as="video" href="{}" type="{}"{} fetchpriority="high">"#,
             html_escape(&selection.url),
             html_escape(&selection.content_type),
-            cross_origin
+            cross_origin_attr
         )
     } else {
         String::new()
@@ -5175,7 +5175,7 @@ body{{overflow:hidden}}
 </head>
 <body>
 <main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="{playback_engine}" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
-<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto" crossorigin="{cross_origin}"></video>
+<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto"{cross_origin_attr}></video>
 <div class="rend-fast__message" role="status" aria-live="polite">Ready</div>
 </main>
 <script>
@@ -5186,7 +5186,7 @@ body{{overflow:hidden}}
         asset_id = html_escape(&response.asset_id),
         artifact_path = html_escape(selected_artifact),
         auto_play_js = if auto_play { "true" } else { "false" },
-        cross_origin = cross_origin,
+        cross_origin_attr = cross_origin_attr,
         fallback_json = fallback_json,
         fetch_credentials = fetch_credentials,
         inline_startup_json = inline_startup_json,

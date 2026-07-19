@@ -16,7 +16,7 @@ api.rend.so             video.rend.so
   |                         |
 AWS WAF + public ALB    Tigris delivery network
   |                         |
-TLS proxy               public v/* aliases only
+TLS proxy               signed private v/* aliases
   |                         |
 ECS API                 private canonical media
 
@@ -42,8 +42,8 @@ AWS log and backup traffic.
 
 - Tigris source and media buckets remain external to AWS, but Terraform owns
   their creation and security contract. Its apply-time reconciler reads the
-  credentials directly from SSM, then enforces a private source bucket, private
-  canonical media, scoped public `v/*` playback aliases, and CORS. Tigris
+  credentials directly from SSM, then enforces private source and media
+  buckets, signed `v/*` playback aliases, and CORS. Tigris
   object endpoints accept HTTPS only. Rend's 24-hour upload-session sweeper aborts each
   abandoned multipart upload and releases its reservation. Credential values never enter Terraform
   variables, plans, state, arguments, or logs.
@@ -130,8 +130,8 @@ Before the first platform apply:
    Tigris client used by CI: `npm install --global @tigrisdata/cli@3.4.3`.
 2. Create the ten SSM SecureString parameters referenced by the tfvars file. Secret
    values are populated outside Terraform so they do not enter state.
-3. Retain the legacy Tigris-compatible RSA key inputs until their existing SSM
-   values are rotated out. Public alias playback does not use signed cookies.
+3. Retain the Tigris-compatible RSA key inputs. The API signs short-lived
+   private playback cookies and Tigris verifies them at its custom domain.
 
    ```bash
    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out cloudfront-private.pem

@@ -129,13 +129,12 @@ The hosted architecture has no NAT gateway and no duplicate CDN:
 4. Fargate workers stream source ranges into ffmpeg instead of staging complete
    inputs. Each task has 4 vCPU, 8 GiB memory, and 100 GiB ephemeral storage.
    Attempts are immutable and a fenced PlanetScale lease alone can publish the
-   winning canonical media and public playback aliases.
+   winning canonical media and private playback aliases.
 5. The API and workers use PlanetScale over TLS. ClickHouse remains inside the
    VPC and is reached through the internal ALB's validated HTTPS hostname.
-6. The media bucket is private except for the immutable `v/*` alias prefix.
-   Canonical media, processing attempts, and all source objects remain private.
-   Asset UUIDs are unguessable, the public bootstrap already grants playback by
-   asset ID, and deletion removes canonical and alias keys.
+6. The media and source buckets are private. The API issues short-lived signed
+   cookies for immutable `v/*` aliases, while canonical media and processing
+   attempts remain inaccessible. Deletion removes canonical and alias keys.
 
 Default hard ceilings are API 2-6 tasks, workers 1-50, 50 non-deleted videos,
 250 GiB stored data, 10 open uploads, and two active media jobs per
@@ -150,8 +149,8 @@ billing controls.
 
 Terraform owns the external Tigris contract. Its idempotent reconciler reads
 credentials directly from SSM, creates missing buckets, and enforces a private
-source bucket, private canonical media, scoped public playback aliases, CORS,
-locations, and the custom domain. Credential values never enter Terraform
+source bucket, private media and playback aliases, CORS, locations, the signed
+playback key, and the custom domain. Credential values never enter Terraform
 state.
 
 See `infra/aws/README.md` for bootstrap, prerequisites, exact Terraform commands,
