@@ -74,7 +74,7 @@ delete_named_cloudfront_resource \
   get-origin-request-policy delete-origin-request-policy rend-production-private-playback-origin
 delete_named_cloudfront_resource \
   list-response-headers-policies '(.ResponseHeadersPolicyList.Items // [])[].ResponseHeadersPolicy' \
-  get-response-headers-policy delete-response-headers-policy rend-production-public-playback
+  get-response-headers-policy delete-response-headers-policy rend-production-security
 
 vpc_origin_id="$(aws cloudfront list-vpc-origins --output json | jq -r '(.VpcOriginList.Items // [])[] | select(.Name == "rend-production-origin") | .Id' | head -n 1)"
 if [[ -n "$vpc_origin_id" ]]; then
