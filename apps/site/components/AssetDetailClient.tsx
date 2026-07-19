@@ -35,10 +35,14 @@ type AssetTab = "overview" | "artifacts" | "analytics" | "embed";
 type DetailResponse = { status: "ok"; asset: AssetDetail };
 type AnalyticsResponse = { status: "ok"; analytics: AssetPlaybackAnalytics };
 
-const MAX_PROCESSING_POLLS = 30;
+const MAX_PROCESSING_POLLS = 120;
 
-function pollDelay(attempt: number) {
-  return Math.min(2_000 * Math.pow(1.35, attempt), 10_000);
+function pollDelay(attempt: number, playableState: string) {
+  const openerReady = playableState === "opener_ready";
+  return Math.min(
+    (openerReady ? 1_000 : 1_500) * Math.pow(1.25, attempt),
+    openerReady ? 5_000 : 3_000
+  );
 }
 
 function formatBytes(value: number | undefined) {
@@ -100,6 +104,7 @@ export default function AssetDetailClient({
   const [deleteMessage, setDeleteMessage] = useState("");
   const [tab, setTab] = useState<AssetTab>(initialTab);
   const pollAttempt = useRef(0);
+  const lastPlayableState = useRef(initialAsset.playable_state);
   const router = useRouter();
   const pathname = usePathname();
 
@@ -126,6 +131,10 @@ export default function AssetDetailClient({
       const message =
         "message" in body && typeof body.message === "string" ? body.message : "Asset refresh failed";
       throw new Error(message);
+    }
+    if (lastPlayableState.current !== body.asset.playable_state) {
+      lastPlayableState.current = body.asset.playable_state;
+      pollAttempt.current = 0;
     }
     setAsset(body.asset);
     return body.asset;
@@ -192,7 +201,7 @@ export default function AssetDetailClient({
           setPollError(error instanceof Error ? error.message : "Asset refresh failed");
         })
         .finally(() => setPollVersion((version) => version + 1));
-    }, pollDelay(attempt));
+    }, pollDelay(attempt, asset.playable_state));
 
     return () => window.clearTimeout(timer);
   }, [asset.playable_state, deleteState, pollExhausted, pollVersion, refreshAsset]);

@@ -21,7 +21,7 @@ use axum::{
     routing::get,
 };
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::{fs, io::AsyncReadExt, net::TcpListener, process::Command, task::JoinHandle, time};
@@ -36,6 +36,7 @@ const HLS_X264_PRESET: &str = "superfast";
 const HLS_AUDIO_BITRATE: &str = "96k";
 const OPENER_MAX_DIMENSION: i32 = 640;
 const OPENER_VIDEO_CRF: &str = "27";
+const PRIVATE_ALIAS_RENAME_CONCURRENCY: usize = 16;
 const HLS_TARGET_SEGMENT_SECONDS: u32 = 1;
 const HLS_FFMPEG_INIT_FILENAME: &str = "init.mp4";
 const HLS_DEFAULT_KEYFRAME_INTERVAL_FRAMES: u32 = 30;
@@ -1893,26 +1894,40 @@ async fn promote_private_playback_aliases(
         return Ok(());
     }
 
-    let mut ordered = artifacts.to_vec();
-    ordered.sort_by_key(|artifact| publication_order(&artifact.object_key));
-    for artifact in ordered {
-        let source_key = uploaded_artifact_object_key(request, &artifact.object_key);
-        let destination_key = durable_artifact_storage_key(request, &artifact.object_key);
-        if source_key == destination_key {
-            continue;
-        }
-        tigris_metadata_rename(
-            &request.s3,
-            &request.s3_bucket,
-            &source_key,
-            &destination_key,
-        )
-        .await
-            .with_context(|| {
-                format!(
-                    "failed to metadata-rename private playback artifact {source_key} to {destination_key}"
-                )
-            })?;
+    // A typical 1080p asset has hundreds of segments. Renaming those aliases
+    // serially kept hls_ready hidden for tens of seconds after FFmpeg had
+    // finished. Preserve the publication fence and manifest-last ordering,
+    // while allowing independent objects in each tier to move concurrently.
+    for order in 0..=2 {
+        let renames = artifacts
+            .iter()
+            .copied()
+            .filter(|artifact| publication_order(&artifact.object_key) == order)
+            .filter_map(|artifact| {
+                let source_key = uploaded_artifact_object_key(request, &artifact.object_key);
+                let destination_key = durable_artifact_storage_key(request, &artifact.object_key);
+                (source_key != destination_key).then_some((source_key, destination_key))
+            })
+            .collect::<Vec<_>>();
+        let s3 = request.s3.clone();
+        let bucket = request.s3_bucket.clone();
+        stream::iter(renames)
+        .map(|(source_key, destination_key)| {
+            let s3 = s3.clone();
+            let bucket = bucket.clone();
+            async move {
+                tigris_metadata_rename(&s3, &bucket, &source_key, &destination_key)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to metadata-rename private playback artifact {source_key} to {destination_key}"
+                        )
+                    })
+            }
+        })
+        .buffer_unordered(PRIVATE_ALIAS_RENAME_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
     }
     Ok(())
 }
