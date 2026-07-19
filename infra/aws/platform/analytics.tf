@@ -112,13 +112,24 @@ resource "aws_s3_bucket_policy" "clickhouse_native_backups" {
   policy = data.aws_iam_policy_document.clickhouse_native_backups.json
 }
 
+locals {
+  clickhouse_schema_bundle = join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")])
+}
+
+resource "terraform_data" "clickhouse_schema_bundle" {
+  triggers_replace = sha256(local.clickhouse_schema_bundle)
+}
+
 resource "aws_s3_object" "clickhouse_schema" {
   bucket                 = aws_s3_bucket.clickhouse_native_backups.id
   key                    = "bootstrap/clickhouse-schema.sql"
-  content                = join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")])
-  etag                   = md5(join("\n", [for schema in sort(fileset("${path.module}/../../../clickhouse", "*.sql")) : file("${path.module}/../../../clickhouse/${schema}")]))
+  content                = local.clickhouse_schema_bundle
   server_side_encryption = "aws:kms"
   kms_key_id             = aws_kms_key.clickhouse.arn
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.clickhouse_schema_bundle]
+  }
 }
 
 resource "aws_ebs_volume" "clickhouse_data" {
