@@ -15,7 +15,6 @@ const fixturePath = path.resolve(
 const timeoutMs = positiveInteger("REND_SMOKE_TIMEOUT_MS", 10 * 60_000);
 const deleteTimeoutMs = positiveInteger("REND_SMOKE_DELETE_TIMEOUT_MS", 5 * 60_000);
 const fixture = await readFile(fixturePath);
-const checksum = crypto.createHash("sha256").update(fixture).digest("base64");
 const idempotencyKey = `aws-smoke-${crypto.randomUUID()}`;
 let assetId = "";
 let deleted = false;
@@ -52,6 +51,26 @@ function positiveInteger(name, fallback) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fixtureParts(partSize, partCount) {
+  const parts = [];
+  for (
+    let offset = 0, partNumber = 1;
+    offset < fixture.byteLength;
+    offset += partSize, partNumber += 1
+  ) {
+    const bytes = fixture.subarray(offset, Math.min(offset + partSize, fixture.byteLength));
+    parts.push({
+      part_number: partNumber,
+      checksum_sha256: crypto.createHash("sha256").update(bytes).digest("base64"),
+      bytes,
+    });
+  }
+  if (parts.length !== partCount) {
+    throw new Error(`multipart create expected ${partCount} fixture parts, calculated ${parts.length}`);
+  }
+  return parts;
 }
 
 function apiUrl(route) {
@@ -191,37 +210,85 @@ try {
   );
   assetId = created.body.asset_id;
   const uploadId = created.body.upload_id;
-  if (!assetId || !uploadId || created.body.part_count !== 1) {
-    throw new Error("multipart create returned an invalid single-part session");
+  const partSize = Number(created.body.part_size);
+  const partCount = Number(created.body.part_count);
+  const maxParallelParts = Number(created.body.max_parallel_parts);
+  if (
+    !assetId ||
+    !uploadId ||
+    !Number.isSafeInteger(partSize) ||
+    partSize <= 0 ||
+    !Number.isSafeInteger(partCount) ||
+    partCount <= 0 ||
+    !Number.isSafeInteger(maxParallelParts) ||
+    maxParallelParts <= 0
+  ) {
+    throw new Error("multipart create returned an invalid upload session");
   }
+  const parts = fixtureParts(partSize, partCount);
 
-  const signed = await timed("upload_sign_part_ms", () =>
-    apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/parts`, {
-      method: "POST",
-      body: { parts: [{ part_number: 1, checksum_sha256: checksum }] },
-    }),
-  );
-  const part = signed.body.parts?.[0];
-  if (!part?.url || part.method !== "PUT") throw new Error("multipart signing omitted the upload part");
-  const signedUrl = new URL(part.url);
-  if (signedUrl.protocol !== "https:") throw new Error("multipart part URL must use HTTPS");
+  const signedParts = await timed("upload_sign_part_ms", async () => {
+    const results = [];
+    for (let offset = 0; offset < parts.length; offset += 10) {
+      const batch = parts.slice(offset, offset + 10);
+      const { body } = await apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/parts`, {
+        method: "POST",
+        body: {
+          parts: batch.map(({ part_number, checksum_sha256 }) => ({
+            part_number,
+            checksum_sha256,
+          })),
+        },
+      });
+      results.push(...(body.parts || []));
+    }
+    return results;
+  });
+  const signedByNumber = new Map(signedParts.map((part) => [part.part_number, part]));
 
-  const uploaded = await timed("direct_upload_ms", () =>
-    fetch(signedUrl, {
-      method: "PUT",
-      headers: part.headers,
-      body: fixture,
-      redirect: "error",
-    }),
-  );
-  if (!uploaded.ok) throw new Error(`direct multipart PUT returned HTTP ${uploaded.status}`);
-  const etag = uploaded.headers.get("etag");
-  if (!etag) throw new Error("direct multipart PUT omitted ETag");
+  const completedParts = await timed("direct_upload_ms", async () => {
+    const completed = [];
+    for (let offset = 0; offset < parts.length; offset += maxParallelParts) {
+      const batch = parts.slice(offset, offset + maxParallelParts);
+      const uploaded = await Promise.all(
+        batch.map(async (part) => {
+          const signed = signedByNumber.get(part.part_number);
+          if (!signed?.url || signed.method !== "PUT") {
+            throw new Error(`multipart signing omitted part ${part.part_number}`);
+          }
+          const signedUrl = new URL(signed.url);
+          if (signedUrl.protocol !== "https:") {
+            throw new Error(`multipart part ${part.part_number} URL must use HTTPS`);
+          }
+          const response = await fetch(signedUrl, {
+            method: "PUT",
+            headers: signed.headers,
+            body: part.bytes,
+            redirect: "error",
+          });
+          if (!response.ok) {
+            throw new Error(
+              `direct multipart part ${part.part_number} PUT returned HTTP ${response.status}`,
+            );
+          }
+          const etag = response.headers.get("etag");
+          if (!etag) throw new Error(`direct multipart part ${part.part_number} omitted ETag`);
+          return {
+            part_number: part.part_number,
+            etag,
+            checksum_sha256: part.checksum_sha256,
+          };
+        }),
+      );
+      completed.push(...uploaded);
+    }
+    return completed.sort((left, right) => left.part_number - right.part_number);
+  });
 
   await timed("upload_complete_ms", () =>
     apiJson(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
       method: "POST",
-      body: { parts: [{ part_number: 1, etag, checksum_sha256: checksum }] },
+      body: { parts: completedParts },
     }),
   );
 
@@ -234,6 +301,27 @@ try {
       (body.playable_state === "opener_ready" || body.playable_state === "hls_ready")
     ) {
       openerReadyMs = Math.round(performance.now() - processingStartedAt);
+      const earlyBootstrapResponse = await timed("opener_ready_bootstrap_ms", () =>
+        fetch(apiUrl(`/v1/assets/${encodeURIComponent(assetId)}/playback`), {
+          headers: authHeaders(),
+          redirect: "error",
+        }),
+      );
+      await jsonResponse(earlyBootstrapResponse, "opener-ready playback bootstrap");
+      const earlyCookies = responseCookies(earlyBootstrapResponse.headers);
+      const earlyOpenerUrl = assetArtifactUrl(
+        `${playbackBase}/v/${assetId}/opener.mp4`,
+        playbackBase,
+        "opener-ready opener URL",
+      );
+      await timed("opener_ready_range_ms", () =>
+        signedArtifact(
+          earlyOpenerUrl,
+          earlyCookies,
+          "signed private Tigris opener during opener_ready",
+          { range: "bytes=0-65535" },
+        ),
+      );
     }
     return {
       done: body.playable_state === "hls_ready",
