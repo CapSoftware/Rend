@@ -48,19 +48,14 @@ variable "api_route53_zone_id" {
   type        = string
 }
 
-variable "playback_route53_zone_id" {
-  description = "Delegated public Route53 hosted zone for playback_domain_name."
-  type        = string
-}
-
 variable "api_domain_name" {
-  description = "Public API hostname routed through CloudFront."
+  description = "Public API hostname routed directly to the public ALB."
   type        = string
   default     = "api.rend.so"
 }
 
 variable "playback_domain_name" {
-  description = "Public playback hostname routed through CloudFront."
+  description = "Public playback hostname routed directly to the Tigris custom domain."
   type        = string
   default     = "video.rend.so"
 }
@@ -72,13 +67,13 @@ variable "internal_domain_name" {
 }
 
 variable "site_domain_name" {
-  description = "Public site origin allowed by API and edge CORS."
+  description = "Public site origin allowed by API and Tigris CORS."
   type        = string
   default     = "https://rend.so"
 }
 
 variable "additional_site_origins" {
-  description = "Additional browser origins allowed by API, edge, and CloudFront CORS."
+  description = "Additional browser origins allowed by API and Tigris CORS."
   type        = list(string)
   default     = ["https://www.rend.so"]
 }
@@ -96,16 +91,6 @@ variable "api_image" {
   validation {
     condition     = can(regex("@sha256:[0-9a-f]{64}$", var.api_image))
     error_message = "api_image must be an immutable @sha256 reference."
-  }
-}
-
-variable "edge_image" {
-  description = "Immutable rend-edge ECR image reference including @sha256 digest."
-  type        = string
-
-  validation {
-    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.edge_image))
-    error_message = "edge_image must be an immutable @sha256 reference."
   }
 }
 
@@ -337,28 +322,6 @@ variable "api_max_tasks" {
   }
 }
 
-variable "edge_min_tasks" {
-  type    = number
-  default = 2
-
-
-  validation {
-    condition     = var.edge_min_tasks == 2
-    error_message = "edge_min_tasks is fixed at 2 for the initial production architecture."
-  }
-}
-
-variable "edge_max_tasks" {
-  type    = number
-  default = 6
-
-
-  validation {
-    condition     = var.edge_max_tasks >= 2 && var.edge_max_tasks <= 6
-    error_message = "edge_max_tasks must be between 2 and the hard ceiling of 6."
-  }
-}
-
 variable "worker_min_tasks" {
   type    = number
   default = 1
@@ -412,17 +375,6 @@ variable "log_retention_days" {
   description = "CloudWatch log retention."
   type        = number
   default     = 30
-}
-
-variable "cloudfront_price_class" {
-  description = "CloudFront price class. PriceClass_All provides the widest low-latency footprint."
-  type        = string
-  default     = "PriceClass_All"
-
-  validation {
-    condition     = contains(["PriceClass_100", "PriceClass_200", "PriceClass_All"], var.cloudfront_price_class)
-    error_message = "cloudfront_price_class must be PriceClass_100, PriceClass_200, or PriceClass_All."
-  }
 }
 
 variable "tls_proxy_image" {

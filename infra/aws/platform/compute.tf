@@ -92,26 +92,6 @@ resource "aws_lb_target_group" "public_api" {
   }
 }
 
-resource "aws_lb_target_group" "edge" {
-  name        = substr("${local.resource_prefix}-edge", 0, 32)
-  port        = 8443
-  protocol    = "HTTPS"
-  target_type = "ip"
-  vpc_id      = aws_vpc.this.id
-
-  deregistration_delay = 30
-
-  health_check {
-    enabled             = true
-    protocol            = "HTTPS"
-    path                = "/readyz"
-    matcher             = "200"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 15
-    timeout             = 5
-  }
-}
 
 resource "aws_lb_target_group" "clickhouse" {
   name        = substr("${local.resource_prefix}-clickhouse", 0, 32)
@@ -163,26 +143,6 @@ resource "aws_lb_listener" "public_api_https" {
   }
 }
 
-resource "aws_lb_listener_rule" "edge_https" {
-  listener_arn = aws_lb_listener.internal_https.arn
-  priority     = 10
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.edge.arn
-  }
-
-  condition {
-    path_pattern {
-      values = [
-        "/v/*",
-        "/embed-fast/*",
-        "/internal/warm",
-        "/internal/purge",
-      ]
-    }
-  }
-}
 
 resource "aws_lb_listener_rule" "clickhouse_https" {
   listener_arn = aws_lb_listener.internal_https.arn
@@ -315,109 +275,6 @@ resource "aws_ecs_task_definition" "migrate" {
   }])
 }
 
-resource "aws_ecs_task_definition" "edge" {
-  family                   = "${local.resource_prefix}-edge"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "512"
-  memory                   = "1024"
-  skip_destroy             = true
-  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
-
-  ephemeral_storage {
-    size_in_gib = 50
-  }
-
-  runtime_platform {
-    cpu_architecture        = "X86_64"
-    operating_system_family = "LINUX"
-  }
-
-  container_definitions = jsonencode([{
-    name      = "rend-edge"
-    image     = var.edge_image
-    essential = true
-    environment = concat(local.common_container_environment, [
-      { name = "REND_SERVICE_NAME", value = "rend-edge" },
-      { name = "REND_EDGE_BIND_ADDR", value = "127.0.0.1:4100" },
-      { name = "REND_EDGE_ID", value = local.edge_id },
-      { name = "REND_EDGE_REGION", value = local.edge_region },
-      { name = "REND_EDGE_BASE_URL", value = local.playback_base_url },
-      { name = "REND_EDGE_CORS_ALLOWED_ORIGINS", value = local.allowed_origins },
-      { name = "REND_CONTROL_PLANE_URL", value = local.internal_base_url },
-      { name = "REND_EDGE_FAST_EMBED_CONTROL_PLANE_URL", value = local.internal_base_url },
-      { name = "REND_EDGE_FAST_EMBED_CACHE_TTL_SECS", value = "60" },
-      { name = "REND_EDGE_HEARTBEAT_INTERVAL_SECS", value = "15" },
-      { name = "REND_EDGE_CACHE_MAX_BYTES", value = "32212254720" },
-      # CloudFront carries normal cache hits. On an origin miss, the edge
-      # reauthorizes disk bytes through the API without a Tigris HEAD.
-      { name = "REND_EDGE_VALIDATE_CACHE_ORIGIN", value = "false" },
-      { name = "REND_EDGE_ARTIFACT_RESOLUTION_CACHE_TTL_SECS", value = "300" },
-      { name = "REND_EDGE_ARTIFACT_RESOLUTION_CACHE_MAX_ENTRIES", value = "10000" },
-      { name = "REND_EDGE_ASSET_AVAILABILITY_CACHE_TTL_SECS", value = "5" },
-      { name = "REND_EDGE_CACHE_MIN_FREE_BYTES", value = "5368709120" },
-      { name = "REND_EDGE_CACHE_DIR", value = "/var/lib/rend/edge-cache" },
-      { name = "REND_EDGE_ORIGIN_HEALTH_URL", value = var.tigris_endpoint },
-      { name = "REND_EDGE_MAX_IN_FLIGHT_FILLS", value = "64" },
-      { name = "REND_EDGE_MAX_ORIGIN_ARTIFACT_BYTES", value = "53687091200" },
-      { name = "REND_EDGE_TELEMETRY_ENABLED", value = "true" },
-      { name = "REND_EDGE_TELEMETRY_INGEST_URL", value = "${local.internal_base_url}/internal/telemetry/playback" },
-      { name = "REND_EDGE_TELEMETRY_QUEUE_CAPACITY", value = "4096" },
-      { name = "REND_EDGE_TELEMETRY_BATCH_SIZE", value = "100" },
-      { name = "REND_EDGE_TELEMETRY_FLUSH_INTERVAL_SECS", value = "2" },
-      { name = "REND_EDGE_TELEMETRY_REQUEST_TIMEOUT_SECS", value = "2" },
-      { name = "REND_EDGE_TELEMETRY_SPOOL_DIR", value = "/var/spool/rend/edge-telemetry" },
-      { name = "REND_EDGE_TELEMETRY_SPOOL_MAX_BYTES", value = "1073741824" },
-    ])
-    secrets = local.edge_container_secrets
-    healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:4100/readyz || exit 1"]
-      interval    = 15
-      timeout     = 5
-      retries     = 3
-      startPeriod = 30
-    }
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        awslogs-group         = aws_cloudwatch_log_group.service["edge"].name
-        awslogs-region        = var.aws_region
-        awslogs-stream-prefix = "ecs"
-      }
-    }
-    },
-    {
-      name       = "tls-proxy"
-      image      = var.tls_proxy_image
-      essential  = true
-      entryPoint = ["/bin/sh", "-c"]
-      command = [<<-EOT
-        printf '{\n  auto_https disable_redirects\n  admin off\n  default_sni localhost\n  fallback_sni localhost\n}\nhttps://localhost:8443, https://:8443 {\n  tls internal\n  reverse_proxy 127.0.0.1:4100\n}\n' >/tmp/Caddyfile
-        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
-      EOT
-      ]
-      portMappings = [{
-        name          = "https"
-        containerPort = 8443
-        hostPort      = 8443
-        protocol      = "tcp"
-      }]
-      dependsOn = [{
-        containerName = "rend-edge"
-        condition     = "HEALTHY"
-      }]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["edge"].name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "tls"
-        }
-      }
-    }
-  ])
-}
 
 resource "aws_ecs_task_definition" "worker" {
   family                   = "${local.resource_prefix}-worker"
@@ -519,47 +376,6 @@ resource "aws_ecs_service" "api" {
   ]
 }
 
-resource "aws_ecs_service" "edge" {
-  name            = "edge"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.edge.arn
-  desired_count   = var.services_enabled ? var.edge_min_tasks : 0
-
-  enable_ecs_managed_tags           = true
-  enable_execute_command            = true
-  propagate_tags                    = "SERVICE"
-  wait_for_steady_state             = true
-  health_check_grace_period_seconds = 90
-
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE"
-    base              = 1
-    weight            = 1
-  }
-
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  network_configuration {
-    assign_public_ip = true
-    security_groups  = [aws_security_group.ecs.id]
-    subnets          = [for subnet in aws_subnet.public : subnet.id]
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.edge.arn
-    container_name   = "tls-proxy"
-    container_port   = 8443
-  }
-
-  lifecycle {
-    ignore_changes = [desired_count, task_definition]
-  }
-
-  depends_on = [aws_lb_listener_rule.edge_https, terraform_data.service_activation_guard]
-}
 
 resource "aws_ecs_service" "worker" {
   name            = "worker"
@@ -600,11 +416,6 @@ resource "aws_appautoscaling_target" "ecs" {
       service = aws_ecs_service.api.name
       min     = var.api_min_tasks
       max     = var.api_max_tasks
-    }
-    edge = {
-      service = aws_ecs_service.edge.name
-      min     = var.edge_min_tasks
-      max     = var.edge_max_tasks
     }
     worker = {
       service = aws_ecs_service.worker.name

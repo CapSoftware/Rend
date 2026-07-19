@@ -139,13 +139,9 @@ resource "aws_vpc_endpoint" "planetscale" {
   }
 }
 
-data "aws_ec2_managed_prefix_list" "cloudfront_origin_facing" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
 resource "aws_security_group" "origin_alb" {
   name        = "${local.resource_prefix}-origin-alb"
-  description = "CloudFront VPC Origin to the internal Rend ALB"
+  description = "Internal Rend API and ClickHouse ALB"
   vpc_id      = aws_vpc.this.id
 
   egress {
@@ -189,7 +185,7 @@ resource "aws_vpc_security_group_ingress_rule" "public_api_ipv6" {
 
 resource "aws_security_group" "ecs" {
   name        = "${local.resource_prefix}-ecs"
-  description = "Rend API and edge traffic from the internal ALB"
+  description = "Rend API traffic from the public and internal ALBs"
   vpc_id      = aws_vpc.this.id
 
   egress {
@@ -199,15 +195,6 @@ resource "aws_security_group" "ecs" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "origin_from_cloudfront" {
-  description       = "HTTPS from the CloudFront origin-facing managed prefix list"
-  security_group_id = aws_security_group.origin_alb.id
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront_origin_facing.id
 }
 
 resource "aws_vpc_security_group_ingress_rule" "origin_from_ecs" {

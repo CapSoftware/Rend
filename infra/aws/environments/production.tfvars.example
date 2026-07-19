@@ -5,11 +5,10 @@ environment         = "production"
 availability_zones = ["us-east-1a", "us-east-1b"]
 vpc_cidr            = "10.42.0.0/16"
 
-api_route53_zone_id      = "replace-me-with-bootstrap-api-zone-id"
-playback_route53_zone_id = "replace-me-with-bootstrap-playback-zone-id"
-api_domain_name          = "api.rend.so"
-playback_domain_name     = "video.rend.so"
-internal_domain_name     = "origin.api.rend.so"
+api_route53_zone_id  = "replace-me-with-bootstrap-api-zone-id"
+api_domain_name      = "api.rend.so"
+playback_domain_name = "video.rend.so"
+internal_domain_name = "origin.api.rend.so"
 site_domain_name     = "https://rend.so"
 additional_site_origins = ["https://www.rend.so"]
 playback_cookie_domain = "rend.so"
@@ -17,7 +16,6 @@ playback_cookie_domain = "rend.so"
 # Release automation replaces these with ECR digest references from the
 # accepted Rend release manifest. Tags are intentionally rejected.
 api_image    = "replace-me-with-ecr-image-at-sha256"
-edge_image   = "replace-me-with-ecr-image-at-sha256"
 worker_image = "replace-me-with-ecr-image-at-sha256"
 
 # Terraform creates and reconciles these private buckets through the Tigris S3
@@ -44,8 +42,8 @@ cloudfront_private_key_parameter_arn     = "arn:aws:ssm:us-east-1:211125561119:p
 autumn_secret_key_parameter_arn          = "arn:aws:ssm:us-east-1:211125561119:parameter/rend/production/autumn-secret-key"
 parameter_kms_key_arns                   = []
 
-# Create an RSA key pair for CloudFront trusted-key-group signed cookies. Store
-# the private PEM only in the secret above; the public PEM is safe in state.
+# Legacy Tigris CloudFront-compatible signing key. Store the private PEM only in
+# the secret above; the public PEM is safe in state.
 cloudfront_public_key_pem = <<-PEM
 -----BEGIN PUBLIC KEY-----
 replace-me-with-the-public-key-body
@@ -62,12 +60,8 @@ services_enabled         = false
 worker_cutover_confirmed = false
 api_min_tasks    = 2
 api_max_tasks    = 6
-edge_min_tasks   = 2
-edge_max_tasks   = 6
 worker_min_tasks = 1
 worker_max_tasks = 50
-
-cloudfront_price_class = "PriceClass_All"
 monthly_budget_usd                  = 400
 # Linked accounts cannot activate this tag themselves. Leave false for the
 # initial migration, then enable it after the Organizations management account

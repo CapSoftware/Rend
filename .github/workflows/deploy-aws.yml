@@ -79,7 +79,7 @@ jobs:
           set -euo pipefail
           registry="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
           build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          for service in rend-api rend-edge rend-media-worker; do
+          for service in rend-api rend-media-worker; do
             if digest="$(aws ecr describe-images \
               --repository-name "$service" \
               --image-ids "imageTag=$GITHUB_SHA" \
@@ -135,7 +135,6 @@ jobs:
           terraform plan \
             -var-file="$RUNNER_TEMP/production.tfvars" \
             -var="api_image=${{ steps.images.outputs.rend_api_image }}" \
-            -var="edge_image=${{ steps.images.outputs.rend_edge_image }}" \
             -var="worker_image=${{ steps.images.outputs.rend_media_worker_image }}" \
             -var="services_enabled=${{ inputs.services_enabled }}" \
             -var="worker_cutover_confirmed=${{ inputs.confirm_latitude_worker_drained }}" \
@@ -258,13 +257,13 @@ jobs:
             --value "$GITHUB_SHA" \
             --overwrite >/dev/null
 
-      - name: Promote API, edge, then worker
+      - name: Promote API, then worker
         if: ${{ inputs.apply && inputs.services_enabled }}
         working-directory: infra/aws/platform
         run: |
           set -euo pipefail
           cluster="$(terraform output -raw ecs_cluster_name)"
-          for service in api edge worker; do
+          for service in api worker; do
             task_definition="$(terraform output -json task_definition_arns | jq -r ".[\"$service\"]")"
             aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$task_definition" >/dev/null
             aws ecs wait services-stable --cluster "$cluster" --services "$service"

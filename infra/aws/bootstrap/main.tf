@@ -227,7 +227,7 @@ data "aws_iam_policy_document" "github_deploy" {
     sid = "ManageNamedRendPlatformResources"
     actions = [
       "backup:*", "budgets:*", "cloudwatch:*",
-      "elasticloadbalancing:*", "kms:*", "logs:*",
+      "elasticloadbalancing:*", "logs:*",
       "s3:*", "sns:*", "ssm:*", "wafv2:*",
     ]
     resources = [
@@ -242,13 +242,56 @@ data "aws_iam_policy_document" "github_deploy" {
       "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.aws_region}:${var.expected_account_id}:listener/app/rend-*/*/*",
       "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.aws_region}:${var.expected_account_id}:listener-rule/app/rend-*/*/*/*",
       "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.aws_region}:${var.expected_account_id}:targetgroup/rend-*/*",
-      "arn:${data.aws_partition.current.partition}:kms:${var.aws_region}:${var.expected_account_id}:alias/rend-*",
       "arn:${data.aws_partition.current.partition}:logs:${var.aws_region}:${var.expected_account_id}:log-group:/rend/*",
       "arn:${data.aws_partition.current.partition}:s3:::rend-*",
       "arn:${data.aws_partition.current.partition}:sns:${var.aws_region}:${var.expected_account_id}:rend-*",
       "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${var.expected_account_id}:parameter/rend/*",
       "arn:${data.aws_partition.current.partition}:wafv2:us-east-1:${var.expected_account_id}:global/webacl/rend-*/*",
       "arn:${data.aws_partition.current.partition}:wafv2:${var.aws_region}:${var.expected_account_id}:regional/webacl/rend-*/*",
+    ]
+  }
+
+  statement {
+    sid = "UseTaggedRendKmsKeys"
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
+      "kms:ReEncryptFrom",
+      "kms:ReEncryptTo",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:kms:${var.aws_region}:${var.expected_account_id}:key/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Application"
+      values   = ["rend"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["production"]
+    }
+  }
+
+  statement {
+    sid = "ManageFixedProductionRolePolicies"
+    actions = [
+      "iam:AttachRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:iam::${var.expected_account_id}:role/rend-production-backup",
+      "arn:${data.aws_partition.current.partition}:iam::${var.expected_account_id}:role/rend-production-clickhouse",
+      "arn:${data.aws_partition.current.partition}:iam::${var.expected_account_id}:role/rend-production-ecs-task",
+      "arn:${data.aws_partition.current.partition}:iam::${var.expected_account_id}:role/rend-production-ecs-task-execution",
     ]
   }
 
@@ -293,14 +336,25 @@ data "aws_iam_policy_document" "github_deploy" {
     actions = [
       "ecs:RegisterTaskDefinition",
     ]
-    resources = [
-      "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${var.expected_account_id}:task-definition/rend-*:*",
-    ]
+    # RegisterTaskDefinition does not support resource-level permissions.
+    resources = ["*"]
 
     condition {
       test     = "StringEquals"
       variable = "aws:RequestTag/Application"
       values   = ["rend"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["production"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/ManagedBy"
+      values   = ["terraform"]
     }
   }
 

@@ -2,8 +2,8 @@
 
 Rend supports two deployment shapes from the same images and application code:
 
-- Rend-hosted production: CloudFront, an internal ALB, ECS Fargate, external
-  private Tigris buckets, PlanetScale PostgreSQL, and ClickHouse on encrypted
+- Rend-hosted production: a public API ALB, ECS Fargate, external Tigris
+  storage and delivery, PlanetScale PostgreSQL, and ClickHouse on encrypted
   EC2/EBS. Terraform is under `infra/aws`.
 - Self-hosted: Docker Compose with PostgreSQL, ClickHouse, MinIO, the API, one
   media worker, one edge, the Rend site, and Caddy as one front door.
@@ -117,75 +117,42 @@ data services are stopped consistently.
 
 ## Rend-hosted production
 
-The production architecture has no direct public ALB and no NAT gateway:
+The hosted architecture has no NAT gateway and no duplicate CDN:
 
-1. CloudFront and WAF accept API and playback traffic.
-2. A CloudFront VPC Origin reaches the internal ALB over HTTPS. The ALB reaches
-   loopback-bound API/edge containers through task-local TLS proxies on 8443.
-3. ALB path rules send `/v/*`, `/embed-fast/*`, warm, and purge requests to a
-   two-task edge service. Other public routes go to the two-task API service.
-4. Browsers upload multipart parts directly to the private Tigris source bucket.
-5. Fargate workers stream source ranges through the task-local range proxy into
-   ffmpeg instead of staging the full source. They use 100 GiB ephemeral space
-   for generated work and write completed media directly to Tigris. Worker
-   count is bounded from one to ten tasks. Every attempt writes immutable
-   `videos/{asset}/attempts/{lease}/...` objects; PlanetScale atomically maps
-   stable public artifact paths to the winning physical keys. The edge resolves
-   that mapping over its authenticated control-plane connection and reads media
-   directly from Tigris, so video bytes never transit the API and a stale worker
-   cannot overwrite a winner's objects.
-6. API, edge, and worker access PlanetScale over TLS. ClickHouse stays inside
-   the VPC and is reached through the internal ALB's validated HTTPS hostname.
-7. CloudFront requires trusted-key-group signed cookies for `/v/*`; no
-   authorization cookie value is part of the cache key. A positive cache-policy
-   minimum gives immutable playback objects a one-year CloudFront TTL after
-   authorization. On a CloudFront origin miss, the edge reauthorizes cached
-   disk bytes through a lightweight per-asset API availability check but avoids
-   a Tigris HEAD. Positive availability is cached for five seconds and concurrent
-   segment checks for the same asset are coalesced. Cold logical-to-physical
-   resolutions are cached for five minutes in a bounded 10,000-entry LRU cache;
-   per-asset purge fencing cannot abort an unrelated asset fill and clears that
-   asset's mappings and bytes.
-8. Deletion and suspension enqueue CloudFront invalidations in PlanetScale in
-   the same transaction as the state change. API tasks lease the durable jobs,
-   reuse stable caller references, retry submission with a bounded five-minute
-   backoff, and poll every five seconds until CloudFront reports `Completed`.
-   Signed cookies expire after 15 minutes; the edge's positive availability
-   fallback is bounded to five seconds after an edge receives its purge.
+1. `api.rend.so` reaches two API tasks through an AWS WAF-protected public
+   ALB and task-local TLS proxies on port 8443.
+2. `video.rend.so` is a Tigris custom domain. Tigris serves immutable
+   `v/{asset}/...` playback aliases directly from its distributed object
+   network, so video bytes never pass through AWS, Vercel, or a second CDN.
+3. Browsers upload multipart parts directly to the private global Tigris source
+   bucket. Upload bytes never pass through the API.
+4. Fargate workers stream source ranges into ffmpeg instead of staging complete
+   inputs. Each task has 4 vCPU, 8 GiB memory, and 100 GiB ephemeral storage.
+   Attempts are immutable and a fenced PlanetScale lease alone can publish the
+   winning canonical media and public playback aliases.
+5. The API and workers use PlanetScale over TLS. ClickHouse remains inside the
+   VPC and is reached through the internal ALB's validated HTTPS hostname.
+6. The media bucket is private except for the immutable `v/*` alias prefix.
+   Canonical media, processing attempts, and all source objects remain private.
+   Asset UUIDs are unguessable, the public bootstrap already grants playback by
+   asset ID, and deletion removes canonical and alias keys.
 
-Default hard ceilings are API 2-6 tasks, edge 2-6, workers 1-10, 50 videos and
-10 open uploads per organization, and two active media jobs per organization.
-API and edge tasks have 0.5 vCPU/1 GiB. Each worker has 4 vCPU, 8 GiB memory,
-and 100 GiB ephemeral storage. The Rend-tag-filtered AWS alert budget defaults
-to $400/month and ClickHouse starts with 100 GiB encrypted gp3. Raising any
-ceiling is a reviewed cost-capacity decision.
+Default hard ceilings are API 2-6 tasks, workers 1-50, 50 non-deleted videos,
+250 GiB stored data, 10 open uploads, and two active media jobs per
+organization. One worker remains warm. The Rend-tag-filtered AWS alert budget
+defaults to $400/month and ClickHouse starts with 100 GiB encrypted gp3.
 
-The account is shared, so the GitHub role cannot mutate IAM, launch EC2, or
-create general infrastructure. It can pass only the fixed Rend ECS task roles;
-autoscaling writes are limited to the exact target ARNs enrolled after the
-administrator bootstrap. Activate the `Application` cost allocation tag
-before setting `rend_cost_allocation_tag_active=true`; otherwise Terraform
-omits only the tag-filtered Budget. The AWS Organizations management account
-must activate this tag when Rend runs in a linked account. Service, worker,
-storage, and organization hard ceilings remain active while the Budget is
-pending; set the flag true and apply again as soon as the tag is active.
+Tigris playback is pay-as-you-go with zero egress fees. Exposure is controlled
+by API authentication and WAF rules, server-side quotas, Tigris request
+pricing, storage reservations, compute-budget admission, and hard ECS
+autoscaling ceilings. These limits remain backend configuration, not dashboard
+billing controls.
 
-CloudFront remains on pay-as-you-go pricing. Playback is authenticated and WAF
-protected, while cost and abuse exposure is controlled by server-side quotas,
-queue admission, and hard ECS autoscaling ceilings. Production keeps one media
-worker warm and can run at most 50 workers globally; no quota or infrastructure
-limit needs to be rendered in the dashboard.
-
-The source and media buckets remain external to AWS but their full contract is
-owned by Terraform. During apply, an idempotent reconciler reads Tigris
-credentials directly from SSM, creates the buckets when absent, and enforces
-private native access settings and ACLs plus CORS. Tigris object endpoints
-accept HTTPS only, and its S3-compatible bucket-policy and
-incomplete-multipart lifecycle operations are not implemented. Rend's
-24-hour upload-session sweeper aborts each abandoned multipart upload and
-releases its reservation. It keeps sources global for fast uploads and generated media
-in `iad` beside the Fargate workers. Credential values never enter Terraform
-state. CloudFront never connects directly to Tigris.
+Terraform owns the external Tigris contract. Its idempotent reconciler reads
+credentials directly from SSM, creates missing buckets, and enforces a private
+source bucket, private canonical media, scoped public playback aliases, CORS,
+locations, and the custom domain. Credential values never enter Terraform
+state.
 
 See `infra/aws/README.md` for bootstrap, prerequisites, exact Terraform commands,
 migration-first deployment ordering, verification, and rollback.
@@ -194,8 +161,8 @@ migration-first deployment ordering, verification, and rollback.
 
 The first fenced-worker release requires a clean two-apply handoff:
 
-1. Apply the platform with `services_enabled=false`; API, edge, worker,
-   autoscaling policies, and public A/AAAA aliases remain off. Suspended
+1. Apply the platform with `services_enabled=false`; API and worker services,
+   autoscaling policies, and the public API alias remain off. Suspended
    zero-minimum autoscaling targets are created for safe exact-ARN enrollment.
 2. Enroll only the emitted target ARNs into the scoped GitHub role, then run the
    additive PostgreSQL migration and the idempotent ClickHouse schema command.
@@ -221,8 +188,8 @@ workers do not understand lease fencing.
 
 `services_enabled` remains true after first activation. It is deliberately
 rejected as a shutdown toggle because autoscaling owns ECS desired counts. To
-stop spend in an emergency, suspend the three
-`service/rend-production/{api,edge,worker}` scalable targets at minimum zero,
-then set those three Rend ECS services to desired count zero. Restore minima to
-API 2, edge 2, and worker 1 before resuming. Do not remove the activation marker
+stop spend in an emergency, suspend the two
+`service/rend-production/{api,worker}` scalable targets at minimum zero,
+then set those two Rend ECS services to desired count zero. Restore minima to
+API 2 and worker 1 before resuming. Do not remove the activation marker
 or target any non-Rend cluster.

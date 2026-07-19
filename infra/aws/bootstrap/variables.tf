@@ -51,12 +51,12 @@ variable "rend_scalable_target_arns" {
 
   validation {
     condition = (length(var.rend_scalable_target_arns) == 0 || (
-      length(var.rend_scalable_target_arns) == 3 &&
-      length(distinct(var.rend_scalable_target_arns)) == 3
+      length(var.rend_scalable_target_arns) == 2 &&
+      length(distinct(var.rend_scalable_target_arns)) == 2
       )) && alltrue([
       for arn in var.rend_scalable_target_arns :
       startswith(arn, "arn:aws:application-autoscaling:us-east-1:211125561119:scalable-target/")
     ])
-    error_message = "Autoscaling access must be empty during bootstrap or contain exactly three distinct Rend target ARNs in account 211125561119/us-east-1."
+    error_message = "Autoscaling access must be empty during bootstrap or contain exactly two distinct Rend target ARNs in account 211125561119/us-east-1."
   }
 }

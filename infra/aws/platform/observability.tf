@@ -96,7 +96,7 @@ resource "aws_budgets_budget" "monthly" {
 
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   alarm_name          = "${local.resource_prefix}-origin-5xx"
-  alarm_description   = "The private origin is returning elevated 5xx responses."
+  alarm_description   = "The public Rend API is returning elevated 5xx responses."
   namespace           = "AWS/ApplicationELB"
   metric_name         = "HTTPCode_Target_5XX_Count"
   statistic           = "Sum"
@@ -109,14 +109,13 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    LoadBalancer = aws_lb.origin.arn_suffix
+    LoadBalancer = aws_lb.public_api.arn_suffix
   }
 }
 
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   for_each = {
-    api  = aws_lb_target_group.api.arn_suffix
-    edge = aws_lb_target_group.edge.arn_suffix
+    api = aws_lb_target_group.public_api.arn_suffix
   }
 
   alarm_name          = "${local.resource_prefix}-${each.key}-unhealthy"
@@ -131,7 +130,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    LoadBalancer = aws_lb.origin.arn_suffix
+    LoadBalancer = aws_lb.public_api.arn_suffix
     TargetGroup  = each.value
   }
 }
@@ -189,7 +188,6 @@ resource "aws_cloudwatch_dashboard" "rend" {
           period = 60
           metrics = [
             ["AWS/ECS", "CPUUtilization", "ClusterName", aws_ecs_cluster.this.name, "ServiceName", aws_ecs_service.api.name],
-            [".", ".", ".", ".", ".", aws_ecs_service.edge.name],
             [".", ".", ".", ".", ".", aws_ecs_service.worker.name],
           ]
         }
@@ -218,12 +216,12 @@ resource "aws_cloudwatch_dashboard" "rend" {
         width  = 24
         height = 6
         properties = {
-          title  = "Origin response health"
+          title  = "Public API response health"
           region = var.aws_region
           stat   = "Sum"
           period = 60
           metrics = [
-            ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", aws_lb.origin.arn_suffix],
+            ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", aws_lb.public_api.arn_suffix],
             [".", "HTTPCode_Target_5XX_Count", ".", "."],
           ]
         }

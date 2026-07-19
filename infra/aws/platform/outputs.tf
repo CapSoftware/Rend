@@ -1,16 +1,3 @@
-output "cloudfront_distribution_id" {
-  value = aws_cloudfront_distribution.this.id
-}
-
-output "cloudfront_domain_name" {
-  value = aws_cloudfront_distribution.this.domain_name
-}
-
-output "cloudfront_playback_key_pair_id" {
-  description = "Public key ID injected into the API for CloudFront signed-cookie issuance."
-  value       = aws_cloudfront_public_key.playback.id
-}
-
 output "api_url" {
   value = local.api_base_url
 }
@@ -26,7 +13,6 @@ output "ecs_cluster_name" {
 output "ecs_service_names" {
   value = {
     api    = aws_ecs_service.api.name
-    edge   = aws_ecs_service.edge.name
     worker = aws_ecs_service.worker.name
   }
 }
@@ -40,7 +26,6 @@ output "task_definition_arns" {
   description = "New immutable task definitions. Release automation migrates before updating services to these revisions."
   value = {
     api     = aws_ecs_task_definition.api.arn
-    edge    = aws_ecs_task_definition.edge.arn
     migrate = aws_ecs_task_definition.migrate.arn
     worker  = aws_ecs_task_definition.worker.arn
   }

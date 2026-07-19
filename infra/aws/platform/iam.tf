@@ -85,11 +85,6 @@ data "aws_iam_policy_document" "ecs_task" {
     ]
   }
 
-  statement {
-    sid       = "InvalidateDeletedPlayback"
-    actions   = ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation"]
-    resources = [aws_cloudfront_distribution.this.arn]
-  }
 }
 
 resource "aws_iam_role_policy" "ecs_task" {
