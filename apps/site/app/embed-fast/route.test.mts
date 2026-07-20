@@ -103,6 +103,23 @@ test("fast embed falls back to the real opener when inline startup is unavailabl
   assert.doesNotMatch(html, /playback_token|set-cookie|authorization/i);
 });
 
+test("paused fast embeds avoid eagerly downloading the full opener", () => {
+  const html = renderFastEmbedHtml({
+    assetId: ASSET_ID,
+    autoPlay: false,
+    bootstrap: readyBootstrap(),
+    bootstrapUrl: `/api/player/${ASSET_ID}`,
+    bootstrapMs: 42,
+    controls: true,
+    muted: false,
+    playbackOriginHint: null,
+    startupMode: "progressive",
+  });
+
+  assert.match(html, /<video[^>]+preload="metadata"/);
+  assert.doesNotMatch(html, /<link rel="preload" as="video"/);
+});
+
 test("fast embed uses the real opener for anonymous public playback", () => {
   const base = readyBootstrap();
   if (base.status !== "ready") throw new Error("expected ready bootstrap");

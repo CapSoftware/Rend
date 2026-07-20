@@ -860,7 +860,11 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const contentType = selection?.contentType
     ? ` type="${html(selection.contentType)}"`
     : "";
-  const preload = inlineStartup ? null : preloadablePlaybackSelection(selection);
+  const videoPreload = options.autoPlay ? "auto" : "metadata";
+  const preload =
+    options.autoPlay && !inlineStartup
+      ? preloadablePlaybackSelection(selection)
+      : null;
   const preloadContentType = preload?.contentType ?? "video/mp4";
   const crossOrigin = playbackCrossOrigin(options.bootstrap);
   const crossOriginAttribute = crossOrigin
@@ -925,7 +929,7 @@ body{overflow:hidden}
 </head>
 <body>
 <main class="rend-fast" aria-label="Video player" data-rend-player-state="${html(state)}" data-rend-player-selected="${html(selectedLabel)}" data-rend-player-artifact="${html(selectedArtifact)}" data-rend-ready-status="${html(ready?.status ?? options.bootstrap?.status ?? state)}" data-rend-source-state="${html(ready?.source_state ?? "")}" data-rend-playable-state="${html(ready?.playable_state ?? "")}" data-rend-manifest-content-type="${html(ready?.manifest_content_type ?? "")}" data-rend-opener-content-type="${html(ready?.opener_content_type ?? "")}" data-rend-poster="${html(ready?.poster_url ?? "")}" data-rend-prefetch-hint-count="${html(ready?.prefetch_hints.length ?? 0)}" data-rend-playback-engine="${html(playbackEngine)}" data-rend-document-start-ms="0"${bootstrapMs}${bootstrapHttpStatus} data-rend-asset-id="${html(options.assetId)}" data-rend-organization-id="${html(ready?.organization_id ?? "")}" data-rend-autoplay="${options.autoPlay ? "true" : "false"}" data-rend-muted="${options.muted ? "true" : "false"}" data-rend-startup-mode="${html(options.startupMode)}">
-<video class="rend-fast__video"${source}${contentType}${poster}${autoPlay}${controls}${muted} playsinline preload="auto"${crossOriginAttribute}></video>
+<video class="rend-fast__video"${source}${contentType}${poster}${autoPlay}${controls}${muted} playsinline preload="${videoPreload}"${crossOriginAttribute}></video>
 <div class="rend-fast__message" role="status" aria-live="polite">${html(message)}</div>
 </main>
 <script>

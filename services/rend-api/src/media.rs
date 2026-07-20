@@ -686,6 +686,7 @@ async fn generate_and_upload_opener(
 fn opener_ffmpeg_args(source_path: &Path, source_probe: &SourceProbe) -> Vec<OsString> {
     let copy_video = source_probe.video_codec.as_deref() == Some("h264")
         && source_probe.width.max(source_probe.height) <= OPENER_MAX_DIMENSION;
+    let keyframe_interval = hls_keyframe_interval_frames(source_probe).to_string();
     let mut args = vec![
         os("-y"),
         os("-i"),
@@ -712,6 +713,17 @@ fn opener_ffmpeg_args(source_path: &Path, source_probe: &SourceProbe) -> Vec<OsS
             os(OPENER_VIDEO_CRF),
             os("-pix_fmt"),
             os("yuv420p"),
+            os("-g"),
+            os(&keyframe_interval),
+            os("-keyint_min"),
+            os(&keyframe_interval),
+            os("-sc_threshold"),
+            os("0"),
+            os("-force_key_frames"),
+            os(&format!(
+                "expr:gte(t,n_forced*{})",
+                HLS_TARGET_SEGMENT_SECONDS
+            )),
         ]);
     }
     if source_probe.has_audio {
@@ -724,6 +736,8 @@ fn opener_ffmpeg_args(source_path: &Path, source_probe: &SourceProbe) -> Vec<OsS
     args.extend([
         os("-movflags"),
         os("+frag_keyframe+empty_moov+default_base_moof"),
+        os("-frag_duration"),
+        os("1000000"),
         os("-f"),
         os("mp4"),
         os("pipe:1"),
@@ -3004,6 +3018,16 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-b:a", "96k"]));
         assert!(args.iter().any(|value| value.contains("min(640,iw)")));
         assert!(args.iter().any(|value| value.contains("min(640,ih)")));
+        assert!(args.windows(2).any(|pair| pair == ["-g", "30"]));
+        assert!(args.windows(2).any(|pair| pair == ["-keyint_min", "30"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-force_key_frames", "expr:gte(t,n_forced*1)"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-frag_duration", "1000000"])
+        );
         assert!(
             args.iter()
                 .any(|value| value == "+frag_keyframe+empty_moov+default_base_moof")
@@ -3031,6 +3055,10 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]));
         assert!(args.windows(2).any(|pair| pair == ["-c:a", "copy"]));
         assert!(!args.iter().any(|value| value == "-vf"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-frag_duration", "1000000"])
+        );
     }
 
     #[test]
