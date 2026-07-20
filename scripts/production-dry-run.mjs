@@ -1096,17 +1096,25 @@ async function main() {
       return waitForBillingUsage(context, context.assetId);
     });
 
-    await runStep(context, "playback-analytics", "public playback analytics", async () => {
-      const { data } = await fetchJson(new URL(`/v1/assets/${context.assetId}/analytics/playback?window_seconds=3600`, context.apiBaseUrl), {
+    await runStep(context, "playback-analytics", "durable player analytics", async () => {
+      const { data } = await fetchJson(new URL("/v1/analytics/overview?window_seconds=3600", context.apiBaseUrl), {
         headers: apiHeaders(context.rawApiKey),
       });
-      if (Number(data.request_count) < 1) throw new Error("playback analytics did not record any requests");
+      const watchTimeMs = Number(data.watch_time_ms);
+      const asset = Array.isArray(data.top_assets)
+        ? data.top_assets.find((entry) => entry?.asset_id === context.assetId)
+        : null;
+      if (watchTimeMs < 4_000 || Number(asset?.watch_time_ms) < 4_000) {
+        throw new Error("player analytics did not record the synthetic watch time");
+      }
       return {
-        asset_id: data.asset_id,
+        asset_id: context.assetId,
+        views: data.views,
+        sessions: data.sessions,
+        watch_time_ms: data.watch_time_ms,
+        asset_watch_time_ms: asset.watch_time_ms,
         request_count: data.request_count,
         bytes_served: data.bytes_served,
-        cache_status_counts: data.cache_status_counts,
-        status_code_counts: data.status_code_counts,
       };
     });
 
