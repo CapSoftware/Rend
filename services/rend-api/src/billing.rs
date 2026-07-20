@@ -278,7 +278,7 @@ fn failure_policy_from_env(rend_env: RendEnv) -> Result<BillingFailurePolicy> {
 fn validate_autumn_api_url(rend_env: RendEnv, value: &str) -> Result<()> {
     match validate_required_url(rend_env, "AUTUMN_API_URL", value) {
         Ok(()) => Ok(()),
-        Err(error) if rend_env == RendEnv::Local && is_official_autumn_api_url(value) => Ok(()),
+        Err(_) if rend_env == RendEnv::Local && is_official_autumn_api_url(value) => Ok(()),
         Err(error) => Err(error),
     }
 }
