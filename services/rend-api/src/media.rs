@@ -298,9 +298,14 @@ async fn process_in_dir(
         .iter()
         .map(|artifact| artifact.byte_size)
         .sum::<i64>();
-    let opener_promoted =
-        persist_artifacts_and_state(request, &opener_artifacts, "opener_ready", &source_probe)
-            .await?;
+    let opener_promoted = persist_artifacts_and_state(
+        request,
+        &opener_artifacts,
+        "opener_ready",
+        "opener",
+        &source_probe,
+    )
+    .await?;
     if !opener_promoted {
         return Ok(ProcessMediaOutcome {
             playable_state: "deleted".to_owned(),
@@ -312,7 +317,25 @@ async fn process_in_dir(
 
     let thumbnail_artifact =
         match generate_and_upload_thumbnail(request, processing_dir, &source_path).await {
-            Ok(artifact) => Some(artifact),
+            Ok(artifact) => {
+                let thumbnail_promoted = persist_artifacts_and_state(
+                    request,
+                    std::slice::from_ref(&artifact),
+                    "opener_ready",
+                    "thumbnail",
+                    &source_probe,
+                )
+                .await?;
+                if !thumbnail_promoted {
+                    return Ok(ProcessMediaOutcome {
+                        playable_state: "deleted".to_owned(),
+                        playback_artifact_paths: Vec::new(),
+                        output_bytes: 0,
+                        unavailable: true,
+                    });
+                }
+                Some(artifact)
+            }
             Err(error) => {
                 tracing::warn!(
                     asset_id = %request.asset_id,
@@ -328,11 +351,11 @@ async fn process_in_dir(
             .await
             .context("failed to generate HLS artifacts")?;
 
-    let mut artifacts = Vec::with_capacity(1 + hls_artifacts.len());
-    if let Some(thumbnail_artifact) = thumbnail_artifact {
-        artifacts.push(thumbnail_artifact);
-    }
-    artifacts.extend(hls_artifacts);
+    let thumbnail_bytes = thumbnail_artifact
+        .as_ref()
+        .map(|artifact| artifact.byte_size)
+        .unwrap_or(0);
+    let artifacts = hls_artifacts;
 
     let has_manifest = artifacts.iter().any(|artifact| artifact.kind == "manifest");
     let segment_count = artifacts
@@ -346,7 +369,8 @@ async fn process_in_dir(
     let playable_state = "hls_ready";
 
     let promoted =
-        persist_artifacts_and_state(request, &artifacts, playable_state, &source_probe).await?;
+        persist_artifacts_and_state(request, &artifacts, playable_state, "hls", &source_probe)
+            .await?;
 
     if !promoted {
         return Ok(ProcessMediaOutcome {
@@ -364,7 +388,7 @@ async fn process_in_dir(
             &artifacts,
             playable_state,
         ),
-        output_bytes: opener_bytes.saturating_add(
+        output_bytes: opener_bytes.saturating_add(thumbnail_bytes).saturating_add(
             artifacts
                 .iter()
                 .map(|artifact| artifact.byte_size)
@@ -1472,6 +1496,7 @@ async fn persist_artifacts_and_state(
     request: &ProcessMediaRequest,
     artifacts: &[UploadedArtifact],
     playable_state: &str,
+    publication_phase: &str,
     source_probe: &SourceProbe,
 ) -> Result<bool> {
     let asset_id = &request.asset_id;
@@ -1749,8 +1774,8 @@ async fn persist_artifacts_and_state(
         let reference = request
             .fence
             .as_ref()
-            .map(|fence| format!("media:{}:{playable_state}", fence.lease_token))
-            .unwrap_or_else(|| format!("media:inline:{asset_id}:{playable_state}"));
+            .map(|fence| format!("media:{}:{publication_phase}", fence.lease_token))
+            .unwrap_or_else(|| format!("media:inline:{asset_id}:{publication_phase}"));
         sqlx::query(
             "
             INSERT INTO rend.storage_ledger_entries (
