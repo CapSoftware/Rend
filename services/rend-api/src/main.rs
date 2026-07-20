@@ -4368,22 +4368,12 @@ async fn fetch_playback_artifacts(
 ) -> Result<Vec<PlaybackArtifactRecord>, AppError> {
     let asset_id = normalize_asset_id(asset_id)?;
     let organization_id = normalize_org_id(organization_id)?;
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "
-        SELECT artifact.kind, artifact.object_key, artifact.content_type
-        FROM rend.artifacts artifact
-        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
-        WHERE artifact.asset_id = $1::uuid
-          AND asset.organization_id = $2::uuid
-          AND artifact.kind IN ('opener', 'manifest', 'segment')
-        ORDER BY artifact.kind, artifact.object_key
-        ",
-    )
-    .bind(asset_id)
-    .bind(organization_id)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::internal)?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as(FETCH_PLAYBACK_ARTIFACTS_SQL)
+        .bind(asset_id)
+        .bind(organization_id)
+        .fetch_all(db)
+        .await
+        .map_err(AppError::internal)?;
 
     Ok(rows
         .into_iter()
@@ -4394,6 +4384,16 @@ async fn fetch_playback_artifacts(
         })
         .collect())
 }
+
+const FETCH_PLAYBACK_ARTIFACTS_SQL: &str = "
+        SELECT artifact.kind, artifact.object_key, artifact.content_type
+        FROM rend.artifacts artifact
+        INNER JOIN rend.assets asset ON asset.id = artifact.asset_id
+        WHERE artifact.asset_id = $1::uuid
+          AND asset.organization_id = $2::uuid
+          AND artifact.kind IN ('opener', 'manifest', 'segment', 'thumbnail')
+        ORDER BY artifact.kind, artifact.object_key
+        ";
 
 fn asset_current_response(
     asset: Option<AssetStateRecord>,

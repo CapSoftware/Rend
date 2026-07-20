@@ -1641,6 +1641,14 @@ fn playback_bootstrap_includes_thumbnail_as_poster() {
 }
 
 #[test]
+fn playback_artifact_query_loads_thumbnail_records() {
+    assert!(
+        FETCH_PLAYBACK_ARTIFACTS_SQL.contains("'thumbnail'"),
+        "thumbnail artifacts must reach the playback bootstrap"
+    );
+}
+
+#[test]
 fn playback_bootstrap_urls_are_tokenless_and_cookie_carries_playback_token() {
     let response = playback_bootstrap_response(
         Some(asset_record("hls_ready")),
