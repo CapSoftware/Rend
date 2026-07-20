@@ -118,6 +118,13 @@ function validateConfig(args, sandbox, production) {
   if (sandbox.keyMode !== "sandbox") errors.push("sandbox Autumn key must be visibly marked test/sandbox");
   if (production.keyMode !== "live") errors.push("production Autumn key must be visibly marked live");
   for (const config of [sandbox, production]) {
+    try {
+      if (new URL(config.apiUrl).protocol !== "https:") {
+        errors.push(`${config.label} Autumn API URL must use HTTPS`);
+      }
+    } catch {
+      errors.push(`${config.label} Autumn API URL must be a valid URL`);
+    }
     if (config.featureIds.delivery !== DELIVERY_ID) errors.push(`${config.label} delivery feature must be ${DELIVERY_ID}`);
     if (config.featureIds.storage !== STORAGE_ID) errors.push(`${config.label} storage feature must be ${STORAGE_ID}`);
     if (config.planId !== PAYG_ID) errors.push(`${config.label} plan must be ${PAYG_ID}`);

@@ -37,6 +37,29 @@ test("pricing rejects plans missing either public meter", () => {
   );
 });
 
+test("pricing accepts a wrapped Autumn plan response", () => {
+  const pricing = pricingFromPlan({
+    data: {
+      plan: {
+        id: "pay_as_you_go",
+        items: [
+          {
+            feature_id: "delivery_seconds",
+            price: { amount: 0.001, billing_units: 60 },
+          },
+          {
+            feature_id: "storage_second_months",
+            price: { amount: 0.003, billing_units: 60 },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(pricing?.deliveryPerMinute, DEFAULT_DELIVERY_PRICE_PER_MINUTE);
+  assert.equal(pricing?.storagePerMinuteMonth, DEFAULT_STORAGE_PRICE_PER_MINUTE_MONTH);
+});
+
 test("small minute prices stay readable", () => {
   assert.equal(formatUsd(0.001), "$0.001");
   assert.equal(formatUsd(0.003), "$0.003");

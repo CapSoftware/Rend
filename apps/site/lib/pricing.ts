@@ -91,7 +91,9 @@ function perMinutePrice(plan: Json, featureId: string) {
 }
 
 export function pricingFromPlan(value: unknown) {
-  const plan = rec(value);
+  const root = rec(value);
+  const data = rec(root?.data);
+  const plan = rec(root?.plan) ?? rec(data?.plan) ?? data ?? root;
   if (!plan) return null;
   const deliveryPerMinute = perMinutePrice(plan, DELIVERY_FEATURE_ID);
   const storagePerMinuteMonth = perMinutePrice(plan, STORAGE_FEATURE_ID);

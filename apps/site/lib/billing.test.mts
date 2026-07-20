@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "REND_ENV_PROFILE",
   "NODE_ENV",
   "REND_BILLING_MODE",
+  "REND_AUTUMN_PLAN_PAYG_ID",
   "REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT",
   "REND_ALLOW_LIVE_CHECKOUT_REDIRECT",
 ];
@@ -142,8 +143,9 @@ test("hosted billing redirects use See Other so Stripe receives GET after form P
   assert.equal(BILLING_EXTERNAL_REDIRECT_STATUS, 303);
 });
 
-test("billing plan normalization exposes only pay as you go", () => {
-  assert.deepEqual(
+test("billing plan normalization exposes only pay as you go", async () => {
+  await withEnv({ REND_AUTUMN_PLAN_PAYG_ID: undefined }, () => {
+    assert.deepEqual(
       normalizeBillingPlans({
         list: [
           {
@@ -200,8 +202,9 @@ test("billing plan normalization exposes only pay as you go", () => {
           attachAction: "activate",
           relationshipStatus: undefined,
         },
-      ]
-  );
+      ],
+    );
+  });
 });
 
 test("checkout redirect guard rejects local test checkout URLs by default", async () => {
