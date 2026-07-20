@@ -1158,6 +1158,10 @@ struct PlaybackBootstrapResponse {
     manifest_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poster_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poster_content_type: Option<String>,
     prefetch_hints: Vec<PlaybackPrefetchHint>,
 }
 
@@ -4714,6 +4718,7 @@ fn playback_bootstrap_response(
     let manifest_artifact = (asset.playable_state == "hls_ready")
         .then(|| find_playback_artifact(&playback_artifacts, "hls/master.m3u8").cloned())
         .flatten();
+    let poster_artifact = find_playback_artifact(&playback_artifacts, "thumbnail.jpg").cloned();
     let primary_artifact = primary_playback_artifact(
         &asset.playable_state,
         opener_artifact.as_ref(),
@@ -4734,6 +4739,8 @@ fn playback_bootstrap_response(
         &asset.asset_id,
         manifest_artifact.as_ref(),
     );
+    let (poster_url, poster_content_type) =
+        artifact_fields(playback_base_url, &asset.asset_id, poster_artifact.as_ref());
     let prefetch_hints = if asset.playable_state == "hls_ready" {
         first_segment_prefetch_hints(
             playback_base_url,
@@ -4758,6 +4765,8 @@ fn playback_bootstrap_response(
         opener_content_type,
         manifest_url,
         manifest_content_type,
+        poster_url,
+        poster_content_type,
         prefetch_hints,
     })
 }
@@ -5092,7 +5101,11 @@ fn render_api_fast_embed_html(
     let auto_play_attr = if auto_play { " autoplay" } else { "" };
     let controls_attr = if controls { " controls" } else { "" };
     let muted_attr = if muted { " muted" } else { "" };
-    let poster_attr = "";
+    let poster_attr = response
+        .poster_url
+        .as_ref()
+        .map(|url| format!(r#" poster="{}""#, html_escape(url)))
+        .unwrap_or_default();
     let selected_label = if inline_startup.is_some() {
         "mse_inline"
     } else {
@@ -5137,7 +5150,7 @@ fn render_api_fast_embed_html(
                 )
             })
             .unwrap_or_default()
-    } else if selection.content_type == "video/mp4" {
+    } else if auto_play && selection.content_type == "video/mp4" {
         format!(
             r#"<link rel="preload" as="video" href="{}" type="{}"{} fetchpriority="high">"#,
             html_escape(&selection.url),
@@ -5148,6 +5161,7 @@ fn render_api_fast_embed_html(
         String::new()
     };
     let inline_startup_json = inline_startup_script_json(inline_startup);
+    let video_preload = if auto_play { "auto" } else { "metadata" };
     let fallback_json = script_json(serde_json::json!({
         "artifactPath": selection.artifact_path,
         "contentType": selection.content_type,
@@ -5175,7 +5189,7 @@ body{{overflow:hidden}}
 </head>
 <body>
 <main class="rend-fast" aria-label="Video player" data-rend-player-state="ready" data-rend-player-selected="{label}" data-rend-player-artifact="{artifact_path}" data-rend-ready-status="ready" data-rend-source-state="{source_state}" data-rend-playable-state="{playable_state}" data-rend-playback-engine="{playback_engine}" data-rend-document-start-ms="0" data-rend-bootstrap-ms="0" data-rend-asset-id="{asset_id}">
-<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="auto"{cross_origin_attr}></video>
+<video class="rend-fast__video"{source_attrs}{poster_attr}{auto_play_attr}{controls_attr}{muted_attr} playsinline preload="{video_preload}"{cross_origin_attr}></video>
 <div class="rend-fast__message" role="status" aria-live="polite">Ready</div>
 </main>
 <script>
@@ -5195,6 +5209,7 @@ body{{overflow:hidden}}
         playback_engine = html_escape(playback_engine),
         source_attrs = source_attrs,
         source_state = html_escape(&response.source_state),
+        video_preload = video_preload,
     )
 }
 
@@ -5220,6 +5235,7 @@ fn playback_artifact_from_record(
         "opener" => artifact_path == "opener.mp4",
         "manifest" => is_hls_manifest_artifact_path(artifact_path),
         "segment" => is_hls_media_artifact_path(artifact_path),
+        "thumbnail" => artifact_path == "thumbnail.jpg",
         _ => false,
     };
 

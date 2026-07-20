@@ -324,6 +324,14 @@ fn opener_artifact_records() -> Vec<PlaybackArtifactRecord> {
     )]
 }
 
+fn thumbnail_artifact_records() -> Vec<PlaybackArtifactRecord> {
+    vec![artifact_record(
+        "thumbnail",
+        "videos/asset-123/thumbnail.jpg",
+        "image/jpeg",
+    )]
+}
+
 async fn route_response(app: Router, path: &str, auth: Option<&str>) -> Response {
     route_response_with_method(app, "GET", path, auth).await
 }
@@ -1602,6 +1610,34 @@ fn playback_bootstrap_opener_ready_returns_opener_primary_without_manifest() {
     assert!(response.manifest_url.is_none());
     assert!(response.manifest_content_type.is_none());
     assert!(response.prefetch_hints.is_empty());
+}
+
+#[test]
+fn playback_bootstrap_includes_thumbnail_as_poster() {
+    let mut artifacts = opener_artifact_records();
+    artifacts.extend(thumbnail_artifact_records());
+    let response = playback_bootstrap_response(
+        Some(asset_record("opener_ready")),
+        &artifacts,
+        "https://video.rend.so",
+        &test_issuer(),
+        2,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(
+        response.poster_url.as_deref(),
+        Some("https://video.rend.so/v/asset-123/thumbnail.jpg")
+    );
+    assert_eq!(response.poster_content_type.as_deref(), Some("image/jpeg"));
+
+    let selection = fast_embed_playback_selection(&response, "opener").unwrap();
+    let html =
+        render_api_fast_embed_html(&response, &selection, None, false, true, false, "include");
+    assert!(html.contains(r#"poster="https://video.rend.so/v/asset-123/thumbnail.jpg""#));
+    assert!(html.contains(r#"preload="metadata""#));
+    assert!(!html.contains(r#"rel="preload" as="video""#));
 }
 
 #[test]
