@@ -302,7 +302,6 @@ export const billingStorageSpans = rend.table(
       .notNull()
       .references(() => assets.id, { onDelete: "cascade" }),
     duration_ms: bigint("duration_ms", { mode: "number" }).notNull(),
-    resolution_tier: text("resolution_tier").notNull(),
     started_at: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     ended_at: timestamp("ended_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -314,7 +313,6 @@ export const billingStorageSpans = rend.table(
       .where(sql`${table.ended_at} IS NULL`),
     index("billing_storage_spans_org_window_idx").on(
       table.organization_id,
-      table.resolution_tier,
       table.started_at,
       table.ended_at
     ),

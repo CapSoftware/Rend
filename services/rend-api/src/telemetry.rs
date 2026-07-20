@@ -766,7 +766,8 @@ async fn post_player_telemetry_inner(
         state
             .metrics
             .record_telemetry_ingest(rows.len(), ingest_lag_ms);
-        schedule_analytics_rollup_refresh(state);
+        schedule_analytics_rollup_refresh(state.clone());
+        billing::schedule_delivery_usage_sync(state);
     }
 
     Ok(PlayerTelemetryIngestResponse {
