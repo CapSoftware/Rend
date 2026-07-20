@@ -632,6 +632,10 @@ async fn generate_and_upload_thumbnail(
             source_path.as_os_str().to_owned(),
             os("-frames:v"),
             os("1"),
+            os("-vf"),
+            os(&format!(
+                "scale=w='if(gte(iw,ih),min({OPENER_MAX_DIMENSION},iw),-2)':h='if(gte(iw,ih),-2,min({OPENER_MAX_DIMENSION},ih))'"
+            )),
             os("-q:v"),
             os("3"),
             thumbnail_path.as_os_str().to_owned(),
