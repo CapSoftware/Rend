@@ -276,7 +276,7 @@ export default function Home() {
         <Section aria-label="How Rend compares">
           <SectionHeading
             title="How Rend compares"
-            lede="Two prices: seconds delivered and storage kept, both by resolution. Higher resolution is just more data to move and keep. Here's how that compares to the usual ways of paying for video."
+            lede="Two flat prices: one for minutes viewers watch and one for minutes you store. Here's how that compares to the usual ways of paying for video."
           />
 
           <ComparisonTable />
@@ -293,7 +293,7 @@ export default function Home() {
         <Section id="pricing" tone="sunken" aria-label="Pricing">
           <SectionHeading
             title="Simple, flexible pricing"
-            lede="No per-minute fees and no egress surprises. You pay for two things: what's delivered and what's stored, priced by resolution. Encoding is always included."
+            lede="Two transparent per-minute rates, with no base fee, resolution multiplier, or egress surprise. Encoding is always included."
           />
 
           <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -311,8 +311,8 @@ export default function Home() {
               </span>
               <h3 className="text-[20px]">Delivery</h3>
               <p className="mt-2 text-[15px] text-muted">
-                Per second streamed, by resolution from 720p to 4K. You only pay
-                when someone actually watches.
+                $0.001 per minute viewers watch. Usage is measured precisely, so
+                you only pay for what is actually delivered.
               </p>
             </Card>
             <Card className="p-7">
@@ -333,9 +333,8 @@ export default function Home() {
               </span>
               <h3 className="text-[20px]">Storage</h3>
               <p className="mt-2 text-[15px] text-muted">
-                Per second-month you keep a video. Higher resolutions are larger
-                files, so they cost a bit more to store. Delete an asset and the
-                meter stops, no minimum commitment.
+                $0.003 per minute of video stored for a month, prorated
+                precisely. Delete an asset and the meter stops.
               </p>
             </Card>
             <Card className="p-7">
@@ -366,12 +365,11 @@ export default function Home() {
             <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="font-head text-[20px] leading-snug">
-                  Start free, scale when you need to
+                  Pay as you go, with no base fee
                 </p>
                 <p className="mt-1 text-[14px] text-muted">
-                  Pay as you go from zero, or pick a plan with monthly credits
-                  included. Move between tiers whenever you like, with no
-                  lock-in and no minimum.
+                  Delivered minutes plus stored minutes, with no lock-in or
+                  minimum.
                 </p>
               </div>
               <Button
@@ -383,26 +381,15 @@ export default function Home() {
                 See live rates
               </Button>
             </div>
-            <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {[
-                { name: "Pay as you go", credit: "$0" },
-                { name: "Builder", credit: "$100" },
-                { name: "Scale", credit: "$1,000" },
-                { name: "Enterprise", credit: "$10k+" },
-              ].map((tier) => (
-                <div
-                  key={tier.name}
-                  className="rounded-xl border border-line-soft bg-bg-sunken/50 px-4 py-3.5"
-                >
-                  <p className="text-[12.5px] text-muted">{tier.name}</p>
-                  <p className="mt-1 font-head text-[22px] leading-none text-ink">
-                    {tier.credit}
-                  </p>
-                  <p className="mt-1.5 text-[11px] text-faint">
-                    included credits
-                  </p>
-                </div>
-              ))}
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-line-soft bg-bg-sunken/50 px-4 py-3.5">
+                <p className="text-[12.5px] text-muted">Delivery</p>
+                <p className="mt-1 font-head text-[22px] leading-none text-ink">$0.001/min</p>
+              </div>
+              <div className="rounded-xl border border-line-soft bg-bg-sunken/50 px-4 py-3.5">
+                <p className="text-[12.5px] text-muted">Storage</p>
+                <p className="mt-1 font-head text-[22px] leading-none text-ink">$0.003/min-month</p>
+              </div>
             </div>
           </div>
           <LearnMore href="/pricing">See how pricing works</LearnMore>

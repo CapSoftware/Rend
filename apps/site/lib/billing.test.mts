@@ -15,10 +15,9 @@ const ENV_KEYS = [
   "REND_ENV_PROFILE",
   "NODE_ENV",
   "REND_BILLING_MODE",
+  "REND_AUTUMN_PLAN_PAYG_ID",
   "REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT",
   "REND_ALLOW_LIVE_CHECKOUT_REDIRECT",
-  "REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID",
-  "REND_AUTUMN_HIDDEN_PLAN_IDS",
 ];
 
 async function withEnv<T>(values: Record<string, string | undefined>, run: () => T | Promise<T>) {
@@ -90,7 +89,7 @@ test("billing readiness blocks exhausted balances", () => {
   const readiness = billingReadinessFromOverview(
     overview({
       plans: [{ id: "pay_as_you_go", name: "Pay as you go", relationshipStatus: "active" }],
-      balances: [{ featureId: "delivery_720p_seconds", remaining: 0 }],
+      balances: [{ featureId: "delivery_seconds", remaining: 0 }],
     })
   );
 
@@ -115,10 +114,10 @@ test("local billing is always ready", () => {
 test("local Autumn attach activates plans without external Checkout by default", async () => {
   await withEnv({ REND_ENV: "local", REND_BILLING_MODE: "autumn" }, () => {
     const returnUrl = "http://127.0.0.1:3000/dashboard/billing";
-    const body = checkoutAttachBody(dashboardContext, "builder", returnUrl);
+    const body = checkoutAttachBody(dashboardContext, "pay_as_you_go", returnUrl);
 
     assert.equal(body.customer_id, dashboardContext.organizationId);
-    assert.equal(body.plan_id, "builder");
+    assert.equal(body.plan_id, "pay_as_you_go");
     assert.equal(body.redirect_mode, "never");
     assert.equal(body.success_url, returnUrl);
     assert.equal(body.no_billing_changes, true);
@@ -130,7 +129,7 @@ test("local Autumn attach activates plans without external Checkout by default",
 test("production Autumn attach can redirect when Checkout is required", async () => {
   await withEnv({ REND_ENV: "production", REND_BILLING_MODE: "autumn" }, () => {
     const returnUrl = "https://rend.so/dashboard/billing";
-    const body = checkoutAttachBody(dashboardContext, "builder", returnUrl);
+    const body = checkoutAttachBody(dashboardContext, "pay_as_you_go", returnUrl);
 
     assert.equal(body.redirect_mode, "if_required");
     assert.equal(body.success_url, returnUrl);
@@ -144,15 +143,15 @@ test("hosted billing redirects use See Other so Stripe receives GET after form P
   assert.equal(BILLING_EXTERNAL_REDIRECT_STATUS, 303);
 });
 
-test("billing plan normalization hides internal and non-customer-facing plans", async () => {
-  await withEnv({ REND_AUTUMN_HIDDEN_PLAN_IDS: "beta_private" }, () => {
+test("billing plan normalization exposes only pay as you go", async () => {
+  await withEnv({ REND_AUTUMN_PLAN_PAYG_ID: undefined }, () => {
     assert.deepEqual(
       normalizeBillingPlans({
         list: [
           {
-            id: "internal_production_dry_run",
-            name: "Internal Production Dry Run",
-            description: "Internal-only plan for controlled production checks.",
+            id: "private_test_plan",
+            name: "Private test plan",
+            description: "Not part of the public catalog.",
           },
           {
             id: "beta_private",
@@ -164,9 +163,9 @@ test("billing plan normalization hides internal and non-customer-facing plans", 
             archived: true,
           },
           {
-            id: "builder",
-            name: "Builder",
-            description: "$19/mo with $100 included usage credit.",
+            id: "another_plan",
+            name: "Another plan",
+            description: "Not part of the public catalog.",
             price: {
               display: {
                 primary_text: "$19",
@@ -177,19 +176,33 @@ test("billing plan normalization hides internal and non-customer-facing plans", 
               attach_action: "activate",
             },
           },
+          {
+            id: "pay_as_you_go",
+            name: "Pay as you go",
+            description: "Delivery and storage billed by the minute.",
+            price: {
+              display: {
+                primary_text: "$0",
+                secondary_text: "no monthly fee",
+              },
+            },
+            customer_eligibility: {
+              attach_action: "activate",
+            },
+          },
         ],
       }),
       [
         {
-          id: "builder",
-          name: "Builder",
-          description: "$19/mo with $100 included usage credit.",
-          priceLabel: "$19",
-          intervalLabel: "per month",
+          id: "pay_as_you_go",
+          name: "Pay as you go",
+          description: "Delivery and storage billed by the minute.",
+          priceLabel: "$0",
+          intervalLabel: "no monthly fee",
           attachAction: "activate",
           relationshipStatus: undefined,
         },
-      ]
+      ],
     );
   });
 });

@@ -59,7 +59,7 @@ export const docsNavItems: DocsNavItem[] = [
     href: "#billing-usage",
     title: "Billing and usage",
     description:
-      "Autumn limits, tiered delivery seconds, and storage second-months.",
+      "Delivered watch minutes and stored video minutes.",
   },
   {
     href: "#error-states",

@@ -48,7 +48,7 @@ export const marketingPages: MarketingPage[] = [
     ogSubtitle:
       "One call to upload, one fast playback URL out. Encoding, storage and delivery handled.",
     summary:
-      "What Rend does: upload with one API call, encoding included, generated HLS from Tigris-backed origin, pricing by resolution, fully open source, and llms.txt plus OpenAPI for AI editors.",
+      "What Rend does: upload with one API call, encoding included, generated HLS from Tigris-backed origin, simple minute-based pricing, fully open source, and llms.txt plus OpenAPI for AI editors.",
     priority: 0.9,
     faqs: [
       {
@@ -116,20 +116,20 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "Pricing",
     description:
-      "You pay for two things, both by resolution: seconds delivered and storage kept. Encoding is included, there are no per-minute fees and no egress surprises. Start free and scale when you need to.",
+      "You pay for two things: minutes delivered and minutes stored. Encoding is included, every resolution costs the same, and there are no egress surprises.",
     ogSubtitle:
-      "Pay for delivery and storage by resolution. Encoding included. No egress surprises.",
+      "Pay for delivered minutes and stored minutes. Encoding included. No egress surprises.",
     summary:
-      "Rend pricing: pay for delivery (per second streamed, by resolution) and storage (per second-month kept, by resolution). Encoding is included, there are no egress fees, and plans run from pay as you go up to Enterprise.",
+      "Rend pricing: $0.001 per delivered minute and $0.003 per stored minute per month. Encoding is included, every resolution costs the same, and there are no egress fees.",
     priority: 0.9,
     faqs: [
       {
         q: "How does pricing work?",
-        a: "You pay for what gets delivered and what you store, both priced by resolution. Higher resolution is more data to move and keep, so it costs a little more. Encoding is included on every upload.",
+        a: "You pay $0.001 for each minute viewers watch and $0.003 for each minute of video stored for a month. Every resolution costs the same, and encoding is included.",
       },
       {
         q: "Are there egress or bandwidth surprises?",
-        a: "No. There are no per-minute fees and no surprise egress charges. Delivery is billed per second streamed by resolution, so you pay for what people actually watched.",
+        a: "No. Delivery is billed from viewer watch time at one clear per-minute rate, with no separate bandwidth or egress charge.",
       },
       {
         q: "Do you charge separately for encoding?",
@@ -137,11 +137,11 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "What happens when I delete a video?",
-        a: "The storage meter stops. Storage is billed per second-month you keep an asset, with no minimum, so removing a video stops its cost.",
+        a: "The storage meter stops. Storage is prorated precisely while you keep an asset, with no minimum, so removing a video stops its cost.",
       },
       {
         q: "How do I start?",
-        a: "Start on pay as you go with no commitment, or pick a plan with monthly credits included. You can move between plans whenever you like, with no lock-in.",
+        a: "Start on pay as you go with no commitment or lock-in.",
       },
       {
         q: "Can I avoid usage fees altogether?",
@@ -156,16 +156,16 @@ export const marketingPages: MarketingPage[] = [
     footerGroup: "Product",
     title: "How Rend compares",
     description:
-      "How Rend compares to minute-billed platforms, per-GB CDNs, and rolling your own. Delivery and storage by resolution, encoding included, open source, and Tigris-backed HLS playback.",
+      "How Rend compares to managed video platforms, per-GB CDNs, and rolling your own. Two minute-based rates, encoding included, open source, and Tigris-backed HLS playback.",
     ogSubtitle:
       "Rend next to minute-billed platforms, per-GB CDNs, and rolling your own.",
     summary:
-      "How Rend compares to other ways of paying for video: minute-billed platforms, budget per-GB CDNs, and rolling your own. Rend bills delivery and storage by resolution, includes encoding, is open source and self-hostable, and serves generated HLS from Tigris-backed origin by default.",
+      "How Rend compares to other ways of paying for video. Rend bills delivered minutes and stored minutes at two flat rates, includes encoding, is open source and self-hostable, and serves generated HLS from Tigris-backed origin by default.",
     priority: 0.8,
     faqs: [
       {
         q: "How is Rend different from minute-billed platforms?",
-        a: "They charge per minute of video plus tiers, and things like encoding and fast starts are often extras. Rend bills delivery and storage by resolution, includes encoding, and serves generated HLS from Tigris-backed origin by default.",
+        a: "Rend uses the familiar delivered-minute and stored-minute model, but keeps it to two flat rates with encoding included and no resolution multipliers.",
       },
       {
         q: "How does Rend compare to budget per-GB CDNs?",
@@ -177,7 +177,7 @@ export const marketingPages: MarketingPage[] = [
       },
       {
         q: "Is Rend cheaper than the alternatives?",
-        a: "It depends on your traffic, but Rend takes away two common surprises: per-minute fees and egress charges. You pay for seconds delivered and storage kept by resolution, with encoding included.",
+        a: "It depends on your traffic, but Rend makes the calculation direct: delivered minutes times $0.001, plus stored minutes times $0.003 per month. Encoding is included.",
       },
     ],
   },

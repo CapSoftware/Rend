@@ -43,7 +43,7 @@ const defaultMuxUrl =
 const defaultProdEnvPath = "/Users/richie/.rend/production/rend-api.env";
 const defaultAutumnApiUrl = "https://api.useautumn.com/v1";
 const defaultAutumnApiVersion = "2.3.0";
-const defaultInternalTestPlanId = "internal_production_dry_run";
+const defaultBillingPlanId = "pay_as_you_go";
 const emptyPayloadHash = sha256Hex(Buffer.alloc(0));
 
 let redactionValues = [];
@@ -132,8 +132,7 @@ function parseArgs(argv) {
         "REND_HLS_PROVIDER_AUTUMN_PLAN_ID",
         "REND_TIGRIS_EDGE_AUTUMN_PLAN_ID",
       ) ||
-      process.env.REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID ||
-      defaultInternalTestPlanId,
+      defaultBillingPlanId,
     cleanupAsset: keepAsset !== "1",
     publicCopy: publicCopy === "1",
     dryRun: false,
@@ -777,7 +776,7 @@ async function attachBenchmarkAutumnPlan(env, options, account) {
     },
   });
   await autumnAttachPlan(env, account.organizationId, options.planId);
-  log("attached Autumn internal benchmark plan");
+  log("attached Autumn benchmark plan");
 }
 
 async function autumnAttachPlan(env, customerId, planId) {
@@ -785,6 +784,9 @@ async function autumnAttachPlan(env, customerId, planId) {
     return await autumnPost(env, "/billing.attach", {
       customer_id: customerId,
       plan_id: planId,
+      redirect_mode: "never",
+      no_billing_changes: true,
+      enable_plan_immediately: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

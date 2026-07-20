@@ -32,27 +32,12 @@ const validModes = new Set(["local", "sandbox", "production-check"]);
 const validStatuses = new Set(["pass", "warn", "fail"]);
 
 const requiredFeatureEnv = [
-  ["delivery_720p", "REND_BILLING_FEATURE_DELIVERY_720P", "delivery_720p_seconds"],
-  ["delivery_1080p", "REND_BILLING_FEATURE_DELIVERY_1080P", "delivery_1080p_seconds"],
-  ["delivery_2k", "REND_BILLING_FEATURE_DELIVERY_2K", "delivery_2k_seconds"],
-  ["delivery_4k", "REND_BILLING_FEATURE_DELIVERY_4K", "delivery_4k_seconds"],
-  ["storage_720p", "REND_BILLING_FEATURE_STORAGE_720P", "storage_720p_second_months"],
-  ["storage_1080p", "REND_BILLING_FEATURE_STORAGE_1080P", "storage_1080p_second_months"],
-  ["storage_2k", "REND_BILLING_FEATURE_STORAGE_2K", "storage_2k_second_months"],
-  ["storage_4k", "REND_BILLING_FEATURE_STORAGE_4K", "storage_4k_second_months"],
+  ["delivery", "REND_BILLING_FEATURE_DELIVERY", "delivery_seconds"],
+  ["storage", "REND_BILLING_FEATURE_STORAGE", "storage_second_months"],
 ];
 
 const requiredPlanEnv = [
   ["payg", "REND_AUTUMN_PLAN_PAYG_ID", "pay_as_you_go"],
-  ["builder", "REND_AUTUMN_PLAN_BUILDER_ID", "builder"],
-  ["scale", "REND_AUTUMN_PLAN_SCALE_ID", "scale"],
-  ["enterprise", "REND_AUTUMN_PLAN_ENTERPRISE_ID", "enterprise"],
-];
-
-const requiredUsageCreditFeatureEnv = [
-  "usage_credits",
-  "REND_AUTUMN_USAGE_CREDIT_FEATURE_ID",
-  "rend_usage_credits",
 ];
 
 const publicDocsFiles = [
@@ -874,12 +859,11 @@ async function validateAutumnCatalog(context) {
     async () => {
       const env = context.env;
       const featureIds = Object.fromEntries(requiredFeatureEnv.map(([key, envKey, fallback]) => [key, envString(env, envKey, fallback)]));
-      const usageCreditFeatureId = envString(env, requiredUsageCreditFeatureEnv[1], requiredUsageCreditFeatureEnv[2]);
       const planIds = Object.fromEntries(requiredPlanEnv.map(([key, envKey, fallback]) => [key, envString(env, envKey, fallback)]));
       const errors = [];
       const warnings = [];
 
-      for (const [key, value] of Object.entries({ ...featureIds, [requiredUsageCreditFeatureEnv[0]]: usageCreditFeatureId, ...planIds })) {
+      for (const [key, value] of Object.entries({ ...featureIds, ...planIds })) {
         if (!isSafeCatalogId(value)) errors.push(`${key} catalog id is invalid`);
       }
 
@@ -887,7 +871,6 @@ async function validateAutumnCatalog(context) {
       const data = {
         billing_mode: billingMode,
         feature_ids: featureIds,
-        usage_credit_feature_id: usageCreditFeatureId,
         plan_ids: planIds,
         customer_mapping: {
           source: "rend organization UUID",
@@ -914,7 +897,7 @@ async function validateAutumnCatalog(context) {
       if (errors.length === 0) {
         const config = { apiUrl, apiVersion, secretKey };
         const featureResults = [];
-        for (const id of [...Object.values(featureIds), usageCreditFeatureId]) {
+        for (const id of Object.values(featureIds)) {
           featureResults.push(await autumnPost(config, "features.get", { feature_id: id }));
         }
         const planResults = [];

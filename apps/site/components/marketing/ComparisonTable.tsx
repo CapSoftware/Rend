@@ -6,13 +6,13 @@
 
 type CmpCell = { kind: "yes" | "no" | "mid" } | { kind: "text"; value: string };
 
-export const cmpColumns = ["Rend", "Minute-billed platforms", "Budget per-GB CDNs", "Roll your own"];
+export const cmpColumns = ["Rend", "Managed video platforms", "Budget per-GB CDNs", "Roll your own"];
 
 export const cmpRows: { feature: string; cells: CmpCell[] }[] = [
   {
     feature: "Pricing model",
     cells: [
-      { kind: "text", value: "Delivery + storage by resolution" },
+      { kind: "text", value: "Two flat per-minute rates" },
       { kind: "text", value: "Per minute, plus tiers" },
       { kind: "text", value: "Per GB, by region" },
       { kind: "text", value: "Whatever the bill says" },
@@ -21,7 +21,7 @@ export const cmpRows: { feature: string; cells: CmpCell[] }[] = [
   {
     feature: "Plans",
     cells: [
-      { kind: "text", value: "PAYG, Builder, Scale, Enterprise" },
+      { kind: "text", value: "Simple pay as you go" },
       { kind: "text", value: "Monthly bundles" },
       { kind: "text", value: "Usage commitments" },
       { kind: "text", value: "Your own budget" },

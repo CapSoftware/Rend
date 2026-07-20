@@ -29,8 +29,9 @@ AUTUMN_API_URL=https://api.useautumn.com/v1 \
 bun run launch:gate -- --mode sandbox
 ```
 
-Sandbox mode verifies the required V1 plan IDs, the eight resolution-tiered
-feature IDs, and the Rend organization UUID to Autumn `customer_id` mapping.
+Sandbox mode verifies the pay-as-you-go plan, the delivery and storage feature
+IDs, their per-minute rates, and the Rend organization UUID to Autumn
+`customer_id` mapping.
 
 Production-check mode validates real production env/config without mutating live
 billing:
@@ -127,8 +128,8 @@ Common failures:
   the same OTP route directly. The default diagnostics mode is non-mutating;
   the probe sends one real OTP request and redacts emails, keys, cookies,
   headers, and OTP/code values from artifacts.
-- `autumn-catalog`: run the sandbox setup helper or fix the configured plan,
-  usage-credit feature, and meter feature IDs before re-running the gate.
+- `autumn-catalog`: run the sandbox setup helper or fix the pay-as-you-go plan
+  and its two meter feature IDs before re-running the gate.
 - `autumn-catalog-parity`: make production match the verified sandbox catalog in
   Autumn. Do not copy customers/subscriptions and do not create Stripe
   products/prices directly outside Autumn.

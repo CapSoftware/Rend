@@ -103,9 +103,9 @@ export function productOfferLd() {
       "@type": "AggregateOffer",
       priceCurrency: "USD",
       lowPrice: "0",
-      offerCount: 4,
+      offerCount: 1,
       description:
-        "Pay as you go from $0, or pick a plan with monthly credits. Delivery and storage are priced by resolution and encoding is always included.",
+        "Pay as you go with no base fee. Delivery is $0.001 per watched minute and storage is $0.003 per stored minute per month. Encoding is included.",
     },
   };
 }

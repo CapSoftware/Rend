@@ -6,7 +6,7 @@ import type { DashboardAccessContext } from "./dashboard-auth.ts";
 
 const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
-const DEFAULT_INTERNAL_DRY_RUN_PLAN_ID = "internal_production_dry_run";
+const DEFAULT_PAYG_PLAN_ID = "pay_as_you_go";
 const AUTUMN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 // Hosted billing redirects leave a POST route; 303 makes the browser load Stripe with GET.
 export const BILLING_EXTERNAL_REDIRECT_STATUS = 303;
@@ -103,14 +103,8 @@ export function billingMode(): BillingMode {
 
 export function billingFeatureIds() {
   return {
-    delivery720p: envString("REND_BILLING_FEATURE_DELIVERY_720P", "delivery_720p_seconds"),
-    delivery1080p: envString("REND_BILLING_FEATURE_DELIVERY_1080P", "delivery_1080p_seconds"),
-    delivery2k: envString("REND_BILLING_FEATURE_DELIVERY_2K", "delivery_2k_seconds"),
-    delivery4k: envString("REND_BILLING_FEATURE_DELIVERY_4K", "delivery_4k_seconds"),
-    storage720p: envString("REND_BILLING_FEATURE_STORAGE_720P", "storage_720p_second_months"),
-    storage1080p: envString("REND_BILLING_FEATURE_STORAGE_1080P", "storage_1080p_second_months"),
-    storage2k: envString("REND_BILLING_FEATURE_STORAGE_2K", "storage_2k_second_months"),
-    storage4k: envString("REND_BILLING_FEATURE_STORAGE_4K", "storage_4k_second_months"),
+    delivery: envString("REND_BILLING_FEATURE_DELIVERY", "delivery_seconds"),
+    storage: envString("REND_BILLING_FEATURE_STORAGE", "storage_second_months"),
   };
 }
 
@@ -498,22 +492,11 @@ function normalizePlan(raw: unknown): BillingPlan | null {
   };
 }
 
-function hiddenPlanIds() {
-  return new Set(
-    [
-      envString("REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID", DEFAULT_INTERNAL_DRY_RUN_PLAN_ID),
-      ...envString("REND_AUTUMN_HIDDEN_PLAN_IDS").split(","),
-    ]
-      .map((id) => id.trim())
-      .filter(Boolean)
-  );
-}
-
 function isCustomerFacingPlan(raw: JsonRecord) {
   const id = safeString(raw.id);
   if (!id) return false;
   if (raw.archived === true || raw.add_on === true || raw.addOn === true) return false;
-  return !hiddenPlanIds().has(id);
+  return id === envString("REND_AUTUMN_PLAN_PAYG_ID", DEFAULT_PAYG_PLAN_ID);
 }
 
 export function normalizeBillingPlans(value: unknown) {
@@ -525,29 +508,22 @@ export function normalizeBillingPlans(value: unknown) {
 }
 
 async function localUsage(context: DashboardAccessContext) {
-  const result = await getSitePgPool().query<{
-    resolution_tier: string;
-    stored_seconds: string | null;
-  }>(
+  const result = await getSitePgPool().query<{ stored_seconds: string | null }>(
     `
-      SELECT asset.max_resolution_tier AS resolution_tier,
-             COALESCE(sum(asset.duration_ms::double precision / 1000.0), 0)::text AS stored_seconds
+      SELECT COALESCE(sum(asset.duration_ms::double precision / 1000.0), 0)::text AS stored_seconds
       FROM rend.assets asset
       WHERE asset.organization_id = $1::uuid
         AND asset.deleted_at IS NULL
         AND asset.duration_ms IS NOT NULL
         AND asset.max_resolution_tier IN ('720p', '1080p', '2k', '4k')
-      GROUP BY asset.max_resolution_tier
     `,
     [context.organizationId]
   );
-  return Object.fromEntries(
-    result.rows.map((row) => [row.resolution_tier, Number(row.stored_seconds ?? 0)])
-  ) as Record<string, number>;
+  return Number(result.rows[0]?.stored_seconds ?? 0);
 }
 
 async function localBillingOverview(context: DashboardAccessContext): Promise<BillingOverview> {
-  const usage = await localUsage(context).catch(() => ({} as Record<string, number>));
+  const storedSeconds = await localUsage(context).catch(() => 0);
   const features = billingFeatureIds();
   await writeBillingCustomerSync(context.organizationId, {
     mode: "local",
@@ -563,43 +539,13 @@ async function localBillingOverview(context: DashboardAccessContext): Promise<Bi
     subscriptions: [{ planId: "local", status: "active" }],
     balances: [
       {
-        featureId: features.delivery720p,
+        featureId: features.delivery,
         usage: 0,
         unlimited: true,
       },
       {
-        featureId: features.delivery1080p,
-        usage: 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.delivery2k,
-        usage: 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.delivery4k,
-        usage: 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.storage720p,
-        usage: usage["720p"] ?? 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.storage1080p,
-        usage: usage["1080p"] ?? 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.storage2k,
-        usage: usage["2k"] ?? 0,
-        unlimited: true,
-      },
-      {
-        featureId: features.storage4k,
-        usage: usage["4k"] ?? 0,
+        featureId: features.storage,
+        usage: storedSeconds,
         unlimited: true,
       },
     ],

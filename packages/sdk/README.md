@@ -57,6 +57,6 @@ Billing and usage limits:
 
 Uploads can fail with `RendApiError` status `403` when the organization's video
 count, stored-byte allowance, or the platform storage budget has been reached.
-Public V1 usage is metered as delivery seconds and storage second-months by
-720p/1080p/2K/4K resolution tier. Treat a quota response as plan or capacity
-state, not as a retryable transport failure.
+Public V1 usage is metered as delivered watch time and stored video time. Both
+are billed per minute at the same rate for every resolution. Treat a quota
+response as plan or capacity state, not as a retryable transport failure.

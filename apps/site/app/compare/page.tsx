@@ -33,8 +33,8 @@ const breadcrumbs = [
 
 const approaches = [
   {
-    title: "Minute-billed platforms",
-    body: "These charge per minute of video plus tiers, and encoding and fast cold starts are often paid extras. They are convenient to start with, but the bill grows with your library and your traffic in ways that are hard to predict.",
+    title: "Managed video platforms",
+    body: "These often combine minute-based billing with resolution tiers, quality levels, add-ons, and volume bands. Rend keeps the same familiar units but removes those multipliers.",
   },
   {
     title: "Budget per-GB CDNs",
@@ -47,7 +47,7 @@ const approaches = [
 ];
 
 const differences = [
-  "Delivery and storage billed by resolution, not by the minute.",
+  "Two flat rates: delivered watch minutes and stored video minutes.",
   "Encoding included on every upload, not a separate charge.",
   "Generated HLS served from Tigris-backed origin by default, with the bare-metal edge path kept optional.",
   "Open source and free to self-host, the same code that runs Rend Cloud.",
@@ -77,9 +77,9 @@ export default function ComparePage() {
           title="How Rend compares"
           lede={
             <p>
-              Two prices, seconds delivered and storage kept, both by
-              resolution. Here is how that compares to the usual ways of paying
-              for video.
+              Two flat prices, one for minutes watched and one for minutes
+              stored. Here is how that compares to the usual ways of paying for
+              video.
             </p>
           }
           actions={

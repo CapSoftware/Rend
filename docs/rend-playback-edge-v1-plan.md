@@ -543,51 +543,31 @@ Rules:
 
 ## Pricing And Usage Guardrails
 
-Launch pricing should preserve margin while traffic and bitrate mix are
-unknown.
-
-Price Rend against API-first video platforms such as Mux Basic, not against
-budget per-GB CDNs. Rend can be slightly cheaper than Mux at 720p and 1080p,
-while matching Mux at 4K where Rend can serve traffic through cheap owned-edge
-or approved fallback capacity.
-
-Do not launch with an aggressively low global flat price unless real cost data
-supports it. Bunny-style per-GB providers will be cheaper on raw bandwidth; Rend
-should win on one API, one playback URL, cold-start speed, open infrastructure,
-and simpler minute-based pricing.
-
-Suggested starting point:
+Rend Cloud launches with exactly two flat usage meters:
 
 ```txt
 Delivery:
-  720p:  $0.75 / 1,000 delivered minutes
-  1080p: $0.95 / 1,000 delivered minutes
-  4K:    $3.20 / 1,000 delivered minutes in supported regions/accounts
+  $1 / 1,000 delivered minutes at every resolution
 
 Storage:
-  $2.50 / 1,000 stored minutes / month
+  $3 / 1,000 stored minutes / month at every resolution
 
 Minimum:
-  $10/month
-
-Trial:
-  small bounded self-serve trial, no unlimited free tier
+  none
 ```
 
-This intentionally sits just below Mux Basic for 720p and 1080p delivery, uses
-a simple blended storage price, and matches Mux Basic for 4K delivery instead of
-trying to undercut it before Rend has 4K traffic data.
+Delivery is viewer watch time. Storage is video duration prorated for the time
+the asset remains stored. Both are recorded precisely in seconds and presented
+to customers in minutes, so individual events are never rounded up. Encoding is
+included, and no resolution multiplier, pooled credit, bundle, or legacy plan is
+part of the public model.
 
-4K is not globally unconditional at launch:
+The rates mirror the Mux Basic public 1080p baseline while making the price the
+same at every resolution. Rend competes on one API, one playback URL,
+cold-start speed, open infrastructure, and a bill that can be calculated from
+two minute counts.
 
-- enable 4K first for US East, London, or approved customers/regions
-- keep the 4K bitrate ladder bounded
-- custom-price or disable 4K in expensive overflow regions until measured costs
-  support a flat price
-- do not include 4K in an unlimited or large free trial
-- enforce upload, storage, and asset-count guardrails before public signups
-
-This can be revised after measuring:
+Margin should be monitored using:
 
 - average delivered bitrate
 - traffic by region
@@ -596,10 +576,6 @@ This can be revised after measuring:
 - origin egress and request volume
 - storage footprint per stored minute
 - encoder CPU cost per input minute
-
-The old whitepaper price of `$0.70 / 1,000 delivered minutes at 1080p` must not
-be shown as launch pricing unless real region, bitrate, and edge-utilization
-data supports it.
 
 Tigris should be the default V1 origin because zero egress fees protect the
 launch pricing model from cache-miss and warming surprises. If Tigris Range GET
@@ -959,14 +935,14 @@ but do not force all of it into V1.
 Reason: The long-term plan contains useful direction, but V1 needs a narrower
 public launch scope.
 
-### DEC-007: Price Against Mux Basic, Not Raw CDN Bandwidth
+### DEC-007: Use Two Flat Minute-Based Meters
 
-Decision: Use slightly-below-Mux launch pricing for 720p and 1080p, match Mux
-for 4K in supported regions/accounts, and keep a simple blended storage meter.
+Decision: Charge `$0.001` per delivered watch minute and `$0.003` per stored
+minute per month, with the same rates at every resolution and no monthly
+minimum.
 
-Reason: This keeps Rend competitive with the API-first platform customers will
-compare it against while avoiding an unproven global flat price that competes
-with per-GB CDNs on their strongest axis.
+Reason: These rates match the Mux Basic public 1080p baseline while giving Rend
+a simpler model customers can calculate directly from two minute counts.
 
 ### DEC-008: Use ClickHouse For Raw Edge Request Telemetry In V1
 
