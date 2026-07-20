@@ -25,7 +25,7 @@ const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const DEFAULT_PUBLIC_API_BASE_URL = "https://api.rend.so";
 const DEFAULT_PUBLIC_SITE_BASE_URL = "https://rend.so";
-const DEFAULT_INTERNAL_TEST_PLAN_ID = "internal_production_dry_run";
+const DEFAULT_PLAN_ID = "pay_as_you_go";
 const DEFAULT_FIXTURE_PATH = ".rend/launch/fixtures/production-sdk-e2e.mp4";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_INTERVAL_MS = 2_000;
@@ -59,9 +59,8 @@ Options:
       Public Rend site URL. Defaults to REND_PUBLIC_SITE_BASE_URL, BETTER_AUTH_URL,
       or https://rend.so.
   --plan-id PLAN
-      Autumn internal test plan to attach. Defaults to
-      REND_AUTUMN_INTERNAL_SDK_E2E_PLAN_ID, REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID,
-      or ${DEFAULT_INTERNAL_TEST_PLAN_ID}.
+      Autumn plan to attach. Defaults to pay_as_you_go and is enabled without
+      creating billing changes.
   --fixture FILE
       Small synthetic fixture path. Generated when missing.
   --email-domain DOMAIN
@@ -96,7 +95,7 @@ function parseArgs(argv) {
     envFile: process.env.REND_PRODUCTION_SDK_E2E_ENV_FILE || ".env.production.local",
     apiBaseUrl: process.env.REND_PUBLIC_API_BASE_URL || process.env.REND_PRODUCTION_SDK_E2E_API_BASE_URL || "",
     siteBaseUrl: process.env.REND_PUBLIC_SITE_BASE_URL || process.env.REND_PRODUCTION_SDK_E2E_SITE_BASE_URL || "",
-    planId: process.env.REND_AUTUMN_INTERNAL_SDK_E2E_PLAN_ID || process.env.REND_AUTUMN_INTERNAL_DRY_RUN_PLAN_ID || DEFAULT_INTERNAL_TEST_PLAN_ID,
+    planId: process.env.REND_PRODUCTION_SDK_E2E_PLAN_ID || DEFAULT_PLAN_ID,
     fixture: process.env.REND_PRODUCTION_SDK_E2E_FIXTURE || DEFAULT_FIXTURE_PATH,
     emailDomain: process.env.REND_PRODUCTION_SDK_E2E_EMAIL_DOMAIN || DEFAULT_EMAIL_DOMAIN,
     otpCommand: process.env.REND_PRODUCTION_SDK_E2E_OTP_COMMAND || "",
@@ -883,6 +882,9 @@ async function autumnAttachPlan(context, customerId, planId) {
     return await autumnPost(context, "billing.attach", {
       customer_id: customerId,
       plan_id: planId,
+      redirect_mode: "never",
+      no_billing_changes: true,
+      enable_plan_immediately: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -918,20 +920,22 @@ function firstUrlSummary(value) {
 }
 
 function tierFeatureIds(env, prefix) {
+  const id = envString(env, `REND_BILLING_FEATURE_${prefix}`, `${prefix.toLowerCase()}_seconds`);
   return {
-    "720p": envString(env, `REND_BILLING_FEATURE_${prefix}_720P`, `${prefix.toLowerCase()}_720p_seconds`),
-    "1080p": envString(env, `REND_BILLING_FEATURE_${prefix}_1080P`, `${prefix.toLowerCase()}_1080p_seconds`),
-    "2k": envString(env, `REND_BILLING_FEATURE_${prefix}_2K`, `${prefix.toLowerCase()}_2k_seconds`),
-    "4k": envString(env, `REND_BILLING_FEATURE_${prefix}_4K`, `${prefix.toLowerCase()}_4k_seconds`),
+    "720p": id,
+    "1080p": id,
+    "2k": id,
+    "4k": id,
   };
 }
 
 function storageTierFeatureIds(env) {
+  const id = envString(env, "REND_BILLING_FEATURE_STORAGE", "storage_second_months");
   return {
-    "720p": envString(env, "REND_BILLING_FEATURE_STORAGE_720P", "storage_720p_second_months"),
-    "1080p": envString(env, "REND_BILLING_FEATURE_STORAGE_1080P", "storage_1080p_second_months"),
-    "2k": envString(env, "REND_BILLING_FEATURE_STORAGE_2K", "storage_2k_second_months"),
-    "4k": envString(env, "REND_BILLING_FEATURE_STORAGE_4K", "storage_4k_second_months"),
+    "720p": id,
+    "1080p": id,
+    "2k": id,
+    "4k": id,
   };
 }
 
@@ -2201,7 +2205,7 @@ async function main() {
       real_billing_acknowledged: args.acknowledgeRealBilling,
       autumn_key_mode: classifyAutumnKey(context.autumn.secretKey),
       autumn_key_fingerprint: keyFingerprint(context.autumn.secretKey),
-      internal_test_plan_id: args.planId,
+      verification_plan_id: args.planId,
     }));
 
     await runStep(context, "public-api-health", "public API release health", async () => {
@@ -2265,7 +2269,7 @@ async function main() {
       return result;
     });
 
-    await runStep(context, "autumn-customer-plan", "Autumn internal test customer and plan", async () => {
+    await runStep(context, "autumn-customer-plan", "Autumn verification customer and plan", async () => {
       await autumnPost(context, "customers.get_or_create", {
         customer_id: context.organizationId,
         name: context.organizationName,
@@ -2421,7 +2425,7 @@ async function main() {
       organization_name: context.organizationName || null,
       organization_slug: context.organizationSlug || null,
       plan_id: args.planId,
-      internal_test_customer: true,
+      verification_customer: true,
       true_self_serve_otp: true,
       operator_fallback_disabled: true,
       operator_safe_fallback: context.operatorSafeProvisioning,

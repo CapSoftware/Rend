@@ -129,14 +129,8 @@ function integer(value: string | null | undefined) {
 function featureInfoMap() {
   const features = billingFeatureIds();
   return new Map<string, FeatureInfo>([
-    [features.delivery720p, { kind: "delivery", label: "Delivery 720p", tierLabel: "720p", sort: 10 }],
-    [features.delivery1080p, { kind: "delivery", label: "Delivery 1080p", tierLabel: "1080p", sort: 20 }],
-    [features.delivery2k, { kind: "delivery", label: "Delivery 2K", tierLabel: "2K", sort: 30 }],
-    [features.delivery4k, { kind: "delivery", label: "Delivery 4K", tierLabel: "4K", sort: 40 }],
-    [features.storage720p, { kind: "storage", label: "Storage 720p", tierLabel: "720p", sort: 110 }],
-    [features.storage1080p, { kind: "storage", label: "Storage 1080p", tierLabel: "1080p", sort: 120 }],
-    [features.storage2k, { kind: "storage", label: "Storage 2K", tierLabel: "2K", sort: 130 }],
-    [features.storage4k, { kind: "storage", label: "Storage 4K", tierLabel: "4K", sort: 140 }],
+    [features.delivery, { kind: "delivery", label: "Delivery", tierLabel: "All video", sort: 10 }],
+    [features.storage, { kind: "storage", label: "Storage", tierLabel: "All video", sort: 20 }],
   ]);
 }
 

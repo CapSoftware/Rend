@@ -69,11 +69,11 @@ export const features: Feature[] = [
   {
     id: "simple-pricing",
     title: "Simple pricing",
-    body: "You pay for what's delivered and what's stored, priced by resolution. Encoding is included, with no per-minute fees and no surprise egress charges.",
+    body: "You pay for delivered watch minutes and stored video minutes. Encoding is included, with no base fee, resolution multiplier, or egress charge.",
     detail: [
-      "Delivery is billed per second streamed, by resolution from 720p to 4K.",
-      "Storage is billed per second-month you keep an asset, by the same resolution tiers.",
-      "Encoding is included on every upload, with no per-minute fees and no egress surprises.",
+      "Delivery is $0.001 for each minute viewers watch.",
+      "Storage is $0.003 for each minute of video stored for a month.",
+      "Encoding is included on every upload, and every resolution costs the same.",
     ],
     icon: (
       <svg

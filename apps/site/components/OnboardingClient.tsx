@@ -269,8 +269,8 @@ export default function OnboardingClient({
               <div className="mt-3 flex flex-col">
                 <h1 className={headingClass}>Choose your plan</h1>
                 <p className={leadClass}>
-                  Start on pay as you go, or pick a plan with monthly credits included. Switch anytime,
-                  with no lock-in.
+                  Pay only for delivered watch minutes and stored video minutes, with no base fee or
+                  lock-in.
                 </p>
 
                 <div className="mt-6 flex flex-col gap-3">

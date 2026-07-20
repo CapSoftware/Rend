@@ -21,6 +21,7 @@ import {
 import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
 import { LEGAL_ASSENT_VERSION } from "../../../lib/legal-assent-constants.ts";
+import { getPublicPricing, type PublicPricing } from "../../../lib/pricing.ts";
 import BillingPlansClient from "@/components/BillingPlansClient";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
@@ -50,12 +51,11 @@ export const metadata: Metadata = {
   },
 };
 
-const USAGE_CREDITS_FEATURE_ID = (process.env.REND_BILLING_FEATURE_USAGE_CREDITS || "rend_usage_credits").trim();
 const BILLING_OVERVIEW_CACHE_TTL_MS = 60_000;
 const DELIVERY_USAGE_HELP =
-  "Delivery is viewer playback time. Seconds are counted when video is delivered to viewers.";
+  "Delivery is viewer watch time. Usage is measured precisely, then shown and billed in minutes.";
 const STORAGE_USAGE_HELP =
-  "Storage is video duration prorated by how long it was stored. One second-mo equals one second of video stored for one month.";
+  "Storage is video duration prorated by time stored. Sixty minutes kept for half a month counts as 30 stored minutes.";
 
 type BillingPageProps = {
   searchParams?: Promise<{
@@ -112,16 +112,10 @@ function formatPreciseNumber(value: number | undefined, maximumFractionDigits = 
   }).format(value);
 }
 
-function formatBalanceQuantity(value: number | undefined) {
-  if (value === undefined || !Number.isFinite(value)) return "-";
-  const maximumFractionDigits = Number.isInteger(value) ? 0 : Math.abs(value) < 1 ? 6 : 3;
-  return formatPreciseNumber(value, maximumFractionDigits);
-}
-
 function formatUsageValue(value: number | undefined, kind: BillingUsageKind) {
   if (value === undefined || !Number.isFinite(value)) return "-";
-  if (kind === "delivery") return `${formatPreciseNumber(value, 3)} s`;
-  if (kind === "storage") return `${formatPreciseNumber(value, 6)} second-mo`;
+  if (kind === "delivery") return `${formatPreciseNumber(value / 60, 2)} min`;
+  if (kind === "storage") return `${formatPreciseNumber(value / 60, 2)} stored min`;
   return `${formatPreciseNumber(value, 3)} units`;
 }
 
@@ -130,9 +124,18 @@ function formatUsageExplanation(value: number | undefined, kind: "delivery" | "s
     return kind === "delivery" ? DELIVERY_USAGE_HELP : STORAGE_USAGE_HELP;
   }
   if (kind === "delivery") {
-    return `${DELIVERY_USAGE_HELP} This total is ${formatPreciseNumber(value, 3)} seconds delivered.`;
+    return `${DELIVERY_USAGE_HELP} This total is ${formatPreciseNumber(value / 60, 2)} delivered minutes.`;
   }
-  return `${STORAGE_USAGE_HELP} This total is equivalent to ${formatPreciseNumber(value, 2)} seconds stored for one month.`;
+  return `${STORAGE_USAGE_HELP} This total is ${formatPreciseNumber(value / 60, 2)} stored minutes after proration.`;
+}
+
+function formatEstimatedCost(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function formatDate(value: string | undefined) {
@@ -218,14 +221,8 @@ function UsageLabel({
 function groupUsage(balances: BillingBalance[]) {
   const features = billingFeatureIds();
   const order: [string, "delivery" | "storage"][] = [
-    [features.delivery720p, "delivery"],
-    [features.delivery1080p, "delivery"],
-    [features.delivery2k, "delivery"],
-    [features.delivery4k, "delivery"],
-    [features.storage720p, "storage"],
-    [features.storage1080p, "storage"],
-    [features.storage2k, "storage"],
-    [features.storage4k, "storage"],
+    [features.delivery, "delivery"],
+    [features.storage, "storage"],
   ];
   const byId = new Map(balances.map((balance) => [balance.featureId, balance]));
   const used = new Set<string>();
@@ -265,23 +262,6 @@ function usedValue(balance: BillingBalance) {
   return undefined;
 }
 
-function displayBalanceValue(balance: BillingBalance) {
-  if (balance.remaining !== undefined && balance.granted !== undefined && !balance.unlimited) {
-    if (balance.granted <= 0 && balance.overageAllowed) {
-      const used = usedValue(balance);
-      return used !== undefined && used > 0
-        ? `${formatBalanceQuantity(used)} used beyond included credits`
-        : "Pay-as-you-go with no included credit balance";
-    }
-    return `${formatBalanceQuantity(balance.remaining)} left of ${formatBalanceQuantity(balance.granted)}`;
-  }
-  const used = usedValue(balance);
-  if (balance.unlimited) {
-    return used !== undefined && used > 0 ? `${formatBalanceQuantity(used)} used` : "Unlimited";
-  }
-  return used === undefined ? "-" : `${formatBalanceQuantity(used)} used`;
-}
-
 function meterFor(balance: BillingBalance) {
   const granted = balance.granted;
   const hasMeter = !balance.unlimited && granted !== undefined && granted > 0;
@@ -302,10 +282,10 @@ function Meter({ balance, className }: { balance: BillingBalance; className?: st
   );
 }
 
-function UsageRowLine({ row, exact = false }: { row: UsageRow; exact?: boolean }) {
+function UsageRowLine({ row }: { row: UsageRow }) {
   const { exhausted } = meterFor(row.balance);
   const used = usedValue(row.balance);
-  const value = exact ? formatUsageValue(used, row.kind) : displayBalanceValue(row.balance);
+  const value = formatUsageValue(used, row.kind);
   const reset = formatDate(row.balance.nextResetAt);
   return (
     <div className="border-b border-line-soft py-3 first:pt-0 last:border-0 last:pb-0">
@@ -330,7 +310,6 @@ function UsageGroup({
   title,
   caption,
   rows,
-  exact = false,
   className,
   info,
   infoId,
@@ -338,7 +317,6 @@ function UsageGroup({
   title: string;
   caption: string;
   rows: UsageRow[];
-  exact?: boolean;
   className?: string;
   info?: ReactNode;
   infoId?: string;
@@ -353,7 +331,7 @@ function UsageGroup({
       <p className="mt-1.5 text-[12.5px] text-muted">{caption}</p>
       <div className="mt-4 flex flex-col">
         {rows.map((row) => (
-          <UsageRowLine key={row.featureId} row={row} exact={exact} />
+          <UsageRowLine key={row.featureId} row={row} />
         ))}
       </div>
     </div>
@@ -448,21 +426,26 @@ function planNote(billing: BillingOverview) {
 
 function CurrentPlanPanel({
   billing,
-  credits,
+  usage,
+  pricing,
   healthy,
   statusLabel,
 }: {
   billing: BillingOverview;
-  credits?: BillingBalance;
+  usage: ReturnType<typeof groupUsage>;
+  pricing: PublicPricing;
   healthy: boolean;
   statusLabel: string;
 }) {
   const activePlan = billing.plans.find((plan) => plan.relationshipStatus === "active");
   const currentPlanName = activePlan?.name ?? billing.currentPlanLabel;
-  const creditUsed = credits ? usedValue(credits) : undefined;
-  const payAsYouGoCredits = Boolean(
-    credits && !credits.unlimited && credits.overageAllowed && (credits.granted ?? 0) <= 0,
-  );
+  const deliverySeconds = usage.delivery.reduce((total, row) => total + (usedValue(row.balance) ?? 0), 0);
+  const storageSecondMonths = usage.storage.reduce((total, row) => total + (usedValue(row.balance) ?? 0), 0);
+  const deliveryMinutes = deliverySeconds / 60;
+  const storageMinutes = storageSecondMonths / 60;
+  const estimatedCost =
+    deliveryMinutes * pricing.calculator.deliveryPerMinute +
+    storageMinutes * pricing.calculator.storagePerMinuteMonth;
 
   return (
     <section className="animate-rise rounded-[18px] border border-line bg-card p-6 sm:p-7">
@@ -479,22 +462,15 @@ function CurrentPlanPanel({
           <p className="mt-3 max-w-[460px] text-[13.5px] leading-[1.55] text-muted">{planNote(billing)}</p>
         </div>
 
-        {credits ? (
-          <div className="rounded-2xl border border-line-soft bg-bg-sunken/40 p-5 md:w-[300px] md:shrink-0">
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="text-[13px] text-ink">Usage credits</span>
-              <span className="font-head text-[18px] leading-none text-ink">
-                {credits.unlimited
-                  ? "Unlimited"
-                  : payAsYouGoCredits
-                    ? `${formatBalanceQuantity(creditUsed)} used`
-                    : formatBalanceQuantity(credits.remaining ?? creditUsed)}
-              </span>
-            </div>
-            <Meter balance={credits} className="mt-3.5" />
-            <p className="mt-3 text-[12px] text-muted">{displayBalanceValue(credits)}</p>
-          </div>
-        ) : null}
+        <div className="rounded-2xl border border-line-soft bg-bg-sunken/40 p-5 md:w-[320px] md:shrink-0">
+          <p className="text-[13px] text-muted">Estimated this cycle</p>
+          <p className="mt-2 font-head text-[30px] leading-none text-ink tabular-nums">
+            {formatEstimatedCost(estimatedCost)}
+          </p>
+          <p className="mt-3 text-[12px] leading-[1.5] text-muted">
+            {formatPreciseNumber(deliveryMinutes, 2)} delivered min + {formatPreciseNumber(storageMinutes, 2)} stored min
+          </p>
+        </div>
       </div>
     </section>
   );
@@ -502,27 +478,33 @@ function CurrentPlanPanel({
 
 function OverviewTab({
   billing,
-  credits,
   usage,
+  pricing,
   hasBreakdown,
   healthy,
   statusLabel,
 }: {
   billing: BillingOverview;
-  credits?: BillingBalance;
   usage: ReturnType<typeof groupUsage>;
+  pricing: PublicPricing;
   hasBreakdown: boolean;
   healthy: boolean;
   statusLabel: string;
 }) {
   return (
     <div className="flex flex-col gap-7">
-      <CurrentPlanPanel billing={billing} credits={credits} healthy={healthy} statusLabel={statusLabel} />
+      <CurrentPlanPanel
+        billing={billing}
+        usage={usage}
+        pricing={pricing}
+        healthy={healthy}
+        statusLabel={statusLabel}
+      />
 
       {hasBreakdown ? (
         <Panel
           title="Usage at a glance"
-          description="Current provider balances by configured resolution meter."
+          description="Current delivered and stored minutes reported by the billing provider."
           bodyClassName="p-6 sm:p-7"
         >
           {usage.delivery.length > 0 || usage.storage.length > 0 ? (
@@ -530,7 +512,7 @@ function OverviewTab({
               {usage.delivery.length > 0 ? (
                 <UsageGroup
                   title="Delivery"
-                  caption="Seconds delivered to viewers"
+                  caption="Minutes delivered to viewers"
                   rows={usage.delivery}
                   info={DELIVERY_USAGE_HELP}
                   infoId="overview-delivery-usage-info"
@@ -539,7 +521,7 @@ function OverviewTab({
               {usage.storage.length > 0 ? (
                 <UsageGroup
                   title="Storage"
-                  caption="Second-months kept in your library"
+                  caption="Prorated minutes kept in your library"
                   rows={usage.storage}
                   info={STORAGE_USAGE_HELP}
                   infoId="overview-storage-usage-info"
@@ -575,21 +557,14 @@ function UsageStatus({ status, billable }: { status: string; billable: boolean }
   return <StatusBadge tone={tone}>{status}</StatusBadge>;
 }
 
-function ProviderBalanceEmptyState({ credits }: { credits?: BillingBalance }) {
-  const creditUsed = credits ? usedValue(credits) : undefined;
-  const creditUsageText =
-    creditUsed !== undefined && creditUsed > 0
-      ? ` Autumn reports ${formatBalanceQuantity(creditUsed)} ${USAGE_CREDITS_FEATURE_ID} used this period.`
-      : "";
-
+function ProviderBalanceEmptyState() {
   return (
     <div className="rounded-xl border border-line-soft bg-bg-sunken/40 p-5">
       <p className="text-[13.5px] leading-[1.55] text-ink">
-        Autumn is not returning separate delivery or storage balance rows for this account.
+        The billing provider has not returned delivery or storage usage for this account yet.
       </p>
       <p className="mt-2 text-[13px] leading-[1.55] text-muted">
-        Detailed usage is still being tracked in the ledger below. This plan bills usage through the pooled{" "}
-        {USAGE_CREDITS_FEATURE_ID} credit balance instead of per-meter balances.{creditUsageText}
+        New usage appears here after the next billing sync. The detailed Rend ledger remains available below.
       </p>
     </div>
   );
@@ -598,13 +573,11 @@ function ProviderBalanceEmptyState({ credits }: { credits?: BillingBalance }) {
 function UsageTab({
   details,
   usage,
-  credits,
   hasBreakdown,
   range,
 }: {
   details: BillingUsageDetails;
   usage: ReturnType<typeof groupUsage>;
-  credits?: BillingBalance;
   hasBreakdown: boolean;
   range: BillingUsageRange;
 }) {
@@ -680,9 +653,8 @@ function UsageTab({
                 {usage.delivery.length > 0 ? (
                   <UsageGroup
                     title="Delivery"
-                    caption="Seconds delivered this billing period"
+                    caption="Minutes delivered this billing period"
                     rows={usage.delivery}
-                    exact
                     info={DELIVERY_USAGE_HELP}
                     infoId="provider-delivery-usage-info"
                   />
@@ -690,9 +662,8 @@ function UsageTab({
                 {usage.storage.length > 0 ? (
                   <UsageGroup
                     title="Storage"
-                    caption="Second-months stored this billing period"
+                    caption="Prorated stored minutes this billing period"
                     rows={usage.storage}
-                    exact
                     info={STORAGE_USAGE_HELP}
                     infoId="provider-storage-usage-info"
                     className="sm:border-l sm:border-line-soft sm:pl-12"
@@ -705,13 +676,12 @@ function UsageTab({
                 title="Other"
                 caption="Other metered features on your plan"
                 rows={usage.other}
-                exact
                 className={usage.delivery.length > 0 || usage.storage.length > 0 ? "mt-8 border-t border-line-soft pt-8" : undefined}
               />
             ) : null}
           </>
         ) : (
-          <ProviderBalanceEmptyState credits={credits} />
+          <ProviderBalanceEmptyState />
         )}
       </Panel>
 
@@ -802,7 +772,7 @@ function PlansTab({ billing, returnUrl }: { billing: BillingOverview; returnUrl:
       <div>
         <h2 className="font-head text-[20px] leading-none text-ink">Plans</h2>
         <p className="mt-2 text-[13px] text-muted">
-          Start on pay as you go, or pick a plan with monthly credits included. Move between plans whenever you like, with no lock-in.
+          Pay as you go has no monthly fee. Delivery and storage are billed directly by the minute.
         </p>
       </div>
       {billing.plans.length === 0 ? (
@@ -827,17 +797,17 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
   const activeTab = normalizeBillingTab(params.tab);
   const range = normalizeBillingUsageRange(params.range);
   const billingActionError = billingActionErrorMessage(firstParam(params.billing_error));
-  const [billing, usageDetails] = await Promise.all([
+  const [billing, usageDetails, pricing] = await Promise.all([
     billingOverview(access, {
       cacheTtlMs: activeTab === "usage" ? BILLING_OVERVIEW_CACHE_TTL_MS : 0,
     }),
     activeTab === "usage" ? billingUsageDetails(access, range) : Promise.resolve(null),
+    getPublicPricing(),
   ]);
   const dashboardState = dashboardStateFromBilling(billingReadinessFromOverview(billing));
   const returnUrl = billingTabHref(activeTab, range);
 
-  const credits = billing.balances.find((balance) => balance.featureId === USAGE_CREDITS_FEATURE_ID);
-  const usage = groupUsage(billing.balances.filter((balance) => balance.featureId !== USAGE_CREDITS_FEATURE_ID));
+  const usage = groupUsage(billing.balances);
   const hasBreakdown = usage.delivery.length > 0 || usage.storage.length > 0 || usage.other.length > 0;
   const healthy = billing.status === "ok";
   const statusLabel = !healthy ? "Sync issue" : billing.mode === "local" ? "Local mode" : "Active";
@@ -878,8 +848,8 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
         {activeTab === "overview" ? (
           <OverviewTab
             billing={billing}
-            credits={credits}
             usage={usage}
+            pricing={pricing}
             hasBreakdown={hasBreakdown}
             healthy={healthy}
             statusLabel={statusLabel}
@@ -887,7 +857,7 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
         ) : null}
 
         {activeTab === "usage" && usageDetails ? (
-          <UsageTab details={usageDetails} usage={usage} credits={credits} hasBreakdown={hasBreakdown} range={range} />
+          <UsageTab details={usageDetails} usage={usage} hasBreakdown={hasBreakdown} range={range} />
         ) : null}
 
         {activeTab === "plans" ? <PlansTab billing={billing} returnUrl={returnUrl} /> : null}

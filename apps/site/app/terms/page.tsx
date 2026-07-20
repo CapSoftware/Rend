@@ -480,19 +480,16 @@ const termsSections: TermsSection[] = [
     body: (
       <>
         <p>
-          Hosted Rend may offer free, pay-as-you-go, subscription, usage-based,
-          committed-use, or enterprise plans. Fees, credits, included usage,
-          overages, and limits are described in the dashboard, pricing page,
-          order form, invoice, or other written agreement that applies to your
-          account. Unless stated otherwise, fees are non-refundable and
-          exclusive of taxes.
+          Hosted Rend offers usage-based, pay-as-you-go billing. Fees and limits
+          are described in the dashboard, pricing page, order form, invoice, or
+          other written agreement that applies to your account. Unless stated
+          otherwise, fees are non-refundable and exclusive of taxes.
         </p>
         <p>
-          Rend billing may measure delivery, storage, or other usage by video
-          duration, resolution tier, active asset duration, requests, bytes,
-          regions, seats, or other units described for your plan. Encoding may
-          be included or separately priced depending on the applicable plan or
-          order. You authorize us and our payment processors to charge your
+          Rend billing measures viewer watch minutes and stored video minutes.
+          Storage is prorated for the time each asset remains stored. Encoding
+          is included, and the same rates apply to every video resolution. You
+          authorize us and our payment processors to charge your
           payment method for all applicable fees, taxes, renewals, overages, and
           late amounts. If you believe an invoice or charge is wrong, you must
           notify us within 30 days after the invoice or charge date so we can

@@ -25,14 +25,8 @@ const DEFAULT_STORAGE_SYNC_MAX_WINDOW_SECS: u64 = 3600;
 const DELIVERY_SYNC_THROTTLE_SECS: u64 = 60;
 const SECONDS_PER_BILLING_MONTH: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 
-const DEFAULT_DELIVERY_720P_FEATURE_ID: &str = "delivery_720p_seconds";
-const DEFAULT_DELIVERY_1080P_FEATURE_ID: &str = "delivery_1080p_seconds";
-const DEFAULT_DELIVERY_2K_FEATURE_ID: &str = "delivery_2k_seconds";
-const DEFAULT_DELIVERY_4K_FEATURE_ID: &str = "delivery_4k_seconds";
-const DEFAULT_STORAGE_720P_FEATURE_ID: &str = "storage_720p_second_months";
-const DEFAULT_STORAGE_1080P_FEATURE_ID: &str = "storage_1080p_second_months";
-const DEFAULT_STORAGE_2K_FEATURE_ID: &str = "storage_2k_second_months";
-const DEFAULT_STORAGE_4K_FEATURE_ID: &str = "storage_4k_second_months";
+const DEFAULT_DELIVERY_FEATURE_ID: &str = "delivery_seconds";
+const DEFAULT_STORAGE_FEATURE_ID: &str = "storage_second_months";
 
 static LAST_DELIVERY_SYNC_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
@@ -53,14 +47,6 @@ struct BillingFeature {
     id: String,
 }
 
-#[derive(Clone, Debug)]
-struct TieredBillingFeatures {
-    p720: BillingFeature,
-    p1080: BillingFeature,
-    p2k: BillingFeature,
-    p4k: BillingFeature,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolutionTier {
     P720,
@@ -76,8 +62,8 @@ pub(crate) struct BillingConfig {
     autumn_secret_key: String,
     autumn_api_version: String,
     failure_policy: BillingFailurePolicy,
-    delivery_features: TieredBillingFeatures,
-    storage_features: TieredBillingFeatures,
+    delivery_feature: BillingFeature,
+    storage_feature: BillingFeature,
     delivery_sync_lag: Duration,
     delivery_sync_max_window: Duration,
     storage_sync_lag: Duration,
@@ -173,24 +159,14 @@ impl BillingConfig {
             autumn_secret_key,
             autumn_api_version,
             failure_policy: failure_policy_from_env(rend_env)?,
-            delivery_features: TieredBillingFeatures::from_env(
+            delivery_feature: BillingFeature::new(env_string(
                 "REND_BILLING_FEATURE_DELIVERY",
-                [
-                    DEFAULT_DELIVERY_720P_FEATURE_ID,
-                    DEFAULT_DELIVERY_1080P_FEATURE_ID,
-                    DEFAULT_DELIVERY_2K_FEATURE_ID,
-                    DEFAULT_DELIVERY_4K_FEATURE_ID,
-                ],
-            )?,
-            storage_features: TieredBillingFeatures::from_env(
+                DEFAULT_DELIVERY_FEATURE_ID,
+            ))?,
+            storage_feature: BillingFeature::new(env_string(
                 "REND_BILLING_FEATURE_STORAGE",
-                [
-                    DEFAULT_STORAGE_720P_FEATURE_ID,
-                    DEFAULT_STORAGE_1080P_FEATURE_ID,
-                    DEFAULT_STORAGE_2K_FEATURE_ID,
-                    DEFAULT_STORAGE_4K_FEATURE_ID,
-                ],
-            )?,
+                DEFAULT_STORAGE_FEATURE_ID,
+            ))?,
             delivery_sync_lag: env_duration_secs(
                 "REND_BILLING_DELIVERY_SYNC_LAG_SECS",
                 DEFAULT_DELIVERY_SYNC_LAG_SECS,
@@ -233,26 +209,6 @@ impl BillingFeature {
             "billing feature ids must be 1-128 safe token characters"
         );
         Ok(Self { id })
-    }
-}
-
-impl TieredBillingFeatures {
-    fn from_env(prefix: &str, defaults: [&str; 4]) -> Result<Self> {
-        Ok(Self {
-            p720: BillingFeature::new(env_string(&format!("{prefix}_720P"), defaults[0]))?,
-            p1080: BillingFeature::new(env_string(&format!("{prefix}_1080P"), defaults[1]))?,
-            p2k: BillingFeature::new(env_string(&format!("{prefix}_2K"), defaults[2]))?,
-            p4k: BillingFeature::new(env_string(&format!("{prefix}_4K"), defaults[3]))?,
-        })
-    }
-
-    fn feature_for(&self, tier: ResolutionTier) -> &BillingFeature {
-        match tier {
-            ResolutionTier::P720 => &self.p720,
-            ResolutionTier::P1080 => &self.p1080,
-            ResolutionTier::P2K => &self.p2k,
-            ResolutionTier::P4K => &self.p4k,
-        }
     }
 }
 
@@ -407,13 +363,7 @@ pub(crate) async fn reserve_upload(
     ensure_customer(state, organization_id).await?;
 
     let gate_entry = ReservedUsage {
-        feature_id: state
-            .config
-            .billing
-            .storage_features
-            .feature_for(ResolutionTier::P720)
-            .id
-            .clone(),
+        feature_id: state.config.billing.storage_feature.id.clone(),
         value: 0.0,
         idempotency_key: format!("asset:{asset_id}:upload-gate"),
     };
@@ -607,13 +557,8 @@ async fn sync_delivery_usage(state: &AppState) -> Result<DeliverySyncSummary, Ap
                     if usage.value <= 0.0 {
                         continue;
                     }
-                    let feature = state
-                        .config
-                        .billing
-                        .delivery_features
-                        .feature_for(usage.tier);
                     let event = ReservedUsage {
-                        feature_id: feature.id.clone(),
+                        feature_id: state.config.billing.delivery_feature.id.clone(),
                         value: usage.value,
                         idempotency_key: delivery_idempotency_key(
                             &organization_id,
@@ -707,13 +652,8 @@ async fn sync_storage_usage(state: &AppState) -> Result<DeliverySyncSummary, App
                     if usage.value <= 0.0 {
                         continue;
                     }
-                    let feature = state
-                        .config
-                        .billing
-                        .storage_features
-                        .feature_for(usage.tier);
                     let event = ReservedUsage {
-                        feature_id: feature.id.clone(),
+                        feature_id: state.config.billing.storage_feature.id.clone(),
                         value: usage.value,
                         idempotency_key: storage_idempotency_key(
                             &organization_id,
@@ -1485,60 +1425,34 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_features_and_keys_cover_all_resolution_tiers() {
-        let delivery_features = TieredBillingFeatures {
-            p720: BillingFeature::new(DEFAULT_DELIVERY_720P_FEATURE_ID.to_owned()).unwrap(),
-            p1080: BillingFeature::new(DEFAULT_DELIVERY_1080P_FEATURE_ID.to_owned()).unwrap(),
-            p2k: BillingFeature::new(DEFAULT_DELIVERY_2K_FEATURE_ID.to_owned()).unwrap(),
-            p4k: BillingFeature::new(DEFAULT_DELIVERY_4K_FEATURE_ID.to_owned()).unwrap(),
-        };
-        let storage_features = TieredBillingFeatures {
-            p720: BillingFeature::new(DEFAULT_STORAGE_720P_FEATURE_ID.to_owned()).unwrap(),
-            p1080: BillingFeature::new(DEFAULT_STORAGE_1080P_FEATURE_ID.to_owned()).unwrap(),
-            p2k: BillingFeature::new(DEFAULT_STORAGE_2K_FEATURE_ID.to_owned()).unwrap(),
-            p4k: BillingFeature::new(DEFAULT_STORAGE_4K_FEATURE_ID.to_owned()).unwrap(),
-        };
+    fn aggregation_uses_two_public_meters_with_tiered_idempotency_keys() {
+        let delivery_feature = BillingFeature::new(DEFAULT_DELIVERY_FEATURE_ID.to_owned()).unwrap();
+        let storage_feature = BillingFeature::new(DEFAULT_STORAGE_FEATURE_ID.to_owned()).unwrap();
         let start = test_time("2026-06-13T12:00:00.000Z");
         let end = test_time("2026-06-13T13:00:00.000Z");
         let org_id = "00000000-0000-0000-0000-000000000001";
         let tiers = [
-            (
-                ResolutionTier::P720,
-                "delivery_720p_seconds",
-                "storage_720p_second_months",
-            ),
-            (
-                ResolutionTier::P1080,
-                "delivery_1080p_seconds",
-                "storage_1080p_second_months",
-            ),
-            (
-                ResolutionTier::P2K,
-                "delivery_2k_seconds",
-                "storage_2k_second_months",
-            ),
-            (
-                ResolutionTier::P4K,
-                "delivery_4k_seconds",
-                "storage_4k_second_months",
-            ),
+            ResolutionTier::P720,
+            ResolutionTier::P1080,
+            ResolutionTier::P2K,
+            ResolutionTier::P4K,
         ];
 
         let mut delivery_keys = std::collections::BTreeSet::new();
         let mut storage_keys = std::collections::BTreeSet::new();
-        for (tier, delivery_feature, storage_feature) in tiers {
-            assert_eq!(delivery_features.feature_for(tier).id, delivery_feature);
-            assert_eq!(storage_features.feature_for(tier).id, storage_feature);
+        for tier in tiers {
             assert!(delivery_keys.insert(delivery_idempotency_key(org_id, tier, start, end)));
             assert!(storage_keys.insert(storage_idempotency_key(org_id, tier, start, end)));
         }
 
+        assert_eq!(delivery_feature.id, "delivery_seconds");
+        assert_eq!(storage_feature.id, "storage_second_months");
         assert_eq!(delivery_keys.len(), 4);
         assert_eq!(storage_keys.len(), 4);
     }
 
     #[test]
-    fn storage_query_uses_spans_with_legacy_asset_fallback() {
+    fn storage_query_uses_spans_with_asset_fallback() {
         let query = storage_second_months_query();
 
         assert!(query.contains("rend.billing_storage_spans"));

@@ -496,15 +496,16 @@ export default function DocsPage() {
 
               <DocSection id="billing-usage" label="Billing" title="Autumn billing and usage limits">
                 <p>
-                  Hosted Rend uses Autumn as the source of truth for plans, credits, balances,
+                  Hosted Rend uses Autumn as the source of truth for the pay-as-you-go plan, usage,
                   checkout, and the billing portal. New workspaces are created on first email-OTP
                   sign-in and synced to Autumn by organization ID. API-key creation and uploads can
                   return <code>billing_required</code> or <code>limit_exceeded</code> until a plan is
                   active and within limits; upload denials happen before the source body is accepted.
                 </p>
                 <ul>
-                  <li>Customer-facing delivery usage is tracked as delivered video seconds by <code>720p</code>, <code>1080p</code>, <code>2K</code>, and <code>4K</code> tier.</li>
-                  <li>Customer-facing storage usage is tracked as active asset duration prorated into second-months by the same tiers.</li>
+                  <li>Delivery is billed at $0.001 per minute of viewer watch time.</li>
+                  <li>Storage is billed at $0.003 per stored video minute per month and prorated precisely.</li>
+                  <li>Every video resolution uses the same rates.</li>
                   <li>Upload/source bytes remain local safety limits and are not customer-facing Autumn meters.</li>
                   <li>Already-issued playback artifact URLs do not call Autumn, Postgres, or the Rend API on the playback hot path.</li>
                 </ul>

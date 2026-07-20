@@ -8,8 +8,8 @@ import {
 } from "./billing-usage.ts";
 
 const ENV_KEYS = [
-  "REND_BILLING_FEATURE_DELIVERY_720P",
-  "REND_BILLING_FEATURE_STORAGE_4K",
+  "REND_BILLING_FEATURE_DELIVERY",
+  "REND_BILLING_FEATURE_STORAGE",
 ];
 
 async function withEnv<T>(values: Record<string, string | undefined>, run: () => T | Promise<T>) {
@@ -46,21 +46,21 @@ test("billing usage range defaults to a bounded window", () => {
 test("billing usage classification follows configured feature ids", async () => {
   await withEnv(
     {
-      REND_BILLING_FEATURE_DELIVERY_720P: "custom_delivery_720_seconds",
-      REND_BILLING_FEATURE_STORAGE_4K: "custom_storage_4k_second_months",
+      REND_BILLING_FEATURE_DELIVERY: "custom_delivery_seconds",
+      REND_BILLING_FEATURE_STORAGE: "custom_storage_second_months",
     },
     () => {
-      assert.deepEqual(billingUsageFeatureInfo("custom_delivery_720_seconds"), {
+      assert.deepEqual(billingUsageFeatureInfo("custom_delivery_seconds"), {
         kind: "delivery",
-        label: "Delivery 720p",
-        tierLabel: "720p",
+        label: "Delivery",
+        tierLabel: "All video",
         sort: 10,
       });
-      assert.deepEqual(billingUsageFeatureInfo("custom_storage_4k_second_months"), {
+      assert.deepEqual(billingUsageFeatureInfo("custom_storage_second_months"), {
         kind: "storage",
-        label: "Storage 4K",
-        tierLabel: "4K",
-        sort: 140,
+        label: "Storage",
+        tierLabel: "All video",
+        sort: 20,
       });
     }
   );
