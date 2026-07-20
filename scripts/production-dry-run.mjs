@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { legalAssentCookieHeader } from "../apps/site/lib/legal-assent.ts";
 import { parseEnvFile, repoRoot } from "./env-policy.mjs";
 
 const requireFromSite = createRequire(path.join(repoRoot, "apps", "site", "package.json"));
@@ -13,7 +14,7 @@ const requireFromSite = createRequire(path.join(repoRoot, "apps", "site", "packa
 const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const DEFAULT_PUBLIC_API_BASE_URL = "https://api.rend.so";
-const DEFAULT_PUBLIC_SITE_BASE_URL = "https://rend.so";
+const DEFAULT_PUBLIC_SITE_BASE_URL = "https://www.rend.so";
 const DEFAULT_PLAN_ID = "pay_as_you_go";
 const DEFAULT_FIXTURE_PATH = ".rend/launch/fixtures/production-dry-run.mp4";
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -21,7 +22,6 @@ const DEFAULT_INTERVAL_MS = 2_000;
 const DEFAULT_USAGE_TIMEOUT_MS = 240_000;
 const DEFAULT_DRY_RUN_EMAIL_DOMAIN = "rend.so";
 const SYNTHETIC_USER_NAME = "Rend Production Dry Run";
-const SECONDS_PER_BILLING_MONTH = 30 * 24 * 60 * 60;
 
 function usage() {
   return `Usage: bun scripts/production-dry-run.mjs --allow-production-mutation [options]
@@ -41,7 +41,7 @@ Options:
   --api-base-url URL
       Public Rend API URL. Defaults to REND_PUBLIC_API_BASE_URL or https://api.rend.so.
   --site-base-url URL
-      Public Rend site URL. Defaults to REND_PUBLIC_SITE_BASE_URL, BETTER_AUTH_URL, or https://rend.so.
+      Public Rend site URL. Defaults to REND_PUBLIC_SITE_BASE_URL, BETTER_AUTH_URL, or https://www.rend.so.
   --plan-id PLAN
       Autumn plan to attach. Defaults to pay_as_you_go. The dry run enables it
       without creating billing changes.
@@ -224,10 +224,6 @@ function validateSafety(args, env) {
     errors.push("AUTUMN_SECRET_KEY must be visibly marked as a live key");
   }
   if (!envString(env, "DATABASE_URL")) errors.push("DATABASE_URL is required");
-  if (!envString(env, "CLICKHOUSE_URL")) errors.push("CLICKHOUSE_URL is required");
-  if (!envString(env, "CLICKHOUSE_DATABASE")) errors.push("CLICKHOUSE_DATABASE is required");
-  if (!envString(env, "CLICKHOUSE_USER")) errors.push("CLICKHOUSE_USER is required");
-  if (!envString(env, "CLICKHOUSE_PASSWORD")) errors.push("CLICKHOUSE_PASSWORD is required");
   if (!envString(env, "REND_SITE_INTERNAL_TOKEN")) errors.push("REND_SITE_INTERNAL_TOKEN is required");
   if (!args.acknowledgeRealCharge) {
     errors.push("--acknowledge-real-charge is required because the production dry run can create live billing artifacts");
@@ -242,6 +238,13 @@ function normalizeBaseUrl(value, fallback) {
   parsed.pathname = parsed.pathname.replace(/\/+$/, "");
   parsed.search = "";
   parsed.hash = "";
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function normalizePublicSiteBaseUrl(value) {
+  const normalized = normalizeBaseUrl(value, DEFAULT_PUBLIC_SITE_BASE_URL);
+  const parsed = new URL(normalized);
+  if (parsed.hostname === "rend.so") parsed.hostname = "www.rend.so";
   return parsed.toString().replace(/\/+$/, "");
 }
 
@@ -346,19 +349,28 @@ function setCookieHeaders(response) {
   return combined.split(/,(?=\s*[^;,=\s]+=[^;,]+)/g);
 }
 
+function rememberCookie(context, header) {
+  const [pair] = header.split(";");
+  const separator = pair.indexOf("=");
+  if (separator <= 0) return;
+  const name = pair.slice(0, separator).trim();
+  const value = pair.slice(separator + 1).trim();
+  if (name && value) context.cookieJar.set(name, value);
+}
+
 function rememberCookies(context, response) {
-  for (const header of setCookieHeaders(response)) {
-    const [pair] = header.split(";");
-    const separator = pair.indexOf("=");
-    if (separator <= 0) continue;
-    const name = pair.slice(0, separator).trim();
-    const value = pair.slice(separator + 1).trim();
-    if (name && value) context.cookieJar.set(name, value);
-  }
+  for (const header of setCookieHeaders(response)) rememberCookie(context, header);
 }
 
 function cookieHeader(context) {
   return [...context.cookieJar.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+function responseCookieHeader(response) {
+  return setCookieHeaders(response)
+    .map((header) => header.split(";", 1)[0]?.trim())
+    .filter(Boolean)
+    .join("; ");
 }
 
 function dashboardHeaders(context, extra = {}) {
@@ -377,6 +389,9 @@ async function signInWithOtp(context, email, otp) {
     body: JSON.stringify({ email, otp, name: SYNTHETIC_USER_NAME }),
   });
   rememberCookies(context, response);
+  // The dry run creates its OTP server-side so it must reproduce the signed
+  // legal-assent cookie that the public OTP request route normally sets.
+  rememberCookie(context, legalAssentCookieHeader(email, new Date(), context.env));
   const userId = data?.user?.id;
   if (typeof userId !== "string" || !userId) throw new Error("OTP sign-in did not return a user id");
   context.userId = userId;
@@ -526,26 +541,6 @@ function firstUrlSummary(value) {
   return null;
 }
 
-function tierFeatureIds(env, prefix) {
-  const id = envString(env, `REND_BILLING_FEATURE_${prefix}`, `${prefix.toLowerCase()}_seconds`);
-  return {
-    "720p": id,
-    "1080p": id,
-    "2k": id,
-    "4k": id,
-  };
-}
-
-function storageTierFeatureIds(env) {
-  const id = envString(env, "REND_BILLING_FEATURE_STORAGE", "storage_second_months");
-  return {
-    "720p": id,
-    "1080p": id,
-    "2k": id,
-    "4k": id,
-  };
-}
-
 async function fetchJson(url, init = {}) {
   const response = await fetch(url, { ...init, cache: "no-store" });
   const text = await response.text();
@@ -576,6 +571,101 @@ function apiHeaders(apiKey, extra = {}) {
     authorization: `Bearer ${apiKey}`,
     ...extra,
   };
+}
+
+function multipartFixtureParts(fixture, partSize, partCount) {
+  const parts = [];
+  for (let offset = 0, partNumber = 1; offset < fixture.byteLength; offset += partSize, partNumber += 1) {
+    const bytes = fixture.subarray(offset, Math.min(offset + partSize, fixture.byteLength));
+    parts.push({
+      part_number: partNumber,
+      checksum_sha256: crypto.createHash("sha256").update(bytes).digest("base64"),
+      bytes,
+    });
+  }
+  if (parts.length !== partCount) {
+    throw new Error(`multipart upload expected ${partCount} parts, calculated ${parts.length}`);
+  }
+  return parts;
+}
+
+async function uploadMultipartFixture(context, fixture, filename) {
+  const { data: session } = await fetchJson(new URL("/v1/uploads", context.apiBaseUrl), {
+    method: "POST",
+    headers: apiHeaders(context.rawApiKey, {
+      "content-type": "application/json",
+      "idempotency-key": `production-dry-run:${context.runId}`,
+    }),
+    body: JSON.stringify({
+      content_type: "video/mp4",
+      content_length: fixture.byteLength,
+      filename,
+    }),
+  });
+  context.assetId = session.asset_id;
+  const uploadId = session.upload_id;
+  const partSize = Number(session.part_size);
+  const partCount = Number(session.part_count);
+  const maxParallelParts = Number(session.max_parallel_parts);
+  if (
+    !context.assetId ||
+    !uploadId ||
+    !Number.isSafeInteger(partSize) ||
+    partSize <= 0 ||
+    !Number.isSafeInteger(partCount) ||
+    partCount <= 0 ||
+    !Number.isSafeInteger(maxParallelParts) ||
+    maxParallelParts <= 0
+  ) {
+    throw new Error("multipart create returned an invalid upload session");
+  }
+  const parts = multipartFixtureParts(fixture, partSize, partCount);
+  const signedParts = [];
+  for (let offset = 0; offset < parts.length; offset += 10) {
+    const batch = parts.slice(offset, offset + 10);
+    const { data } = await fetchJson(new URL(`/v1/uploads/${encodeURIComponent(uploadId)}/parts`, context.apiBaseUrl), {
+      method: "POST",
+      headers: apiHeaders(context.rawApiKey, { "content-type": "application/json" }),
+      body: JSON.stringify({
+        parts: batch.map(({ part_number, checksum_sha256 }) => ({ part_number, checksum_sha256 })),
+      }),
+    });
+    signedParts.push(...(Array.isArray(data.parts) ? data.parts : []));
+  }
+  const signedByNumber = new Map(signedParts.map((part) => [part.part_number, part]));
+  const completedParts = [];
+  for (let offset = 0; offset < parts.length; offset += maxParallelParts) {
+    const batch = parts.slice(offset, offset + maxParallelParts);
+    const uploaded = await Promise.all(
+      batch.map(async (part) => {
+        const signed = signedByNumber.get(part.part_number);
+        if (!signed?.url || signed.method !== "PUT") {
+          throw new Error(`multipart signing omitted part ${part.part_number}`);
+        }
+        const response = await fetchOk(new URL(signed.url), {
+          method: "PUT",
+          headers: signed.headers,
+          body: part.bytes,
+          redirect: "error",
+        });
+        const etag = response.headers.get("etag");
+        if (!etag) throw new Error(`multipart part ${part.part_number} omitted ETag`);
+        return { part_number: part.part_number, etag, checksum_sha256: part.checksum_sha256 };
+      }),
+    );
+    completedParts.push(...uploaded);
+  }
+  const { data: completed } = await fetchJson(
+    new URL(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, context.apiBaseUrl),
+    {
+      method: "POST",
+      headers: apiHeaders(context.rawApiKey, { "content-type": "application/json" }),
+      body: JSON.stringify({
+        parts: completedParts.sort((left, right) => left.part_number - right.part_number),
+      }),
+    },
+  );
+  return completed;
 }
 
 async function ensureFixture(fixturePath) {
@@ -659,286 +749,6 @@ async function operatorBillingSync(context) {
   return data;
 }
 
-async function clickhousePost(context, query) {
-  const url = new URL(context.clickhouse.url);
-  url.searchParams.set("database", context.clickhouse.database);
-  url.searchParams.set("query", query);
-  url.searchParams.set("date_time_input_format", "best_effort");
-  url.searchParams.set("output_format_json_quote_64bit_integers", "0");
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      authorization: `Basic ${Buffer.from(`${context.clickhouse.user}:${context.clickhouse.password}`).toString("base64")}`,
-      "content-length": "0",
-    },
-    body: "",
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`ClickHouse returned HTTP ${response.status}: ${redactUnsafeText(text.slice(0, 500))}`);
-  }
-  return text;
-}
-
-function clickhouseDeliveryQuery({ organizationId, assetId, startMs, endMs }) {
-  return `
-SELECT
-  tier AS resolution_tier,
-  sum(delivered_duration_ms_value) / 1000.0 AS value
-FROM (
-  SELECT
-    event_id,
-    any(resolution_tier) AS tier,
-    any(delivered_duration_ms) AS delivered_duration_ms_value
-  FROM playback_events
-  WHERE organization_id = toUUID('${organizationId}')
-    AND asset_id = toUUID('${assetId}')
-    AND observed_at >= fromUnixTimestamp64Milli(${startMs})
-    AND observed_at < fromUnixTimestamp64Milli(${endMs})
-    AND status_code >= 200
-    AND status_code < 500
-    AND delivered_duration_ms > 0
-    AND resolution_tier IN ('720p', '1080p', '2k', '4k')
-  GROUP BY event_id
-)
-GROUP BY tier
-FORMAT JSONEachRow`;
-}
-
-async function deliveryUsageRows(context, assetId, startMs, endMs) {
-  const text = await clickhousePost(
-    context,
-    clickhouseDeliveryQuery({
-      organizationId: context.organizationId,
-      assetId,
-      startMs,
-      endMs,
-    }),
-  );
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line))
-    .filter((row) => row.resolution_tier && Number(row.value) > 0)
-    .map((row) => ({
-      tier: String(row.resolution_tier).toLowerCase(),
-      value: Number(row.value),
-    }));
-}
-
-function storageUsageSql() {
-  return `
-WITH bounds AS (
-  SELECT $2::timestamptz AS start_at,
-         $3::timestamptz AS end_at
-),
-usage_spans AS (
-  SELECT span.organization_id,
-         span.asset_id,
-         span.duration_ms,
-         span.resolution_tier,
-         span.started_at,
-         span.ended_at
-  FROM rend.billing_storage_spans span
-  WHERE span.organization_id = $1::uuid
-    AND span.asset_id = $5::uuid
-
-  UNION ALL
-
-  SELECT asset.organization_id,
-         asset.id AS asset_id,
-         asset.duration_ms,
-         asset.max_resolution_tier AS resolution_tier,
-         asset.created_at AS started_at,
-         asset.deleted_at AS ended_at
-  FROM rend.assets asset
-  WHERE asset.organization_id = $1::uuid
-    AND asset.id = $5::uuid
-    AND asset.duration_ms IS NOT NULL
-    AND asset.duration_ms > 0
-    AND asset.max_resolution_tier IN ('720p', '1080p', '2k', '4k')
-    AND asset.playable_state IN ('opener_ready', 'hls_ready', 'deleted')
-    AND NOT EXISTS (
-      SELECT 1
-      FROM rend.billing_storage_spans existing_span
-      WHERE existing_span.asset_id = asset.id
-    )
-)
-SELECT usage_spans.resolution_tier,
-       COALESCE(
-         SUM(
-           (usage_spans.duration_ms::double precision / 1000.0)
-           * GREATEST(
-               0,
-               EXTRACT(EPOCH FROM (
-                 LEAST(COALESCE(usage_spans.ended_at, bounds.end_at), bounds.end_at)
-                 - GREATEST(usage_spans.started_at, bounds.start_at)
-               ))
-             )
-           / $4::double precision
-         ),
-         0
-       ) AS value
-FROM usage_spans
-CROSS JOIN bounds
-WHERE usage_spans.started_at < bounds.end_at
-  AND COALESCE(usage_spans.ended_at, bounds.end_at) > bounds.start_at
-GROUP BY usage_spans.resolution_tier
-`;
-}
-
-async function storageUsageRows(context, assetId, startIso, endIso) {
-  const result = await context.db.query(storageUsageSql(), [
-    context.organizationId,
-    startIso,
-    endIso,
-    SECONDS_PER_BILLING_MONTH,
-    assetId,
-  ]);
-  return result.rows
-    .filter((row) => row.resolution_tier && Number(row.value) > 0)
-    .map((row) => ({
-      tier: String(row.resolution_tier).toLowerCase(),
-      value: Number(row.value),
-    }));
-}
-
-async function insertUsageEvent(context, { assetId, idempotencyKey, featureId, value, source }) {
-  const result = await context.db.query(
-    `
-INSERT INTO rend.billing_usage_events (
-  organization_id,
-  asset_id,
-  idempotency_key,
-  feature_id,
-  value,
-  source
-)
-VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
-ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id::text
-`,
-    [context.organizationId, assetId, idempotencyKey, featureId, value, source],
-  );
-  if (result.rowCount > 0) return "inserted";
-  const existing = await context.db.query(
-    "SELECT status FROM rend.billing_usage_events WHERE idempotency_key = $1",
-    [idempotencyKey],
-  );
-  const status = existing.rows[0]?.status;
-  if (status === "tracked" || status === "skipped") return "already_finalized";
-  throw new Error(`billing usage event ${idempotencyKey} is already ${status || "missing"}`);
-}
-
-async function markUsageEvent(context, idempotencyKey, status, error = null) {
-  await context.db.query(
-    `
-UPDATE rend.billing_usage_events
-SET status = $2,
-    error = $3,
-    tracked_at = CASE WHEN $2 IN ('tracked', 'skipped') THEN now() ELSE tracked_at END
-WHERE idempotency_key = $1
-`,
-    [idempotencyKey, status, error ? redactUnsafeText(error) : null],
-  );
-}
-
-async function trackAggregatedUsage(context, usage) {
-  const insertStatus = await insertUsageEvent(context, usage);
-  if (insertStatus === "already_finalized") return { ...usage, status: "already_finalized" };
-  try {
-    await autumnPost(context, "balances.track", {
-      customer_id: context.organizationId,
-      feature_id: usage.featureId,
-      value: usage.value,
-      idempotency_key: usage.idempotencyKey,
-      properties: {
-        source: usage.source,
-        asset_id: usage.assetId,
-      },
-    });
-    await markUsageEvent(context, usage.idempotencyKey, "tracked");
-    return { ...usage, status: "tracked" };
-  } catch (error) {
-    await markUsageEvent(context, usage.idempotencyKey, "failed", error instanceof Error ? error.message : String(error));
-    throw error;
-  }
-}
-
-async function updateBillingCursor(context, kind, endIso) {
-  const cursorColumn = kind === "delivery" ? "delivery_usage_cursor_at" : "storage_usage_cursor_at";
-  const syncedColumn = kind === "delivery" ? "delivery_usage_synced_at" : "storage_usage_synced_at";
-  const errorColumn = kind === "delivery" ? "delivery_usage_error" : "storage_usage_error";
-  await context.db.query(
-    `
-UPDATE rend.billing_customers
-SET ${cursorColumn} = GREATEST(COALESCE(${cursorColumn}, '-infinity'::timestamptz), $2::timestamptz),
-    ${syncedColumn} = now(),
-    ${errorColumn} = NULL
-WHERE organization_id = $1::uuid
-`,
-    [context.organizationId, endIso],
-  );
-}
-
-async function dryRunAggregatedBillingSync(context, assetId) {
-  const start = new Date(context.startedAt);
-  const end = new Date(Date.now() + 1000);
-  const startMs = start.getTime();
-  const endMs = end.getTime();
-  const startIso = start.toISOString();
-  const endIso = end.toISOString();
-  const tracked = [];
-
-  const deliveryRows = await deliveryUsageRows(context, assetId, startMs, endMs);
-  for (const row of deliveryRows) {
-    const featureId = context.deliveryFeatureIds[row.tier];
-    if (!featureId) continue;
-    tracked.push(
-      await trackAggregatedUsage(context, {
-        assetId,
-        idempotencyKey: `production-dry-run:delivery:${assetId}:${row.tier}`,
-        featureId,
-        value: row.value,
-        source: "delivery_aggregation",
-      }),
-    );
-  }
-  if (deliveryRows.length > 0) {
-    await updateBillingCursor(context, "delivery", endIso);
-  }
-
-  const storageRows = await storageUsageRows(context, assetId, startIso, endIso);
-  for (const row of storageRows) {
-    const featureId = context.storageFeatureIds[row.tier];
-    if (!featureId) continue;
-    tracked.push(
-      await trackAggregatedUsage(context, {
-        assetId,
-        idempotencyKey: `production-dry-run:storage:${assetId}:${row.tier}`,
-        featureId,
-        value: row.value,
-        source: "storage_aggregation",
-      }),
-    );
-  }
-  if (storageRows.length > 0) {
-    await updateBillingCursor(context, "storage", endIso);
-  }
-
-  return {
-    mode: "dry_run_aggregation_fallback",
-    window: { start_at: startIso, end_at: endIso },
-    tracked: tracked.map((entry) => ({
-      source: entry.source,
-      feature_id: entry.featureId,
-      value: entry.value,
-      status: entry.status,
-    })),
-  };
-}
-
 function usageQuery(context, assetId) {
   return `
 SELECT COALESCE(json_agg(row_to_json(row_data) ORDER BY row_data.created_at DESC), '[]'::json)::text
@@ -976,16 +786,14 @@ async function waitForBillingUsage(context, assetId) {
       lastSync = await operatorBillingSync(context);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!/HTTP 404/.test(message)) throw error;
+      if (!/HTTP (?:403|404)/.test(message)) throw error;
       lastSync = {
-        mode: "operator_unavailable",
+        mode: "event_driven",
         error: redactUnsafeText(message),
-        fallback: await dryRunAggregatedBillingSync(context, assetId),
       };
     }
     events = await dbJson(context, usageQuery(context, assetId));
     if (
-      hasTrackedUsage(events, "upload_gate", false) &&
       hasTrackedUsage(events, "delivery_aggregation", true) &&
       hasTrackedUsage(events, "storage_aggregation", true)
     ) {
@@ -994,7 +802,7 @@ async function waitForBillingUsage(context, assetId) {
     await sleep(15_000);
   }
   throw new Error(
-    `billing usage did not include tracked upload_gate, delivery_aggregation, and storage_aggregation within timeout; last sync ${JSON.stringify(lastSync)}`,
+    `billing usage did not include tracked delivery_aggregation and storage_aggregation within timeout; last sync ${JSON.stringify(lastSync)}`,
   );
 }
 
@@ -1067,14 +875,7 @@ async function main() {
     siteBaseUrl: "",
     controlPlaneBaseUrl: "",
     siteInternalToken: envString(env, "REND_SITE_INTERNAL_TOKEN"),
-    clickhouse: {
-      url: envString(env, "CLICKHOUSE_URL"),
-      database: envString(env, "CLICKHOUSE_DATABASE", "rend"),
-      user: envString(env, "CLICKHOUSE_USER", "rend"),
-      password: envString(env, "CLICKHOUSE_PASSWORD"),
-    },
-    deliveryFeatureIds: tierFeatureIds(env, "DELIVERY"),
-    storageFeatureIds: storageTierFeatureIds(env),
+    storageFeatureId: envString(env, "REND_BILLING_FEATURE_STORAGE", "storage_second_months"),
     rawApiKey: "",
     apiKeyId: "",
     cookieJar: new Map(),
@@ -1098,9 +899,8 @@ async function main() {
       args.apiBaseUrl || envString(env, "REND_PUBLIC_API_BASE_URL"),
       DEFAULT_PUBLIC_API_BASE_URL,
     );
-    context.siteBaseUrl = normalizeBaseUrl(
+    context.siteBaseUrl = normalizePublicSiteBaseUrl(
       args.siteBaseUrl || envString(env, "REND_PUBLIC_SITE_BASE_URL") || envString(env, "BETTER_AUTH_URL"),
-      DEFAULT_PUBLIC_SITE_BASE_URL,
     );
     context.controlPlaneBaseUrl = normalizeBaseUrl(
       envString(env, "REND_API_BASE_URL") || context.apiBaseUrl,
@@ -1182,32 +982,29 @@ async function main() {
       return createApiKeyThroughDashboard(context);
     });
 
-    await runStep(context, "upload", "public API upload", async () => {
+    await runStep(context, "upload", "public multipart API upload", async () => {
       const fixture = await readFile(resolvePath(args.fixture));
-      const { data } = await fetchJson(new URL("/v1/videos", context.apiBaseUrl), {
-        method: "POST",
-        headers: apiHeaders(context.rawApiKey, {
-          "content-type": "video/mp4",
-          "content-length": String(fixture.byteLength),
-        }),
-        body: fixture,
-      });
-      context.assetId = data.asset_id;
+      const data = await uploadMultipartFixture(context, fixture, path.basename(resolvePath(args.fixture)));
       if (!context.assetId) throw new Error("upload response did not include asset_id");
       return {
         asset_id: context.assetId,
         byte_size: fixture.byteLength,
+        upload_transport: "direct_multipart",
         source_state: data.source_state,
         playable_state: data.playable_state,
       };
     });
 
-    await runStep(context, "upload-billing-check", "Autumn upload check verification", async () => {
-      const events = await dbJson(context, usageQuery(context, context.assetId));
-      if (!hasTrackedUsage(events, "upload_gate", false)) {
-        throw new Error("upload_gate billing check was not tracked");
-      }
-      return { billing_usage_events: events.filter((event) => event.source === "upload_gate") };
+    await runStep(context, "upload-billing-check", "Autumn storage balance check", async () => {
+      const data = await autumnPost(context, "balances.check", {
+        customer_id: context.organizationId,
+        feature_id: context.storageFeatureId,
+        required_balance: 0,
+        send_event: false,
+        properties: { source: "production_dry_run", asset_id: context.assetId },
+      });
+      if (data.allowed !== true) throw new Error("Autumn storage balance check was not allowed");
+      return { allowed: true, feature_id: context.storageFeatureId };
     });
 
     await runStep(context, "playable", "wait for playable asset", async () => {
@@ -1221,13 +1018,17 @@ async function main() {
     });
 
     await runStep(context, "public-playback", "public embed/watch playback through edge", async () => {
-      const { data: bootstrap } = await fetchJson(new URL(`/api/player/${context.assetId}`, context.siteBaseUrl));
+      const { response: bootstrapResponse, data: bootstrap } = await fetchJson(
+        new URL(`/api/player/${context.assetId}`, context.siteBaseUrl),
+      );
       const source = playbackSource(bootstrap);
       if (!source || typeof source !== "string" || !isPlaybackArtifactUrl(source, context.assetId, context.siteBaseUrl)) {
         throw new Error("player bootstrap did not return a safe artifact source");
       }
+      const playbackCookie = responseCookieHeader(bootstrapResponse);
+      if (!playbackCookie) throw new Error("player bootstrap did not return a playback cookie");
       const artifact = await fetchOk(new URL(source, context.siteBaseUrl), {
-        headers: { accept: "*/*" },
+        headers: { accept: "*/*", cookie: playbackCookie },
       });
       const billableArtifactPath = source;
       const billableArtifact = artifact;
@@ -1258,6 +1059,8 @@ async function main() {
         body: JSON.stringify({
           events: [
             {
+              event_id: `prod-dry-run-bootstrap-${id}`,
+              organization_id: context.organizationId,
               playback_session_id: playbackSessionId,
               asset_id: context.assetId,
               phase: "bootstrap_complete",
@@ -1265,6 +1068,22 @@ async function main() {
               bootstrap_http_status: 200,
               selected_playback_mode: "primary",
               selected_artifact_path: "opener.mp4",
+              selected_width: 640,
+              selected_height: 360,
+              app_version: "production-dry-run",
+            },
+            {
+              event_id: `prod-dry-run-watch-${id}`,
+              organization_id: context.organizationId,
+              playback_session_id: playbackSessionId,
+              asset_id: context.assetId,
+              phase: "watch_heartbeat",
+              event_time_ms: Date.now(),
+              watch_delta_ms: 4_000,
+              selected_playback_mode: "primary",
+              selected_artifact_path: "opener.mp4",
+              selected_width: 640,
+              selected_height: 360,
               app_version: "production-dry-run",
             },
           ],

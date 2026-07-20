@@ -47,14 +47,6 @@ struct BillingFeature {
     id: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResolutionTier {
-    P720,
-    P1080,
-    P2K,
-    P4K,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct BillingConfig {
     mode: BillingMode,
@@ -101,14 +93,7 @@ struct BillingDeliverySyncResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct TierUsageRow {
-    resolution_tier: String,
-    value: f64,
-}
-
-#[derive(Debug)]
-struct TierUsage {
-    tier: ResolutionTier,
+struct UsageRow {
     value: f64,
 }
 
@@ -209,27 +194,6 @@ impl BillingFeature {
             "billing feature ids must be 1-128 safe token characters"
         );
         Ok(Self { id })
-    }
-}
-
-impl ResolutionTier {
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "720p" => Some(Self::P720),
-            "1080p" => Some(Self::P1080),
-            "2k" => Some(Self::P2K),
-            "4k" => Some(Self::P4K),
-            _ => None,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::P720 => "720p",
-            Self::P1080 => "1080p",
-            Self::P2K => "2k",
-            Self::P4K => "4k",
-        }
     }
 }
 
@@ -409,24 +373,20 @@ pub(crate) async fn open_asset_storage_span(
           organization_id,
           asset_id,
           duration_ms,
-          resolution_tier,
           started_at
         )
         SELECT organization_id,
                id,
                duration_ms,
-               max_resolution_tier,
                now()
         FROM rend.assets
         WHERE id = $1::uuid
           AND deleted_at IS NULL
           AND duration_ms IS NOT NULL
           AND duration_ms > 0
-          AND max_resolution_tier IN ('720p', '1080p', '2k', '4k')
           AND playable_state IN ('opener_ready', 'hls_ready')
         ON CONFLICT (asset_id) WHERE ended_at IS NULL DO UPDATE
-        SET duration_ms = EXCLUDED.duration_ms,
-            resolution_tier = EXCLUDED.resolution_tier
+        SET duration_ms = EXCLUDED.duration_ms
         ",
     )
     .bind(asset_id)
@@ -469,7 +429,17 @@ pub(crate) fn schedule_delivery_usage_sync(state: Arc<AppState>) {
         return;
     }
 
+    let ingestion_lag = state
+        .config
+        .billing
+        .delivery_sync_lag
+        .max(state.config.billing.storage_sync_lag);
     tokio::spawn(async move {
+        // Player telemetry and storage spans are written immediately, but the
+        // billing cursor intentionally trails ingestion. Delay this event-
+        // driven sync so a short playback session is not skipped forever when
+        // no later event arrives to trigger another pass.
+        tokio::time::sleep(ingestion_lag + Duration::from_secs(1)).await;
         if let Err(error) = sync_billing_usage(&state).await {
             tracing::warn!(error = %error.message, "billing usage sync failed");
         }
@@ -551,40 +521,27 @@ async fn sync_delivery_usage(state: &AppState) -> Result<DeliverySyncSummary, Ap
             continue;
         }
         match clickhouse_delivery_seconds(state, &organization_id, start, end).await {
-            Ok(usages) if !usages.is_empty() => {
-                let mut tracked = 0.0;
-                for usage in usages {
-                    if usage.value <= 0.0 {
-                        continue;
-                    }
-                    let event = ReservedUsage {
-                        feature_id: state.config.billing.delivery_feature.id.clone(),
-                        value: usage.value,
-                        idempotency_key: delivery_idempotency_key(
-                            &organization_id,
-                            usage.tier,
-                            start,
-                            end,
-                        ),
-                    };
-                    if let Err(error) = track_usage(
-                        state,
-                        &organization_id,
-                        None,
-                        &event,
-                        "delivery_aggregation",
-                    )
-                    .await
-                    {
-                        update_delivery_sync_error(&state.db, &organization_id, &error.message)
-                            .await?;
-                        return Err(AppError::internal(error.message));
-                    }
-                    tracked += usage.value;
+            Ok(value) if value > 0.0 => {
+                let event = ReservedUsage {
+                    feature_id: state.config.billing.delivery_feature.id.clone(),
+                    value,
+                    idempotency_key: delivery_idempotency_key(&organization_id, start, end),
+                };
+                if let Err(error) = track_usage(
+                    state,
+                    &organization_id,
+                    None,
+                    &event,
+                    "delivery_aggregation",
+                )
+                .await
+                {
+                    update_delivery_sync_error(&state.db, &organization_id, &error.message).await?;
+                    return Err(AppError::internal(error.message));
                 }
                 update_delivery_sync_success(&state.db, &organization_id, end).await?;
                 summary.organizations_tracked += 1;
-                summary.delivery_seconds_tracked += tracked;
+                summary.delivery_seconds_tracked += value;
             }
             Ok(_) => {
                 update_delivery_sync_success(&state.db, &organization_id, end).await?;
@@ -646,35 +603,21 @@ async fn sync_storage_usage(state: &AppState) -> Result<DeliverySyncSummary, App
             continue;
         }
         match postgres_storage_second_months(state, &organization_id, start, end).await {
-            Ok(usages) if !usages.is_empty() => {
-                let mut tracked = 0.0;
-                for usage in usages {
-                    if usage.value <= 0.0 {
-                        continue;
-                    }
-                    let event = ReservedUsage {
-                        feature_id: state.config.billing.storage_feature.id.clone(),
-                        value: usage.value,
-                        idempotency_key: storage_idempotency_key(
-                            &organization_id,
-                            usage.tier,
-                            start,
-                            end,
-                        ),
-                    };
-                    if let Err(error) =
-                        track_usage(state, &organization_id, None, &event, "storage_aggregation")
-                            .await
-                    {
-                        update_storage_sync_error(&state.db, &organization_id, &error.message)
-                            .await?;
-                        return Err(AppError::internal(error.message));
-                    }
-                    tracked += usage.value;
+            Ok(value) if value > 0.0 => {
+                let event = ReservedUsage {
+                    feature_id: state.config.billing.storage_feature.id.clone(),
+                    value,
+                    idempotency_key: storage_idempotency_key(&organization_id, start, end),
+                };
+                if let Err(error) =
+                    track_usage(state, &organization_id, None, &event, "storage_aggregation").await
+                {
+                    update_storage_sync_error(&state.db, &organization_id, &error.message).await?;
+                    return Err(AppError::internal(error.message));
                 }
                 update_storage_sync_success(&state.db, &organization_id, end).await?;
                 summary.organizations_tracked += 1;
-                summary.storage_second_months_tracked += tracked;
+                summary.storage_second_months_tracked += value;
             }
             Ok(_) => {
                 update_storage_sync_success(&state.db, &organization_id, end).await?;
@@ -1126,7 +1069,7 @@ async fn clickhouse_delivery_seconds(
     organization_id: &str,
     start: chrono::DateTime<Utc>,
     end: chrono::DateTime<Utc>,
-) -> Result<Vec<TierUsage>, BillingProviderError> {
+) -> Result<f64, BillingProviderError> {
     let query = clickhouse_delivery_seconds_query(organization_id, start, end);
     let body = String::new();
     let response = state
@@ -1157,22 +1100,16 @@ async fn clickhouse_delivery_seconds(
             "ClickHouse returned HTTP {status}"
         )));
     }
-    let mut usages = Vec::new();
+    let mut value = 0.0;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let row = serde_json::from_str::<TierUsageRow>(line)
+        let row = serde_json::from_str::<UsageRow>(line)
             .with_context(|| "invalid ClickHouse delivery usage row")
             .map_err(|error| BillingProviderError::new(error.to_string()))?;
-        if let Some(tier) = ResolutionTier::parse(&row.resolution_tier)
-            && row.value.is_finite()
-            && row.value > 0.0
-        {
-            usages.push(TierUsage {
-                tier,
-                value: row.value,
-            });
+        if row.value.is_finite() && row.value > 0.0 {
+            value += row.value;
         }
     }
-    Ok(usages)
+    Ok(value)
 }
 
 fn clickhouse_delivery_seconds_query(
@@ -1183,17 +1120,10 @@ fn clickhouse_delivery_seconds_query(
     format!(
         "\
         SELECT \
-          tier AS resolution_tier, \
           sum(watch_delta_ms_value) / 1000.0 AS value \
         FROM ( \
           SELECT \
             event_id, \
-            multiIf( \
-              greatest(any(selected_width), any(selected_height)) <= 1280, '720p', \
-              greatest(any(selected_width), any(selected_height)) <= 1920, '1080p', \
-              greatest(any(selected_width), any(selected_height)) <= 2560, '2k', \
-              '4k' \
-            ) AS tier, \
             any(watch_delta_ms) AS watch_delta_ms_value \
           FROM player_events \
           WHERE organization_id = toUUID('{organization_id}') \
@@ -1201,10 +1131,8 @@ fn clickhouse_delivery_seconds_query(
             AND observed_at < fromUnixTimestamp64Milli({}) \
             AND phase = 'watch_heartbeat' \
             AND watch_delta_ms > 0 \
-            AND greatest(selected_width, selected_height) > 0 \
           GROUP BY event_id \
         ) \
-        GROUP BY tier \
         FORMAT JSONEachRow",
         start.timestamp_millis(),
         end.timestamp_millis(),
@@ -1213,13 +1141,11 @@ fn clickhouse_delivery_seconds_query(
 
 fn delivery_idempotency_key(
     organization_id: &str,
-    tier: ResolutionTier,
     start: chrono::DateTime<Utc>,
     end: chrono::DateTime<Utc>,
 ) -> String {
     format!(
-        "delivery:{organization_id}:{}:{}:{}",
-        tier.as_str(),
+        "delivery:{organization_id}:{}:{}",
         start.timestamp_millis(),
         end.timestamp_millis()
     )
@@ -1227,13 +1153,11 @@ fn delivery_idempotency_key(
 
 fn storage_idempotency_key(
     organization_id: &str,
-    tier: ResolutionTier,
     start: chrono::DateTime<Utc>,
     end: chrono::DateTime<Utc>,
 ) -> String {
     format!(
-        "storage:{organization_id}:{}:{}:{}",
-        tier.as_str(),
+        "storage:{organization_id}:{}:{}",
         start.timestamp_millis(),
         end.timestamp_millis()
     )
@@ -1244,26 +1168,20 @@ async fn postgres_storage_second_months(
     organization_id: &str,
     start: chrono::DateTime<Utc>,
     end: chrono::DateTime<Utc>,
-) -> Result<Vec<TierUsage>, BillingProviderError> {
-    let rows: Vec<(String, f64)> = sqlx::query_as(storage_second_months_query())
+) -> Result<f64, BillingProviderError> {
+    let value: f64 = sqlx::query_scalar(storage_second_months_query())
         .bind(organization_id)
         .bind(start.to_rfc3339())
         .bind(end.to_rfc3339())
         .bind(SECONDS_PER_BILLING_MONTH)
-        .fetch_all(&state.db)
+        .fetch_one(&state.db)
         .await
         .map_err(|error| BillingProviderError::new(error.to_string()))?;
-
-    let mut usages = Vec::new();
-    for (tier, value) in rows {
-        if let Some(tier) = ResolutionTier::parse(&tier)
-            && value.is_finite()
-            && value > 0.0
-        {
-            usages.push(TierUsage { tier, value });
-        }
-    }
-    Ok(usages)
+    Ok(if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    })
 }
 
 fn storage_second_months_query() -> &'static str {
@@ -1276,7 +1194,6 @@ fn storage_second_months_query() -> &'static str {
       SELECT span.organization_id,
              span.asset_id,
              span.duration_ms,
-             span.resolution_tier,
              span.started_at,
              span.ended_at
       FROM rend.billing_storage_spans span
@@ -1287,14 +1204,12 @@ fn storage_second_months_query() -> &'static str {
       SELECT asset.organization_id,
              asset.id AS asset_id,
              asset.duration_ms,
-             asset.max_resolution_tier AS resolution_tier,
              asset.created_at AS started_at,
              asset.deleted_at AS ended_at
       FROM rend.assets asset
       WHERE asset.organization_id = $1::uuid
         AND asset.duration_ms IS NOT NULL
         AND asset.duration_ms > 0
-        AND asset.max_resolution_tier IN ('720p', '1080p', '2k', '4k')
         AND asset.playable_state IN ('opener_ready', 'hls_ready', 'deleted')
         AND NOT EXISTS (
           SELECT 1
@@ -1302,8 +1217,7 @@ fn storage_second_months_query() -> &'static str {
           WHERE existing_span.asset_id = asset.id
         )
     )
-    SELECT usage_spans.resolution_tier,
-           COALESCE(
+    SELECT COALESCE(
              SUM(
                (usage_spans.duration_ms::double precision / 1000.0)
                * GREATEST(
@@ -1321,7 +1235,6 @@ fn storage_second_months_query() -> &'static str {
     CROSS JOIN bounds
     WHERE usage_spans.started_at < bounds.end_at
       AND COALESCE(usage_spans.ended_at, bounds.end_at) > bounds.start_at
-    GROUP BY usage_spans.resolution_tier
     "
 }
 
@@ -1376,15 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn resolution_tiers_parse_required_autumn_suffixes() {
-        assert_eq!(ResolutionTier::parse("720p"), Some(ResolutionTier::P720));
-        assert_eq!(ResolutionTier::parse("1080p"), Some(ResolutionTier::P1080));
-        assert_eq!(ResolutionTier::parse("2K"), Some(ResolutionTier::P2K));
-        assert_eq!(ResolutionTier::parse("4k"), Some(ResolutionTier::P4K));
-        assert_eq!(ResolutionTier::parse("source_bytes"), None);
-    }
-
-    #[test]
     fn storage_second_months_are_prorated() {
         let one_day = 24.0 * 60.0 * 60.0;
         assert_eq!(storage_second_months_value(60_000, one_day), 2.0);
@@ -1393,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_usage_query_dedupes_events_before_tier_sums() {
+    fn delivery_usage_query_dedupes_watch_time_without_resolution_buckets() {
         let query = clickhouse_delivery_seconds_query(
             "00000000-0000-0000-0000-000000000001",
             test_time("2026-06-13T12:00:00.000Z"),
@@ -1404,51 +1308,33 @@ mod tests {
         assert!(query.contains("sum(watch_delta_ms_value) / 1000.0 AS value"));
         assert!(query.contains("any(watch_delta_ms) AS watch_delta_ms_value"));
         assert!(query.contains("phase = 'watch_heartbeat'"));
-        assert!(query.contains("greatest(selected_width, selected_height) > 0"));
-        assert!(query.contains("GROUP BY tier"));
+        assert!(!query.contains("selected_width"));
+        assert!(!query.contains("resolution_tier"));
     }
 
     #[test]
-    fn aggregation_idempotency_keys_are_tiered_and_windowed() {
+    fn aggregation_idempotency_keys_are_metered_and_windowed() {
         let start = test_time("2026-06-13T12:00:00.000Z");
         let end = test_time("2026-06-13T13:00:00.000Z");
         let org_id = "00000000-0000-0000-0000-000000000001";
 
         assert_eq!(
-            delivery_idempotency_key(org_id, ResolutionTier::P720, start, end),
-            "delivery:00000000-0000-0000-0000-000000000001:720p:1781352000000:1781355600000"
+            delivery_idempotency_key(org_id, start, end),
+            "delivery:00000000-0000-0000-0000-000000000001:1781352000000:1781355600000"
         );
         assert_eq!(
-            storage_idempotency_key(org_id, ResolutionTier::P4K, start, end),
-            "storage:00000000-0000-0000-0000-000000000001:4k:1781352000000:1781355600000"
+            storage_idempotency_key(org_id, start, end),
+            "storage:00000000-0000-0000-0000-000000000001:1781352000000:1781355600000"
         );
     }
 
     #[test]
-    fn aggregation_uses_two_public_meters_with_tiered_idempotency_keys() {
+    fn aggregation_uses_exactly_two_public_meters() {
         let delivery_feature = BillingFeature::new(DEFAULT_DELIVERY_FEATURE_ID.to_owned()).unwrap();
         let storage_feature = BillingFeature::new(DEFAULT_STORAGE_FEATURE_ID.to_owned()).unwrap();
-        let start = test_time("2026-06-13T12:00:00.000Z");
-        let end = test_time("2026-06-13T13:00:00.000Z");
-        let org_id = "00000000-0000-0000-0000-000000000001";
-        let tiers = [
-            ResolutionTier::P720,
-            ResolutionTier::P1080,
-            ResolutionTier::P2K,
-            ResolutionTier::P4K,
-        ];
-
-        let mut delivery_keys = std::collections::BTreeSet::new();
-        let mut storage_keys = std::collections::BTreeSet::new();
-        for tier in tiers {
-            assert!(delivery_keys.insert(delivery_idempotency_key(org_id, tier, start, end)));
-            assert!(storage_keys.insert(storage_idempotency_key(org_id, tier, start, end)));
-        }
 
         assert_eq!(delivery_feature.id, "delivery_seconds");
         assert_eq!(storage_feature.id, "storage_second_months");
-        assert_eq!(delivery_keys.len(), 4);
-        assert_eq!(storage_keys.len(), 4);
     }
 
     #[test]
@@ -1459,6 +1345,8 @@ mod tests {
         assert!(query.contains("UNION ALL"));
         assert!(query.contains("NOT EXISTS"));
         assert!(query.contains("COALESCE(usage_spans.ended_at, bounds.end_at)"));
+        assert!(!query.contains("resolution_tier"));
+        assert!(!query.contains("max_resolution_tier"));
     }
 
     #[test]
