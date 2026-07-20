@@ -860,7 +860,11 @@ export function renderFastEmbedHtml(options: FastEmbedRenderOptions) {
   const contentType = selection?.contentType
     ? ` type="${html(selection.contentType)}"`
     : "";
-  const videoPreload = options.autoPlay ? "auto" : "metadata";
+  const videoPreload = options.autoPlay
+    ? "auto"
+    : ready?.poster_url
+      ? "none"
+      : "metadata";
   const preload =
     options.autoPlay && !inlineStartup
       ? preloadablePlaybackSelection(selection)

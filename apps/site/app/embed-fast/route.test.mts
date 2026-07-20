@@ -116,8 +116,28 @@ test("paused fast embeds avoid eagerly downloading the full opener", () => {
     startupMode: "progressive",
   });
 
-  assert.match(html, /<video[^>]+preload="metadata"/);
+  assert.match(html, /<video[^>]+preload="none"/);
   assert.doesNotMatch(html, /<link rel="preload" as="video"/);
+});
+
+test("paused fast embeds retain metadata preload when no poster exists", () => {
+  const bootstrap = readyBootstrap();
+  if (bootstrap.status !== "ready") throw new Error("expected ready bootstrap");
+  const { poster_url: _posterUrl, poster_content_type: _posterType, ...withoutPoster } =
+    bootstrap;
+  const html = renderFastEmbedHtml({
+    assetId: ASSET_ID,
+    autoPlay: false,
+    bootstrap: withoutPoster,
+    bootstrapUrl: `/api/player/${ASSET_ID}`,
+    bootstrapMs: 42,
+    controls: true,
+    muted: false,
+    playbackOriginHint: null,
+    startupMode: "progressive",
+  });
+
+  assert.match(html, /<video[^>]+preload="metadata"/);
 });
 
 test("fast embed uses the real opener for anonymous public playback", () => {

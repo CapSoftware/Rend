@@ -5161,7 +5161,13 @@ fn render_api_fast_embed_html(
         String::new()
     };
     let inline_startup_json = inline_startup_script_json(inline_startup);
-    let video_preload = if auto_play { "auto" } else { "metadata" };
+    let video_preload = if auto_play {
+        "auto"
+    } else if response.poster_url.is_some() {
+        "none"
+    } else {
+        "metadata"
+    };
     let fallback_json = script_json(serde_json::json!({
         "artifactPath": selection.artifact_path,
         "contentType": selection.content_type,

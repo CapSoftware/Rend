@@ -1636,7 +1636,7 @@ fn playback_bootstrap_includes_thumbnail_as_poster() {
     let html =
         render_api_fast_embed_html(&response, &selection, None, false, true, false, "include");
     assert!(html.contains(r#"poster="https://video.rend.so/v/asset-123/thumbnail.jpg""#));
-    assert!(html.contains(r#"preload="metadata""#));
+    assert!(html.contains(r#"preload="none""#));
     assert!(!html.contains(r#"rel="preload" as="video""#));
 }
 
