@@ -515,7 +515,6 @@ async function localUsage(context: DashboardAccessContext) {
       WHERE asset.organization_id = $1::uuid
         AND asset.deleted_at IS NULL
         AND asset.duration_ms IS NOT NULL
-        AND asset.max_resolution_tier IN ('720p', '1080p', '2k', '4k')
     `,
     [context.organizationId]
   );
