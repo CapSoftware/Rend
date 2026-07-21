@@ -475,7 +475,7 @@ function normalizeSubscriptions(value: unknown) {
 
 export function normalizeBillingPaymentMethod(value: unknown): BillingPaymentMethod {
   if (value === null || value === undefined) return { status: "missing" };
-  if (!isRecord(value)) return { status: "on_file" };
+  if (!isRecord(value)) return { status: "unknown" };
   if (Object.keys(value).length === 0) return { status: "missing" };
 
   const card = isRecord(value.card) ? value.card : value;

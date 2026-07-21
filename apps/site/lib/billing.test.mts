@@ -182,7 +182,10 @@ test("hosted payment redirects use See Other so Stripe receives GET after form P
 
 test("payment method normalization distinguishes missing and card-on-file states", () => {
   assert.deepEqual(normalizeBillingPaymentMethod(null), { status: "missing" });
+  assert.deepEqual(normalizeBillingPaymentMethod(undefined), { status: "missing" });
   assert.deepEqual(normalizeBillingPaymentMethod({}), { status: "missing" });
+  assert.deepEqual(normalizeBillingPaymentMethod(true), { status: "unknown" });
+  assert.deepEqual(normalizeBillingPaymentMethod([]), { status: "unknown" });
   assert.deepEqual(
     normalizeBillingPaymentMethod({
       type: "card",
