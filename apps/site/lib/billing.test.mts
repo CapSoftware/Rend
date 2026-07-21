@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  BILLING_EXTERNAL_REDIRECT_STATUS,
+  BILLING_REDIRECT_STATUS,
   BillingError,
+  automaticPaygAttachBody,
   billingReadinessFromOverview,
-  checkoutAttachBody,
-  checkoutRedirectUrlFromAutumnResponse,
-  normalizeBillingPlans,
+  normalizeBillingPaymentMethod,
+  paymentRedirectUrlFromAutumnResponse,
+  paymentSetupBody,
   type BillingOverview,
 } from "./billing.ts";
 
@@ -49,12 +50,11 @@ function overview(extra: Partial<BillingOverview> = {}): BillingOverview {
     mode: "autumn",
     customerId: "00000000-0000-0000-0000-000000000001",
     status: "ok",
-    currentPlanLabel: "No active plan",
+    paymentMethod: { status: "missing" },
     subscriptions: [],
     balances: [],
-    plans: [],
-    manageBillingEnabled: true,
-    checkoutEnabled: true,
+    manageBillingEnabled: false,
+    paymentSetupEnabled: true,
     ...extra,
   };
 }
@@ -68,16 +68,18 @@ const dashboardContext = {
   role: "owner" as const,
 };
 
-test("billing readiness requires an active billing relationship in Autumn mode", () => {
+test("billing readiness requires a payment method in Autumn mode", () => {
   const readiness = billingReadinessFromOverview(overview());
 
   assert.equal(readiness.status, "billing_required");
   assert.equal(readiness.code, "billing_required");
+  assert.equal(readiness.actionLabel, "Add payment method");
 });
 
-test("billing readiness allows active subscriptions", () => {
+test("billing readiness allows an active PAYG subscription with a card on file", () => {
   const readiness = billingReadinessFromOverview(
     overview({
+      paymentMethod: { status: "on_file", brand: "visa", last4: "4242" },
       subscriptions: [{ planId: "pay_as_you_go", status: "active" }],
     })
   );
@@ -85,10 +87,22 @@ test("billing readiness allows active subscriptions", () => {
   assert.equal(readiness.status, "ready");
 });
 
+test("billing readiness asks to finish setup when the card exists but PAYG is not active", () => {
+  const readiness = billingReadinessFromOverview(
+    overview({
+      paymentMethod: { status: "on_file", brand: "visa", last4: "4242" },
+    })
+  );
+
+  assert.equal(readiness.status, "billing_required");
+  assert.equal(readiness.actionLabel, "Finish billing setup");
+});
+
 test("billing readiness blocks exhausted balances", () => {
   const readiness = billingReadinessFromOverview(
     overview({
-      plans: [{ id: "pay_as_you_go", name: "Pay as you go", relationshipStatus: "active" }],
+      paymentMethod: { status: "on_file" },
+      subscriptions: [{ planId: "pay_as_you_go", status: "active" }],
       balances: [{ featureId: "delivery_seconds", remaining: 0 }],
     })
   );
@@ -101,20 +115,43 @@ test("local billing is always ready", () => {
   const readiness = billingReadinessFromOverview(
     overview({
       mode: "local",
-      currentPlanLabel: "Local development",
+      paymentMethod: { status: "not_required" },
       subscriptions: [{ planId: "local", status: "active" }],
       manageBillingEnabled: false,
-      checkoutEnabled: false,
+      paymentSetupEnabled: false,
     })
   );
 
   assert.equal(readiness.status, "ready");
 });
 
-test("local Autumn attach activates plans without external Checkout by default", async () => {
+test("payment setup automatically includes PAYG", async () => {
+  await withEnv({ REND_AUTUMN_PLAN_PAYG_ID: undefined }, () => {
+    const returnUrl = "https://rend.so/dashboard/billing";
+    const body = paymentSetupBody(dashboardContext, returnUrl);
+
+    assert.deepEqual(body, {
+      customer_id: dashboardContext.organizationId,
+      plan_id: "pay_as_you_go",
+      success_url: returnUrl,
+    });
+  });
+});
+
+test("payment setup can update a card without reattaching PAYG", () => {
+  const returnUrl = "https://rend.so/dashboard/billing";
+  const body = paymentSetupBody(dashboardContext, returnUrl, false);
+
+  assert.deepEqual(body, {
+    customer_id: dashboardContext.organizationId,
+    success_url: returnUrl,
+  });
+});
+
+test("local automatic PAYG attach avoids external payment redirects by default", async () => {
   await withEnv({ REND_ENV: "local", REND_BILLING_MODE: "autumn" }, () => {
     const returnUrl = "http://127.0.0.1:3000/dashboard/billing";
-    const body = checkoutAttachBody(dashboardContext, "pay_as_you_go", returnUrl);
+    const body = automaticPaygAttachBody(dashboardContext, returnUrl);
 
     assert.equal(body.customer_id, dashboardContext.organizationId);
     assert.equal(body.plan_id, "pay_as_you_go");
@@ -126,10 +163,10 @@ test("local Autumn attach activates plans without external Checkout by default",
   });
 });
 
-test("production Autumn attach can redirect when Checkout is required", async () => {
+test("production automatic PAYG attach can redirect when payment action is required", async () => {
   await withEnv({ REND_ENV: "production", REND_BILLING_MODE: "autumn" }, () => {
     const returnUrl = "https://rend.so/dashboard/billing";
-    const body = checkoutAttachBody(dashboardContext, "pay_as_you_go", returnUrl);
+    const body = automaticPaygAttachBody(dashboardContext, returnUrl);
 
     assert.equal(body.redirect_mode, "if_required");
     assert.equal(body.success_url, returnUrl);
@@ -139,90 +176,38 @@ test("production Autumn attach can redirect when Checkout is required", async ()
   });
 });
 
-test("hosted billing redirects use See Other so Stripe receives GET after form POST", () => {
-  assert.equal(BILLING_EXTERNAL_REDIRECT_STATUS, 303);
+test("hosted payment redirects use See Other so Stripe receives GET after form POST", () => {
+  assert.equal(BILLING_REDIRECT_STATUS, 303);
 });
 
-test("billing plan normalization exposes only pay as you go", async () => {
-  await withEnv({ REND_AUTUMN_PLAN_PAYG_ID: undefined }, () => {
-    assert.deepEqual(
-      normalizeBillingPlans({
-        list: [
-          {
-            id: "private_test_plan",
-            name: "Private test plan",
-            description: "Not part of the public catalog.",
-          },
-          {
-            id: "beta_private",
-            name: "Private Beta",
-          },
-          {
-            id: "archived_public",
-            name: "Archived Public",
-            archived: true,
-          },
-          {
-            id: "another_plan",
-            name: "Another plan",
-            description: "Not part of the public catalog.",
-            price: {
-              display: {
-                primary_text: "$19",
-                secondary_text: "per month",
-              },
-            },
-            customer_eligibility: {
-              attach_action: "activate",
-            },
-          },
-          {
-            id: "pay_as_you_go",
-            name: "Pay as you go",
-            description: "Delivery and storage billed by the minute.",
-            price: {
-              display: {
-                primary_text: "$0",
-                secondary_text: "no monthly fee",
-              },
-            },
-            customer_eligibility: {
-              attach_action: "activate",
-            },
-          },
-        ],
-      }),
-      [
-        {
-          id: "pay_as_you_go",
-          name: "Pay as you go",
-          description: "Delivery and storage billed by the minute.",
-          priceLabel: "$0",
-          intervalLabel: "no monthly fee",
-          attachAction: "activate",
-          relationshipStatus: undefined,
-        },
-      ],
-    );
-  });
+test("payment method normalization distinguishes missing and card-on-file states", () => {
+  assert.deepEqual(normalizeBillingPaymentMethod(null), { status: "missing" });
+  assert.deepEqual(normalizeBillingPaymentMethod({}), { status: "missing" });
+  assert.deepEqual(
+    normalizeBillingPaymentMethod({
+      type: "card",
+      card: { display_brand: "visa", last4: "4242" },
+    }),
+    { status: "on_file", type: "card", brand: "visa", last4: "4242" }
+  );
 });
 
-test("checkout redirect guard rejects local test checkout URLs by default", async () => {
+test("payment redirect guard rejects local test URLs by default", async () => {
   await withEnv({ REND_ENV: "local" }, () => {
     assert.throws(
       () =>
-        checkoutRedirectUrlFromAutumnResponse({
+        paymentRedirectUrlFromAutumnResponse({
           payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
         }),
-      (error) => error instanceof BillingError && error.code === "billing_checkout_disabled"
+      (error) => error instanceof BillingError && error.code === "billing_payment_setup_disabled"
     );
   });
 });
 
-test("checkout redirect guard can opt into local test checkout URLs", async () => {
+test("payment redirect guard can opt into local test URLs", async () => {
   await withEnv({ REND_ENV: "local", REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT: "true" }, () => {
     assert.equal(
-      checkoutRedirectUrlFromAutumnResponse({
+      paymentRedirectUrlFromAutumnResponse({
         payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
       }),
       "https://checkout.stripe.com/c/pay/cs_test_123#fid"
@@ -230,10 +215,10 @@ test("checkout redirect guard can opt into local test checkout URLs", async () =
   });
 });
 
-test("checkout redirect guard allows live checkout URLs in production", async () => {
+test("payment redirect guard allows live URLs in production", async () => {
   await withEnv({ REND_ENV: "production" }, () => {
     assert.equal(
-      checkoutRedirectUrlFromAutumnResponse({
+      paymentRedirectUrlFromAutumnResponse({
         payment_url: "https://checkout.stripe.com/c/pay/cs_live_123#fid",
       }),
       "https://checkout.stripe.com/c/pay/cs_live_123#fid"
@@ -241,32 +226,32 @@ test("checkout redirect guard allows live checkout URLs in production", async ()
   });
 });
 
-test("checkout redirect guard rejects test checkout URLs in production", async () => {
+test("payment redirect guard rejects test URLs in production", async () => {
   await withEnv({ REND_ENV: "production" }, () => {
     assert.throws(
       () =>
-        checkoutRedirectUrlFromAutumnResponse({
+        paymentRedirectUrlFromAutumnResponse({
           payment_url: "https://checkout.stripe.com/c/pay/cs_test_123#fid",
         }),
-      (error) => error instanceof BillingError && error.code === "billing_checkout_mode_mismatch"
+      (error) => error instanceof BillingError && error.code === "billing_payment_setup_mode_mismatch"
     );
   });
 });
 
-test("checkout redirect guard rejects live checkout URLs outside production by default", async () => {
+test("payment redirect guard rejects live URLs outside production by default", async () => {
   await withEnv({ REND_ENV: "local" }, () => {
     assert.throws(
       () =>
-        checkoutRedirectUrlFromAutumnResponse({
+        paymentRedirectUrlFromAutumnResponse({
           payment_url: "https://checkout.stripe.com/c/pay/cs_live_123#fid",
         }),
-      (error) => error instanceof BillingError && error.code === "billing_checkout_disabled"
+      (error) => error instanceof BillingError && error.code === "billing_payment_setup_disabled"
     );
   });
 });
 
-test("checkout redirect guard treats null payment URL as no redirect required", async () => {
+test("payment redirect guard treats a null URL as no redirect required", async () => {
   await withEnv({ REND_ENV: "production" }, () => {
-    assert.equal(checkoutRedirectUrlFromAutumnResponse({ payment_url: null }), null);
+    assert.equal(paymentRedirectUrlFromAutumnResponse({ payment_url: null }), null);
   });
 });

@@ -1,18 +1,18 @@
 "use client";
 
-import { Check, LogOut } from "lucide-react";
+import { Check, CreditCard, LogOut } from "lucide-react";
 import Link from "next/link";
-import { FormEvent, useMemo, useRef, useState } from "react";
-import type { BillingPlanCard } from "@/components/BillingPlansClient";
+import { FormEvent, useRef, useState } from "react";
 import { ArrowRight } from "@/components/marketing/Icons";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
 import { signOutOfDashboard } from "@/lib/auth-client";
+import type { BillingPaymentMethod } from "@/lib/billing";
 
 const STEPS = [
   { label: "Your name", kicker: "Welcome to Rend" },
   { label: "Organization", kicker: "Your workspace" },
-  { label: "Plan", kicker: "Almost there" },
+  { label: "Billing", kicker: "Almost there" },
 ] as const;
 
 const fieldClass =
@@ -23,13 +23,12 @@ const headingClass =
 const kickerClass = "text-[13px] font-medium text-muted";
 const leadClass = "mt-2.5 text-[14.5px] leading-[1.6] text-muted";
 
-function priceFor(plan: BillingPlanCard) {
-  return plan.priceLabel ?? (plan.id === "local" ? "Free" : "Custom");
-}
-
-function captionFor(plan: BillingPlanCard) {
-  const price = priceFor(plan);
-  return plan.intervalLabel ?? (price === "Free" ? "No monthly fee" : "Billed monthly");
+function savedPaymentMethodLabel(paymentMethod: BillingPaymentMethod) {
+  if (paymentMethod.status !== "on_file") return null;
+  const brand = paymentMethod.brand
+    ? paymentMethod.brand.charAt(0).toUpperCase() + paymentMethod.brand.slice(1)
+    : "Card";
+  return paymentMethod.last4 ? `${brand} ending in ${paymentMethod.last4}` : brand;
 }
 
 function Stepper({ step }: { step: number }) {
@@ -79,42 +78,29 @@ function Stepper({ step }: { step: number }) {
 
 export default function OnboardingClient({
   userEmail,
-  plans,
-  checkoutEnabled,
+  paymentMethod,
+  paymentSetupEnabled,
   legalAssentVersion,
 }: {
   userEmail: string;
-  plans: BillingPlanCard[];
-  checkoutEnabled: boolean;
+  paymentMethod: BillingPaymentMethod;
+  paymentSetupEnabled: boolean;
   legalAssentVersion: string;
 }) {
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState<"forward" | "back">("forward");
   const [name, setName] = useState("");
   const [orgName, setOrgName] = useState("");
-  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(() => {
-    const active = plans.find((plan) => plan.relationshipStatus === "active");
-    return active?.id ?? plans[0]?.id ?? null;
-  });
   const [submitting, setSubmitting] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [error, setError] = useState("");
-  const checkoutFormRef = useRef<HTMLFormElement>(null);
+  const paymentFormRef = useRef<HTMLFormElement>(null);
 
   const trimmedName = name.trim();
   const trimmedOrg = orgName.trim();
 
-  const selectedPlan = useMemo(
-    () => plans.find((plan) => plan.id === selectedPlanId) ?? null,
-    [plans, selectedPlanId],
-  );
-
-  const selectedNeedsCheckout = Boolean(
-    selectedPlan &&
-      checkoutEnabled &&
-      selectedPlan.attachAction !== "none" &&
-      selectedPlan.relationshipStatus !== "active",
-  );
+  const paymentReady = paymentMethod.status === "on_file" || paymentMethod.status === "not_required";
+  const needsPaymentSetup = !paymentReady && paymentSetupEnabled;
 
   function goNext() {
     setError("");
@@ -144,15 +130,14 @@ export default function OnboardingClient({
         body: JSON.stringify({
           name: trimmedName,
           organization_name: trimmedOrg,
-          plan_id: selectedPlanId,
         }),
       });
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as { message?: string } | null;
         throw new Error(payload?.message || "We could not save your details. Try again.");
       }
-      if (selectedNeedsCheckout && checkoutFormRef.current) {
-        checkoutFormRef.current.submit();
+      if (needsPaymentSetup && paymentFormRef.current) {
+        paymentFormRef.current.submit();
         return;
       }
       window.location.assign("/dashboard/assets");
@@ -267,89 +252,73 @@ export default function OnboardingClient({
 
             {step === 2 ? (
               <div className="mt-3 flex flex-col">
-                <h1 className={headingClass}>Choose your plan</h1>
+                <h1 className={headingClass}>{paymentReady ? "Billing is ready" : "Add a payment method"}</h1>
                 <p className={leadClass}>
-                  Pay only for delivered watch minutes and stored video minutes, with no base fee or
-                  lock-in.
+                  Pay as you go is automatic. There is no monthly fee, and you are billed only for
+                  delivered watch minutes and stored video minutes.
                 </p>
 
-                <div className="mt-6 flex flex-col gap-3">
-                  {plans.map((plan) => {
-                    const isSelected = plan.id === selectedPlanId;
-                    return (
-                      <button
-                        key={plan.id}
-                        type="button"
-                        aria-pressed={isSelected}
-                        onClick={() => setSelectedPlanId(plan.id)}
-                        className={cn(
-                          "flex items-start justify-between gap-4 rounded-2xl border bg-card p-4 text-left transition-all duration-200 sm:p-5",
-                          isSelected
-                            ? "border-ink shadow-[0_18px_40px_-30px_rgba(22,21,19,0.4)]"
-                            : "border-line hover:border-ink/30 hover:bg-bg-sunken/40",
-                        )}
-                      >
-                        <span className="flex min-w-0 items-start gap-3.5">
-                          <span
-                            className={cn(
-                              "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border transition-all duration-200",
-                              isSelected ? "border-ink bg-ink text-bg" : "border-line bg-card",
-                            )}
-                            aria-hidden="true"
-                          >
-                            {isSelected ? <Check className="size-3" /> : null}
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block text-[14.5px] font-medium text-ink">{plan.name}</span>
-                            {plan.description ? (
-                              <span className="mt-1 block text-[13px] leading-[1.5] text-muted">
-                                {plan.description}
-                              </span>
-                            ) : null}
-                          </span>
-                        </span>
-                        <span className="shrink-0 text-right">
-                          <span className="block font-head text-[20px] leading-none text-ink">
-                            {priceFor(plan)}
-                          </span>
-                          <span className="mt-1 block text-[12px] text-muted">{captionFor(plan)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
+                <div className="mt-6 flex items-center gap-4 rounded-2xl border border-line bg-bg-sunken/40 p-5">
+                  <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-line bg-card text-ink">
+                    <CreditCard className="size-5" aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[14.5px] font-medium text-ink">
+                      {paymentMethod.status === "on_file"
+                        ? "Card on file"
+                        : paymentMethod.status === "not_required"
+                          ? "Not required locally"
+                          : paymentMethod.status === "unknown"
+                            ? "Payment status unavailable"
+                            : "No card on file"}
+                    </p>
+                    <p className="mt-1 text-[13px] leading-[1.5] text-muted">
+                      {savedPaymentMethodLabel(paymentMethod) ??
+                        (paymentMethod.status === "not_required"
+                          ? "Local development can continue without a card."
+                          : "Add a card before your first upload or API key.")}
+                    </p>
+                  </div>
                 </div>
 
-                <p className="mt-5 text-[12.5px] leading-[1.6] text-faint">
-                  By continuing you agree to the{" "}
-                  <Link
-                    href="/terms"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-medium text-muted underline decoration-line underline-offset-2 transition hover:text-ink"
-                  >
-                    Terms
-                  </Link>{" "}
-                  and{" "}
-                  <Link
-                    href="/privacy"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-medium text-muted underline decoration-line underline-offset-2 transition hover:text-ink"
-                  >
-                    Privacy Notice
-                  </Link>
-                  , including renewal, usage, and overage charges for the plan you choose.
-                </p>
+                {needsPaymentSetup ? (
+                  <p className="mt-5 text-[12.5px] leading-[1.6] text-faint">
+                    By continuing you agree to the{" "}
+                    <Link
+                      href="/terms"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-muted underline decoration-line underline-offset-2 transition hover:text-ink"
+                    >
+                      Terms
+                    </Link>{" "}
+                    and{" "}
+                    <Link
+                      href="/privacy"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-muted underline decoration-line underline-offset-2 transition hover:text-ink"
+                    >
+                      Privacy Notice
+                    </Link>
+                    , including usage charges for delivered and stored minutes.
+                  </p>
+                ) : null}
 
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <Button type="button" variant="ghost" size="lg" onClick={goBack} disabled={submitting}>
                     Back
                   </Button>
-                  <Button type="button" size="lg" onClick={finish} disabled={submitting || !selectedPlanId}>
+                  <Button
+                    type="button"
+                    size="lg"
+                    onClick={finish}
+                    disabled={submitting || (!paymentReady && !needsPaymentSetup)}
+                  >
                     {submitting
                       ? "Setting up..."
-                      : selectedNeedsCheckout
-                        ? "Continue to checkout"
+                      : needsPaymentSetup
+                        ? "Add payment method"
                         : "Go to dashboard"}
                     {submitting ? null : <ArrowRight />}
                   </Button>
@@ -385,8 +354,7 @@ export default function OnboardingClient({
         </div>
       </div>
 
-      <form ref={checkoutFormRef} action="/api/billing/checkout" method="post" className="hidden">
-        <input type="hidden" name="plan_id" value={selectedPlanId ?? ""} />
+      <form ref={paymentFormRef} action="/api/billing/payment-method" method="post" className="hidden">
         <input type="hidden" name="return_url" value="/dashboard/assets" />
         <input type="hidden" name="legal_assent" value="accepted" />
         <input type="hidden" name="legal_assent_version" value={legalAssentVersion} />

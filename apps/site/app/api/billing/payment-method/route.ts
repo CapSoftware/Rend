@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import {
-  BILLING_EXTERNAL_REDIRECT_STATUS,
+  BILLING_REDIRECT_STATUS,
   BillingError,
-  createCheckoutRedirect,
+  createPaymentMethodRedirect,
 } from "../../../../lib/billing.ts";
 import {
   dashboardAccessErrorResponse,
@@ -19,10 +19,7 @@ function formString(formData: FormData, name: string) {
 }
 
 function billingErrorRedirect(requestUrl: string, error: unknown) {
-  const code =
-    error instanceof BillingError && error.code
-      ? error.code
-      : "billing_request_failed";
+  const code = error instanceof BillingError && error.code ? error.code : "billing_request_failed";
   const url = new URL("/dashboard/billing", requestUrl);
   url.searchParams.set("billing_error", code);
   return NextResponse.redirect(url, 303);
@@ -38,14 +35,13 @@ export async function POST(request: Request) {
       formString(formData, "legal_assent") !== "accepted" ||
       formString(formData, "legal_assent_version") !== LEGAL_ASSENT_VERSION
     ) {
-      throw new BillingError(400, "legal_assent_required", "Legal assent is required before checkout");
+      throw new BillingError(400, "legal_assent_required", "Legal assent is required before payment setup");
     }
-    const redirectUrl = await createCheckoutRedirect(access.context, {
-      planId: formString(formData, "plan_id"),
+    const redirectUrl = await createPaymentMethodRedirect(access.context, {
       returnUrl: formString(formData, "return_url"),
       requestUrl: request.url,
     });
-    return NextResponse.redirect(redirectUrl, BILLING_EXTERNAL_REDIRECT_STATUS);
+    return NextResponse.redirect(redirectUrl, BILLING_REDIRECT_STATUS);
   } catch (error) {
     return billingErrorRedirect(request.url, error);
   }

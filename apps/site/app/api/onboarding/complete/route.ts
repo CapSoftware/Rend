@@ -6,7 +6,6 @@ import {
 import {
   MAX_ONBOARDING_NAME_LENGTH,
   MAX_ONBOARDING_ORGANIZATION_NAME_LENGTH,
-  MAX_ONBOARDING_PLAN_ID_LENGTH,
   completeOnboarding,
   sanitizeOnboardingText,
 } from "../../../../lib/onboarding.ts";
@@ -43,9 +42,6 @@ export async function POST(request: Request) {
     payload.organization_name ?? payload.organizationName,
     MAX_ONBOARDING_ORGANIZATION_NAME_LENGTH
   );
-  const planId =
-    sanitizeOnboardingText(payload.plan_id ?? payload.planId, MAX_ONBOARDING_PLAN_ID_LENGTH) || null;
-
   if (!name) return errorResponse(400, "name_required", "Enter your name to continue.");
   if (!organizationName) {
     return errorResponse(400, "organization_name_required", "Enter an organization name to continue.");
@@ -57,7 +53,6 @@ export async function POST(request: Request) {
       organizationId: access.context.organizationId,
       name,
       organizationName,
-      planId,
     });
   } catch (error) {
     logAuthEvent(
@@ -77,7 +72,6 @@ export async function POST(request: Request) {
     ...authEmailSummary(access.context.userEmail),
     user_id_hash: authSubjectId(access.context.userId),
     organization_id_hash: authSubjectId(access.context.organizationId),
-    selected_plan: planId ?? "none",
   });
 
   return jsonResponse(200, { status: "ok" });
