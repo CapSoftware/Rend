@@ -1,6 +1,6 @@
 # Autumn Billing
 
-Hosted Rend has one pay-as-you-go plan and two customer-facing meters.
+Hosted Rend uses automatic pay-as-you-go billing with two customer-facing meters.
 
 | Meter | Price | What counts |
 | --- | ---: | --- |
@@ -9,6 +9,9 @@ Hosted Rend has one pay-as-you-go plan and two customer-facing meters.
 
 Encoding is included. The same rates apply to every resolution. There is no base
 fee or separate egress line item.
+
+The dashboard shows whether a payment method is on file. Adding one attaches the
+single internal pay-as-you-go plan automatically.
 
 Rend measures precise seconds internally so short playback and partial months are
 not rounded per event. Autumn prices each 60 tracked delivery seconds as one
@@ -31,6 +34,7 @@ Relevant Autumn docs:
 
 - [Usage tracking](https://docs.useautumn.com/documentation/customers/tracking-usage)
 - [Per-unit pricing](https://docs.useautumn.com/documentation/modelling-pricing/per-unit-pricing)
+- [Set up a payment method](https://docs.useautumn.com/api-reference/billing/setupPayment)
 - [Attach a plan](https://docs.useautumn.com/api-reference/billing/attach)
 - [Open the billing portal](https://docs.useautumn.com/api-reference/customers/open-billing-portal)
 
@@ -95,8 +99,9 @@ The parity command writes a redacted result under `.rend/launch/`.
 
 ## Enforcement and usage sync
 
-Uploads are checked before source bytes are accepted. The check creates or syncs
-the Autumn customer and verifies access to `storage_second_months` without
+Uploads are checked before source bytes are accepted. A customer must have a
+payment method on file with active pay-as-you-go billing. The check creates or
+syncs the Autumn customer and verifies access to `storage_second_months` without
 recording upload bytes as billable usage. An Autumn denial returns
 `403 {"error":"limit_exceeded"}`.
 

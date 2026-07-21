@@ -8,8 +8,8 @@ const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com/v1";
 const DEFAULT_AUTUMN_API_VERSION = "2.3.0";
 const DEFAULT_PAYG_PLAN_ID = "pay_as_you_go";
 const AUTUMN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-// Hosted billing redirects leave a POST route; 303 makes the browser load Stripe with GET.
-export const BILLING_EXTERNAL_REDIRECT_STATUS = 303;
+// Hosted payment redirects leave a POST route; 303 makes the browser load Stripe with GET.
+export const BILLING_REDIRECT_STATUS = 303;
 
 type JsonRecord = Record<string, unknown>;
 type BillingMode = "local" | "autumn";
@@ -30,14 +30,11 @@ export type BillingBalance = {
   nextResetAt?: string;
 };
 
-export type BillingPlan = {
-  id: string;
-  name: string;
-  description?: string;
-  priceLabel?: string;
-  intervalLabel?: string;
-  attachAction?: string;
-  relationshipStatus?: string;
+export type BillingPaymentMethod = {
+  status: "on_file" | "missing" | "not_required" | "unknown";
+  type?: string;
+  brand?: string;
+  last4?: string;
 };
 
 export type BillingSubscription = {
@@ -52,12 +49,11 @@ export type BillingOverview = {
   mode: BillingMode;
   customerId: string;
   status: BillingSyncStatus;
-  currentPlanLabel: string;
+  paymentMethod: BillingPaymentMethod;
   subscriptions: BillingSubscription[];
   balances: BillingBalance[];
-  plans: BillingPlan[];
   manageBillingEnabled: boolean;
-  checkoutEnabled: boolean;
+  paymentSetupEnabled: boolean;
   syncedAt?: string;
   error?: string;
 };
@@ -166,7 +162,7 @@ function envBoolean(name: string) {
   return ["1", "true", "yes", "on"].includes(value);
 }
 
-function checkoutUrlCandidate(result: unknown) {
+function paymentRedirectCandidate(result: unknown) {
   if (!isRecord(result)) return undefined;
   return (
     safeString(result.payment_url, 2048) ??
@@ -182,51 +178,67 @@ function stripeCheckoutMode(url: string) {
   return match?.[1] as "test" | "live" | undefined;
 }
 
-function externalCheckoutRedirectsEnabled() {
+function externalPaymentRedirectsEnabled() {
   if (isProductionProfile()) return true;
   return envBoolean("REND_ALLOW_EXTERNAL_TEST_CHECKOUT_REDIRECT");
 }
 
-export function checkoutRedirectUrlFromAutumnResponse(result: unknown) {
-  const redirectUrl = safeUrl(checkoutUrlCandidate(result));
+export function paymentRedirectUrlFromAutumnResponse(result: unknown) {
+  const redirectUrl = safeUrl(paymentRedirectCandidate(result));
   if (!redirectUrl) return null;
 
-  if (!externalCheckoutRedirectsEnabled()) {
+  if (!externalPaymentRedirectsEnabled()) {
     throw new BillingError(
       502,
-      "billing_checkout_disabled",
-      "External checkout redirects are disabled for this environment."
+      "billing_payment_setup_disabled",
+      "External payment setup is disabled for this environment."
     );
   }
 
   const url = new URL(redirectUrl);
   if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com") {
-    throw new BillingError(502, "billing_invalid_response", "Billing provider returned an unexpected checkout URL");
+    throw new BillingError(502, "billing_invalid_response", "Billing provider returned an unexpected payment URL");
   }
 
   const mode = stripeCheckoutMode(redirectUrl);
   if (isProductionProfile() && mode === "test") {
     throw new BillingError(
       502,
-      "billing_checkout_mode_mismatch",
-      "Billing checkout is not configured for live mode. Contact support."
+      "billing_payment_setup_mode_mismatch",
+      "Payment setup is not configured for live mode. Contact support."
     );
   }
   if (!isProductionProfile() && mode === "live" && !envBoolean("REND_ALLOW_LIVE_CHECKOUT_REDIRECT")) {
     throw new BillingError(
       502,
-      "billing_checkout_mode_mismatch",
-      "Live checkout redirects are disabled outside production."
+      "billing_payment_setup_mode_mismatch",
+      "Live payment redirects are disabled outside production."
     );
   }
 
   return redirectUrl;
 }
 
-export function checkoutAttachBody(context: DashboardAccessContext, planId: string, returnUrl: string): JsonRecord {
+function paygPlanId() {
+  return envString("REND_AUTUMN_PLAN_PAYG_ID", DEFAULT_PAYG_PLAN_ID);
+}
+
+export function paymentSetupBody(
+  context: DashboardAccessContext,
+  returnUrl: string,
+  attachPayg = true
+): JsonRecord {
+  return {
+    customer_id: customerId(context),
+    success_url: returnUrl,
+    ...(attachPayg ? { plan_id: paygPlanId() } : {}),
+  };
+}
+
+export function automaticPaygAttachBody(context: DashboardAccessContext, returnUrl: string): JsonRecord {
   const body: JsonRecord = {
     customer_id: customerId(context),
-    plan_id: planId,
+    plan_id: paygPlanId(),
     redirect_mode: "if_required",
     success_url: returnUrl,
     checkout_session_params: {
@@ -234,7 +246,7 @@ export function checkoutAttachBody(context: DashboardAccessContext, planId: stri
     },
   };
 
-  if (!externalCheckoutRedirectsEnabled()) {
+  if (!externalPaymentRedirectsEnabled()) {
     body.redirect_mode = "never";
     body.no_billing_changes = true;
     body.enable_plan_immediately = true;
@@ -461,50 +473,18 @@ function normalizeSubscriptions(value: unknown) {
     : [];
 }
 
-function planPriceLabels(raw: JsonRecord) {
-  const price = raw.price;
-  if (!isRecord(price)) return {};
-  const display = price.display;
-  const primary = isRecord(display) ? safeString(display.primaryText ?? display.primary_text, 80) : undefined;
-  const secondary = isRecord(display) ? safeString(display.secondaryText ?? display.secondary_text, 80) : undefined;
+export function normalizeBillingPaymentMethod(value: unknown): BillingPaymentMethod {
+  if (value === null || value === undefined) return { status: "missing" };
+  if (!isRecord(value)) return { status: "unknown" };
+  if (Object.keys(value).length === 0) return { status: "missing" };
+
+  const card = isRecord(value.card) ? value.card : value;
   return {
-    priceLabel: primary,
-    intervalLabel: secondary,
+    status: "on_file",
+    type: safeString(value.type, 40),
+    brand: safeString(card.display_brand ?? card.displayBrand ?? card.brand, 40),
+    last4: safeString(card.last4 ?? card.last_four ?? card.lastFour, 4),
   };
-}
-
-function normalizePlan(raw: unknown): BillingPlan | null {
-  if (!isRecord(raw)) return null;
-  if (!isCustomerFacingPlan(raw)) return null;
-  const id = safeString(raw.id);
-  const name = safeString(raw.name);
-  if (!id || !name) return null;
-  const eligibility = raw.customerEligibility ?? raw.customer_eligibility;
-  const price = planPriceLabels(raw);
-  return {
-    id,
-    name,
-    description: safeString(raw.description, 240),
-    priceLabel: price.priceLabel,
-    intervalLabel: price.intervalLabel,
-    attachAction: isRecord(eligibility) ? safeString(eligibility.attachAction ?? eligibility.attach_action, 40) : undefined,
-    relationshipStatus: isRecord(eligibility) ? safeString(eligibility.status, 40) : undefined,
-  };
-}
-
-function isCustomerFacingPlan(raw: JsonRecord) {
-  const id = safeString(raw.id);
-  if (!id) return false;
-  if (raw.archived === true || raw.add_on === true || raw.addOn === true) return false;
-  return id === envString("REND_AUTUMN_PLAN_PAYG_ID", DEFAULT_PAYG_PLAN_ID);
-}
-
-export function normalizeBillingPlans(value: unknown) {
-  const list = isRecord(value) && Array.isArray(value.list) ? value.list : Array.isArray(value) ? value : [];
-  return list.flatMap((item) => {
-    const plan = normalizePlan(item);
-    return plan ? [plan] : [];
-  });
 }
 
 async function localUsage(context: DashboardAccessContext) {
@@ -534,7 +514,7 @@ async function localBillingOverview(context: DashboardAccessContext): Promise<Bi
     mode: "local",
     customerId: customerId(context),
     status: "ok",
-    currentPlanLabel: "Local development",
+    paymentMethod: { status: "not_required" },
     subscriptions: [{ planId: "local", status: "active" }],
     balances: [
       {
@@ -548,23 +528,10 @@ async function localBillingOverview(context: DashboardAccessContext): Promise<Bi
         unlimited: true,
       },
     ],
-    plans: [
-      {
-        id: "local",
-        name: "Local development",
-        description: "Autumn is disabled for this local profile.",
-        relationshipStatus: "active",
-      },
-    ],
     manageBillingEnabled: false,
-    checkoutEnabled: false,
+    paymentSetupEnabled: false,
     syncedAt: new Date().toISOString(),
   };
-}
-
-function currentPlanLabel(subscriptions: BillingSubscription[]) {
-  const active = subscriptions.find((subscription) => subscription.status === "active") ?? subscriptions[0];
-  return active?.planId ?? "No active plan";
 }
 
 type StoredBillingStateRow = {
@@ -587,18 +554,19 @@ function billingOverviewFromStoredState(
         return balance ? [balance] : [];
       })
     : [];
-  const plans = normalizeBillingPlans(Array.isArray(state.plans) ? state.plans : []);
   const mode = billingMode();
+  const paymentMethod = Object.hasOwn(state, "paymentMethod")
+    ? normalizeBillingPaymentMethod(state.paymentMethod)
+    : { status: "unknown" as const };
   return {
     mode,
     customerId: customerId(context),
     status,
-    currentPlanLabel: currentPlanLabel(subscriptions),
+    paymentMethod,
     subscriptions,
     balances,
-    plans,
-    manageBillingEnabled: status === "ok" && mode === "autumn",
-    checkoutEnabled: status === "ok" && mode === "autumn",
+    manageBillingEnabled: status === "ok" && mode === "autumn" && paymentMethod.status === "on_file",
+    paymentSetupEnabled: status === "ok" && mode === "autumn",
     syncedAt: isoDate(row.billing_state_synced_at),
     error:
       error instanceof Error
@@ -644,7 +612,12 @@ async function autumnBillingOverview(context: DashboardAccessContext): Promise<B
   try {
     customer = await autumnPost(
       "/customers.get_or_create",
-      autumnCustomerSyncBody(context, ["subscriptions.plan", "purchases.plan", "balances.feature"])
+      autumnCustomerSyncBody(context, [
+        "payment_method",
+        "subscriptions.plan",
+        "purchases.plan",
+        "balances.feature",
+      ])
     );
   } catch (error) {
     await writeBillingCustomerSync(context.organizationId, {
@@ -664,21 +637,19 @@ async function autumnBillingOverview(context: DashboardAccessContext): Promise<B
     throw error;
   }
 
-  const plans = await autumnPost("/plans.list", {
-    customer_id: customerId(context),
-  }).catch(() => ({ list: [] }));
-
   const subscriptions = normalizeSubscriptions(isRecord(customer) ? customer.subscriptions : undefined);
+  const paymentMethod = normalizeBillingPaymentMethod(
+    isRecord(customer) ? customer.paymentMethod ?? customer.payment_method : undefined
+  );
   const overview: BillingOverview = {
     mode: "autumn",
     customerId: customerId(context),
     status: "ok",
-    currentPlanLabel: currentPlanLabel(subscriptions),
+    paymentMethod,
     subscriptions,
     balances: normalizeBalances(isRecord(customer) ? customer.balances : undefined),
-    plans: normalizeBillingPlans(plans),
-    manageBillingEnabled: true,
-    checkoutEnabled: true,
+    manageBillingEnabled: paymentMethod.status === "on_file",
+    paymentSetupEnabled: true,
     syncedAt: new Date().toISOString(),
   };
   await writeBillingCustomerSync(context.organizationId, {
@@ -688,7 +659,7 @@ async function autumnBillingOverview(context: DashboardAccessContext): Promise<B
     billingState: {
       subscriptions: overview.subscriptions,
       balances: overview.balances,
-      plans: overview.plans,
+      paymentMethod: overview.paymentMethod,
     },
     billingStateSyncedAt: new Date(),
     billingStateError: null,
@@ -710,12 +681,11 @@ async function fallbackBillingOverview(context: DashboardAccessContext, error: u
     mode: billingMode(),
     customerId: customerId(context),
     status: "not_configured",
-    currentPlanLabel: "No active plan",
+    paymentMethod: { status: "unknown" },
     subscriptions: [],
     balances: [],
-    plans: [],
     manageBillingEnabled: false,
-    checkoutEnabled: false,
+    paymentSetupEnabled: false,
     error: error instanceof Error ? error.message : "Billing state could not be loaded",
   };
 }
@@ -740,10 +710,7 @@ export async function billingOverview(
 
 function activeBillingRelationship(overview: BillingOverview) {
   if (overview.mode === "local") return true;
-  if (overview.subscriptions.some((subscription) => subscription.status.toLowerCase() === "active")) {
-    return true;
-  }
-  return overview.plans.some((plan) => plan.relationshipStatus?.toLowerCase() === "active");
+  return overview.subscriptions.some((subscription) => subscription.status.toLowerCase() === "active");
 }
 
 function exhaustedBalance(overview: BillingOverview) {
@@ -772,13 +739,33 @@ export function billingReadinessFromOverview(overview: BillingOverview): Billing
     };
   }
 
+  if (overview.paymentMethod.status === "unknown") {
+    return {
+      status: "billing_unavailable",
+      code: "billing_unavailable",
+      message: "Payment status could not be verified. Try again after billing sync recovers.",
+      actionHref: "/dashboard/billing",
+      actionLabel: "Review billing",
+    };
+  }
+
+  if (overview.paymentMethod.status === "missing") {
+    return {
+      status: "billing_required",
+      code: "billing_required",
+      message: "Add a payment method before creating API keys or uploading billable media.",
+      actionHref: "/dashboard/billing",
+      actionLabel: "Add payment method",
+    };
+  }
+
   if (!activeBillingRelationship(overview)) {
     return {
       status: "billing_required",
       code: "billing_required",
-      message: "Choose a plan before creating API keys or uploading billable media.",
+      message: "Your payment method is saved, but pay-as-you-go billing is not active yet.",
       actionHref: "/dashboard/billing",
-      actionLabel: "Choose a plan",
+      actionLabel: "Finish billing setup",
     };
   }
 
@@ -787,7 +774,7 @@ export function billingReadinessFromOverview(overview: BillingOverview): Billing
     return {
       status: "plan_limit_exceeded",
       code: "limit_exceeded",
-      message: `Plan limit exceeded for ${balance.featureId}. Update billing before uploading more media.`,
+      message: `Billing limit reached for ${balance.featureId}. Update billing before uploading more media.`,
       actionHref: "/dashboard/billing",
       actionLabel: "Update billing",
     };
@@ -813,11 +800,6 @@ export async function requireBillingReady(context: DashboardAccessContext) {
   return { overview, readiness };
 }
 
-function safePlanId(value: unknown) {
-  const planId = safeString(value, 128);
-  return planId && /^[A-Za-z0-9_.:-]+$/.test(planId) ? planId : null;
-}
-
 function safeReturnUrl(value: unknown, fallbackOrigin: string) {
   const fallback = new URL("/dashboard/billing", fallbackOrigin);
   const raw = safeString(value, 2048);
@@ -831,20 +813,36 @@ function safeReturnUrl(value: unknown, fallbackOrigin: string) {
   }
 }
 
-export async function createCheckoutRedirect(
+export async function createPaymentMethodRedirect(
   context: DashboardAccessContext,
-  input: { planId: unknown; returnUrl: unknown; requestUrl: string }
+  input: { returnUrl: unknown; requestUrl: string }
 ) {
   if (billingMode() !== "autumn") {
-    throw new BillingError(400, "billing_local_mode", "Checkout is disabled in local billing mode");
+    throw new BillingError(400, "billing_local_mode", "Payment setup is disabled in local billing mode");
   }
-  const planId = safePlanId(input.planId);
-  if (!planId) throw new BillingError(400, "invalid_plan", "Plan is invalid");
-  await ensureBillingCustomer(context);
   const requestOrigin = new URL(input.requestUrl).origin;
   const returnUrl = safeReturnUrl(input.returnUrl, requestOrigin);
-  const result = await autumnPost("/billing.attach", checkoutAttachBody(context, planId, returnUrl));
-  return checkoutRedirectUrlFromAutumnResponse(result) ?? returnUrl;
+  const overview = await billingOverview(context);
+  if (overview.status !== "ok") {
+    throw new BillingError(503, "billing_unavailable", "Billing state could not be verified");
+  }
+
+  const hasActiveBilling = activeBillingRelationship(overview);
+  if (overview.paymentMethod.status === "on_file") {
+    if (hasActiveBilling) return returnUrl;
+    const result = await autumnPost("/billing.attach", automaticPaygAttachBody(context, returnUrl));
+    return paymentRedirectUrlFromAutumnResponse(result) ?? returnUrl;
+  }
+
+  const result = await autumnPost(
+    "/billing.setup_payment",
+    paymentSetupBody(context, returnUrl, !hasActiveBilling)
+  );
+  const redirectUrl = paymentRedirectUrlFromAutumnResponse(result);
+  if (!redirectUrl) {
+    throw new BillingError(502, "billing_invalid_response", "Billing provider did not return a payment URL");
+  }
+  return redirectUrl;
 }
 
 export async function createPortalRedirect(

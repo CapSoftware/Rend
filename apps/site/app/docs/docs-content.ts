@@ -16,7 +16,7 @@ export const docsNavItems: DocsNavItem[] = [
     href: "#quickstart",
     title: "Quickstart",
     description:
-      "Sign up, choose a plan, create a key, upload, embed, and delete.",
+      "Sign up, add a payment method, create a key, upload, embed, and delete.",
   },
   {
     href: "#agent-setup",
@@ -135,7 +135,7 @@ export const QUICKSTART_SDK_CODE = `import { readFile } from "node:fs/promises";
 import { RendClient } from "@rend-sdk/client";
 
 // 1. Sign in at https://rend.so/login with an email code.
-// 2. Choose a plan in the dashboard.
+// 2. Add a payment method for automatic pay-as-you-go billing.
 // 3. Create an API key with upload, read, delete, and analytics scopes.
 const client = new RendClient({
   apiKey: process.env.REND_API_KEY,
@@ -234,7 +234,7 @@ export const CURL_UPLOAD_CODE = `export REND_API_KEY="rend_live_..."
 export REND_API_BASE_URL="https://api.rend.so"
 export REND_SITE_BASE_URL="https://rend.so"
 
-# First: sign in at https://rend.so/login, choose a plan, and create an API key.
+# First: sign in at https://rend.so/login, add a payment method, and create an API key.
 # Compatibility: one-shot raw uploads remain supported at /v1/videos.
 
 curl -fsS -X POST "$REND_API_BASE_URL/v1/videos" \\

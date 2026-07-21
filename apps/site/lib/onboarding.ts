@@ -5,7 +5,6 @@ import { getSiteDb } from "./server-db.ts";
 export const ONBOARDING_PATH = "/onboarding";
 export const MAX_ONBOARDING_NAME_LENGTH = 80;
 export const MAX_ONBOARDING_ORGANIZATION_NAME_LENGTH = 80;
-export const MAX_ONBOARDING_PLAN_ID_LENGTH = 128;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -38,7 +37,6 @@ export type CompleteOnboardingInput = {
   organizationId: string;
   name: string;
   organizationName: string;
-  planId?: string | null;
 };
 
 export async function completeOnboarding(input: CompleteOnboardingInput): Promise<void> {
@@ -62,7 +60,6 @@ export async function completeOnboarding(input: CompleteOnboardingInput): Promis
     onboarding: {
       ...asRecord(existing.onboarding),
       completed_at: now.toISOString(),
-      plan_id: input.planId ?? null,
     },
   };
 

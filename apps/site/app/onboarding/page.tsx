@@ -27,8 +27,8 @@ export default async function OnboardingPage() {
   return (
     <OnboardingClient
       userEmail={access.userEmail}
-      plans={billing.plans}
-      checkoutEnabled={billing.checkoutEnabled}
+      paymentMethod={billing.paymentMethod}
+      paymentSetupEnabled={billing.paymentSetupEnabled}
       legalAssentVersion={LEGAL_ASSENT_VERSION}
     />
   );

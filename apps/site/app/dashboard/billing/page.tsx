@@ -8,6 +8,7 @@ import {
   billingReadinessFromOverview,
   type BillingBalance,
   type BillingOverview,
+  type BillingPaymentMethod,
 } from "../../../lib/billing.ts";
 import {
   BILLING_USAGE_RANGE_OPTIONS,
@@ -22,7 +23,6 @@ import { requireDashboardAccess } from "../../../lib/dashboard-auth-next.ts";
 import { dashboardStateFromBilling } from "../../../lib/dashboard-state.ts";
 import { LEGAL_ASSENT_VERSION } from "../../../lib/legal-assent-constants.ts";
 import { getPublicPricing, type PublicPricing } from "../../../lib/pricing.ts";
-import BillingPlansClient from "@/components/BillingPlansClient";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
 import {
@@ -65,7 +65,7 @@ type BillingPageProps = {
   }>;
 };
 
-type BillingTab = "overview" | "usage" | "plans";
+type BillingTab = "overview" | "usage";
 
 type UsageRow = {
   featureId: string;
@@ -77,7 +77,6 @@ type UsageRow = {
 const BILLING_TABS: { value: BillingTab; label: string }[] = [
   { value: "overview", label: "Overview" },
   { value: "usage", label: "Usage" },
-  { value: "plans", label: "Plans" },
 ];
 
 function firstParam(value: string | string[] | undefined) {
@@ -86,7 +85,7 @@ function firstParam(value: string | string[] | undefined) {
 
 function normalizeBillingTab(value: string | string[] | undefined): BillingTab {
   const tab = firstParam(value);
-  return tab === "usage" || tab === "plans" ? tab : "overview";
+  return tab === "usage" ? tab : "overview";
 }
 
 function billingTabHref(tab: BillingTab, range: BillingUsageRange) {
@@ -390,55 +389,65 @@ function UsageRangeLinks({ activeRange }: { activeRange: BillingUsageRange }) {
 
 function billingActionErrorMessage(code: string | undefined) {
   if (!code) return "";
-  if (code === "billing_checkout_mode_mismatch") {
-    return "Checkout is not configured for this environment. Check the Autumn and Stripe mode, then try again.";
+  if (code === "billing_payment_setup_mode_mismatch") {
+    return "Payment setup is not configured for this environment. Check the Autumn and Stripe mode, then try again.";
   }
-  if (code === "billing_checkout_disabled") {
-    return "External checkout is disabled for this environment. Local plan activation should complete without Stripe.";
+  if (code === "billing_payment_setup_disabled") {
+    return "External payment setup is disabled for this environment.";
   }
   if (code === "billing_invalid_response") {
-    return "Billing returned an unexpected checkout response. Check the Autumn checkout configuration.";
+    return "Billing returned an unexpected payment response. Check the Autumn payment configuration.";
   }
   if (code === "billing_provider_rejected_request") {
-    return "Billing rejected the plan activation request. Check the plan configuration in Autumn.";
+    return "Billing rejected the payment setup request. Check the billing configuration in Autumn.";
   }
   if (code === "legal_assent_required") {
-    return "Review and accept the Rend Terms and Privacy Notice before choosing a plan.";
+    return "Review and accept the Rend Terms and Privacy Notice before adding a payment method.";
   }
-  if (code === "invalid_plan") {
-    return "The selected plan is not available.";
-  }
-  return "Plan activation could not be started. Check billing configuration and try again.";
+  return "Payment setup could not be started. Check billing configuration and try again.";
 }
 
-function planNote(billing: BillingOverview) {
+function paymentMethodTitle(billing: BillingOverview) {
+  if (billing.status !== "ok" || billing.paymentMethod.status === "unknown") {
+    return "Payment status unavailable";
+  }
+  if (billing.paymentMethod.status === "not_required") return "Not required locally";
+  return billing.paymentMethod.status === "on_file" ? "Card on file" : "No card on file";
+}
+
+function paymentMethodDetails(paymentMethod: BillingPaymentMethod) {
+  if (paymentMethod.status !== "on_file") return null;
+  const brand = paymentMethod.brand
+    ? paymentMethod.brand.charAt(0).toUpperCase() + paymentMethod.brand.slice(1)
+    : paymentMethod.type === "card"
+      ? "Card"
+      : "Payment method";
+  return paymentMethod.last4 ? `${brand} ending in ${paymentMethod.last4}` : brand;
+}
+
+function paymentMethodNote(billing: BillingOverview, pricing: PublicPricing) {
   if (billing.status !== "ok") {
     return "Showing your last saved billing state while sync catches up.";
   }
   if (billing.mode === "local") {
-    return "Local mode is on, so uploads and API keys work without a paid plan.";
+    return "Local mode is on, so uploads and API keys work without a payment method.";
   }
-  const active = billing.subscriptions.find((subscription) => subscription.status.toLowerCase() === "active");
-  const renews = formatDate(active?.currentPeriodEnd);
-  if (renews) return `Renews on ${renews}. You only pay for what you deliver and store.`;
-  return "You only pay for what you deliver and store, with no lock-in.";
+  const details = paymentMethodDetails(billing.paymentMethod);
+  if (details) return `${details}. You are billed only for delivered and stored minutes.`;
+  return `Add a card to use Rend. There is no monthly fee. Delivery is ${pricing.delivery.priceLabel} per minute and storage is ${pricing.storage.priceLabel} per stored minute per month.`;
 }
 
-function CurrentPlanPanel({
+function BillingSummaryPanel({
   billing,
   usage,
   pricing,
-  healthy,
-  statusLabel,
+  returnUrl,
 }: {
   billing: BillingOverview;
   usage: ReturnType<typeof groupUsage>;
   pricing: PublicPricing;
-  healthy: boolean;
-  statusLabel: string;
+  returnUrl: string;
 }) {
-  const activePlan = billing.plans.find((plan) => plan.relationshipStatus === "active");
-  const currentPlanName = activePlan?.name ?? billing.currentPlanLabel;
   const deliverySeconds = usage.delivery.reduce((total, row) => total + (usedValue(row.balance) ?? 0), 0);
   const storageSecondMonths = usage.storage.reduce((total, row) => total + (usedValue(row.balance) ?? 0), 0);
   const deliveryMinutes = deliverySeconds / 60;
@@ -446,20 +455,64 @@ function CurrentPlanPanel({
   const estimatedCost =
     deliveryMinutes * pricing.calculator.deliveryPerMinute +
     storageMinutes * pricing.calculator.storagePerMinuteMonth;
+  const activeBilling = billing.subscriptions.some(
+    (subscription) => subscription.status.toLowerCase() === "active"
+  );
+  const needsSetup =
+    billing.paymentMethod.status === "missing" ||
+    (billing.paymentMethod.status === "on_file" && !activeBilling);
+  const setupLabel = billing.paymentMethod.status === "on_file" ? "Finish billing setup" : "Add payment method";
 
   return (
     <section className="animate-rise rounded-[18px] border border-line bg-card p-6 sm:p-7">
-      <div className="flex flex-col gap-7 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-col gap-7 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <p className="text-[13px] text-muted">Your plan</p>
+          <p className="text-[13px] text-muted">Payment method</p>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
-            <h2 className="font-head text-[clamp(26px,4vw,32px)] leading-none text-ink">{currentPlanName}</h2>
-            <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
-              <span className={cn("size-1.5 rounded-full", healthy ? "bg-live" : "bg-[#c79a2e]")} />
-              {statusLabel}
-            </span>
+            <h2 className="font-head text-[clamp(26px,4vw,32px)] leading-none text-ink">
+              {paymentMethodTitle(billing)}
+            </h2>
+            <StatusBadge tone={billing.paymentMethod.status === "on_file" ? "success" : "neutral"}>
+              Pay as you go
+            </StatusBadge>
           </div>
-          <p className="mt-3 max-w-[460px] text-[13.5px] leading-[1.55] text-muted">{planNote(billing)}</p>
+          <p className="mt-3 max-w-[520px] text-[13.5px] leading-[1.55] text-muted">
+            {paymentMethodNote(billing, pricing)}
+          </p>
+
+          {needsSetup && billing.paymentSetupEnabled ? (
+            <div className="mt-5">
+              <form action="/api/billing/payment-method" method="post">
+                <input name="return_url" type="hidden" value={returnUrl} />
+                <input name="legal_assent_version" type="hidden" value={LEGAL_ASSENT_VERSION} />
+                <input name="legal_assent" type="hidden" value="accepted" />
+                <Button type="submit" size="md">
+                  <CreditCard className="size-4" />
+                  {setupLabel}
+                </Button>
+              </form>
+              <p className="mt-2.5 max-w-[520px] text-[11.5px] leading-[1.5] text-faint">
+                By continuing you agree to the{" "}
+                <Link href="/terms" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+                  Terms
+                </Link>{" "}
+                and{" "}
+                <Link href="/privacy" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+                  Privacy Notice
+                </Link>
+                , including usage charges for delivered and stored minutes.
+              </p>
+            </div>
+          ) : null}
+
+          {billing.manageBillingEnabled && activeBilling ? (
+            <form action="/api/billing/portal" method="post" className="mt-5">
+              <input name="return_url" type="hidden" value={returnUrl} />
+              <Button type="submit" variant="secondary" size="md">
+                Manage payment method
+              </Button>
+            </form>
+          ) : null}
         </div>
 
         <div className="rounded-2xl border border-line-soft bg-bg-sunken/40 p-5 md:w-[320px] md:shrink-0">
@@ -481,25 +534,17 @@ function OverviewTab({
   usage,
   pricing,
   hasBreakdown,
-  healthy,
-  statusLabel,
+  returnUrl,
 }: {
   billing: BillingOverview;
   usage: ReturnType<typeof groupUsage>;
   pricing: PublicPricing;
   hasBreakdown: boolean;
-  healthy: boolean;
-  statusLabel: string;
+  returnUrl: string;
 }) {
   return (
     <div className="flex flex-col gap-7">
-      <CurrentPlanPanel
-        billing={billing}
-        usage={usage}
-        pricing={pricing}
-        healthy={healthy}
-        statusLabel={statusLabel}
-      />
+      <BillingSummaryPanel billing={billing} usage={usage} pricing={pricing} returnUrl={returnUrl} />
 
       {hasBreakdown ? (
         <Panel
@@ -533,7 +578,7 @@ function OverviewTab({
           {usage.other.length > 0 ? (
             <UsageGroup
               title="Other"
-              caption="Other metered features on your plan"
+              caption="Other metered features on your billing account"
               rows={usage.other}
               className={usage.delivery.length > 0 || usage.storage.length > 0 ? "mt-8 border-t border-line-soft pt-8" : undefined}
             />
@@ -674,7 +719,7 @@ function UsageTab({
             {usage.other.length > 0 ? (
               <UsageGroup
                 title="Other"
-                caption="Other metered features on your plan"
+                caption="Other metered features on your billing account"
                 rows={usage.other}
                 className={usage.delivery.length > 0 || usage.storage.length > 0 ? "mt-8 border-t border-line-soft pt-8" : undefined}
               />
@@ -766,31 +811,6 @@ function UsageTab({
   );
 }
 
-function PlansTab({ billing, returnUrl }: { billing: BillingOverview; returnUrl: string }) {
-  return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="font-head text-[20px] leading-none text-ink">Plans</h2>
-        <p className="mt-2 text-[13px] text-muted">
-          Pay as you go has no monthly fee. Delivery and storage are billed directly by the minute.
-        </p>
-      </div>
-      {billing.plans.length === 0 ? (
-        <div className="rounded-[18px] border border-line bg-card p-7 text-[13.5px] text-muted">
-          No plans are available.
-        </div>
-      ) : (
-        <BillingPlansClient
-          plans={billing.plans}
-          checkoutEnabled={billing.checkoutEnabled}
-          returnUrl={returnUrl}
-          legalAssentVersion={LEGAL_ASSENT_VERSION}
-        />
-      )}
-    </div>
-  );
-}
-
 export default async function BillingPage({ searchParams }: BillingPageProps) {
   const access = await requireDashboardAccess("/dashboard/billing");
   const params = searchParams ? await searchParams : {};
@@ -809,31 +829,16 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
 
   const usage = groupUsage(billing.balances);
   const hasBreakdown = usage.delivery.length > 0 || usage.storage.length > 0 || usage.other.length > 0;
-  const healthy = billing.status === "ok";
-  const statusLabel = !healthy ? "Sync issue" : billing.mode === "local" ? "Local mode" : "Active";
 
   return (
     <>
-      <SubHeader
-        title="Billing"
-        docsHref="/docs#billing-usage"
-        actions={
-          <form action="/api/billing/portal" method="post">
-            <input name="return_url" type="hidden" value={returnUrl} />
-            <Button type="submit" variant="secondary" size="sm" disabled={!billing.manageBillingEnabled}>
-              <Wallet className="size-4" />
-              <span className="hidden sm:inline">Manage billing</span>
-              <span className="sm:hidden">Manage</span>
-            </Button>
-          </form>
-        }
-      />
+      <SubHeader title="Billing" docsHref="/docs#billing-usage" />
 
       <DashboardContent>
         <div className="mb-6 flex flex-col gap-3 empty:hidden">
           {billing.error ? <Callout tone="danger">{billing.error}</Callout> : null}
           {billingActionError ? <Callout tone="danger">{billingActionError}</Callout> : null}
-          {dashboardState.status !== "ready_to_upload" ? (
+          {dashboardState.status !== "ready_to_upload" && dashboardState.status !== "billing_required" ? (
             <Callout
               tone={dashboardState.status === "billing_unavailable" ? "danger" : "warn"}
               title={dashboardState.title}
@@ -851,16 +856,13 @@ export default async function BillingPage({ searchParams }: BillingPageProps) {
             usage={usage}
             pricing={pricing}
             hasBreakdown={hasBreakdown}
-            healthy={healthy}
-            statusLabel={statusLabel}
+            returnUrl={returnUrl}
           />
         ) : null}
 
         {activeTab === "usage" && usageDetails ? (
           <UsageTab details={usageDetails} usage={usage} hasBreakdown={hasBreakdown} range={range} />
         ) : null}
-
-        {activeTab === "plans" ? <PlansTab billing={billing} returnUrl={returnUrl} /> : null}
       </DashboardContent>
     </>
   );
